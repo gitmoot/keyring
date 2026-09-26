@@ -63,15 +63,34 @@ func CheckUpstream(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// LoadTokens reads "<role>.token" files from dir. The directory and every
-// token file must be private to their owner.
+// LoadTokens reads "<role>.token" files from dir. The directory must be a real
+// directory (not a symlink), owned by the user running the relay, and closed
+// to other users; each token file likewise. Files are checked after they are
+// opened, with symlinks refused, so a file swapped between check and read is
+// never trusted.
 func LoadTokens(dir string) (map[string]string, error) {
-	info, err := os.Stat(dir)
+	info, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("%s is open to other users (mode %04o); run chmod 700 %s", dir, perm, dir)
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s must be a directory, not a symlink or file", dir)
+	}
+	if err := private(dir, info, 0o077, "chmod 700"); err != nil {
+		return nil, err
+	}
+	// Whoever can rename entries in the parent could swap the directory after
+	// this check, so the parent must be closed to other users too.
+	parent := filepath.Dir(filepath.Clean(dir))
+	pinfo, err := os.Lstat(parent)
+	if err != nil {
+		return nil, err
+	}
+	if !pinfo.IsDir() {
+		return nil, fmt.Errorf("%s must be a real directory", parent)
+	}
+	if err := private(parent, pinfo, 0o022, "chmod go-w"); err != nil {
+		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -86,22 +105,9 @@ func LoadTokens(dir string) (map[string]string, error) {
 		if !roleName.MatchString(role) {
 			return nil, fmt.Errorf("token file %s: invalid role name", e.Name())
 		}
-		path := filepath.Join(dir, e.Name())
-		fi, err := os.Lstat(path)
+		token, err := readToken(filepath.Join(dir, e.Name()))
 		if err != nil {
 			return nil, err
-		}
-		if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("%s must be a regular file with mode 600", path)
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		token := strings.TrimSpace(string(raw))
-		if !tokenText.MatchString(token) {
-			// Never print the file's content.
-			return nil, fmt.Errorf("%s does not hold a valid token", path)
 		}
 		tokens[role] = token
 	}
@@ -109,6 +115,52 @@ func LoadTokens(dir string) (map[string]string, error) {
 		return nil, fmt.Errorf("no <role>.token files in %s", dir)
 	}
 	return tokens, nil
+}
+
+func readToken(path string) (string, error) {
+	// O_NONBLOCK: opening a FIFO must not wait for a writer; the regular-file
+	// check below then refuses it.
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)
+	if err != nil {
+		return "", fmt.Errorf("%s: open without following symlinks: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%s must be a regular file", path)
+	}
+	if err := private(path, fi, 0o077, "chmod 600"); err != nil {
+		return "", err
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(raw))
+	if !tokenText.MatchString(token) {
+		// Never print the file's content.
+		return "", fmt.Errorf("%s does not hold a valid token", path)
+	}
+	return token, nil
+}
+
+// private checks that info is owned by the current user and has none of the
+// bits in open set.
+func private(path string, info os.FileInfo, open os.FileMode, fix string) error {
+	if perm := info.Mode().Perm(); perm&open != 0 {
+		return fmt.Errorf("%s is open to other users (mode %04o); run %s %s", path, perm, fix, path)
+	}
+	uid, ok := ownerUID(info)
+	if !ok {
+		return fmt.Errorf("%s: cannot read owner on this platform", path)
+	}
+	if uid != os.Geteuid() {
+		return fmt.Errorf("%s is owned by uid %d, not the relay's user (uid %d)", path, uid, os.Geteuid())
+	}
+	return nil
 }
 
 // New builds a relay. upstream must have passed CheckUpstream.

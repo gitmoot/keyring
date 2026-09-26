@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
@@ -221,5 +223,78 @@ func TestRelayThroughRealKeyringEndToEnd(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("health %d", resp.StatusCode)
+	}
+}
+
+func writeTokenDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "tokens")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "phobos.token"), []byte(tokenPhobos+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestLoadTokensRefusesSymlinks(t *testing.T) {
+	dir := writeTokenDir(t)
+	link := filepath.Join(t.TempDir(), "tokens-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(link); err == nil {
+		t.Fatal("symlinked token directory accepted")
+	}
+	outside := filepath.Join(t.TempDir(), "elsewhere.token")
+	if err := os.WriteFile(outside, []byte(tokenJoltra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "joltra.token")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil {
+		t.Fatal("symlinked token file accepted")
+	}
+}
+
+func TestLoadTokensRefusesADirectoryOwnedBySomeoneElse(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to hand the directory to another user")
+	}
+	dir := writeTokenDir(t)
+	if err := os.Chown(dir, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil || !strings.Contains(err.Error(), "owned by uid 65534") {
+		t.Fatalf("err = %v, want refusal naming the owner", err)
+	}
+}
+
+func TestLoadTokensRefusesAFIFOWithoutHanging(t *testing.T) {
+	dir := writeTokenDir(t)
+	if err := syscall.Mkfifo(filepath.Join(dir, "joltra.token"), 0o600); err != nil {
+		t.Skip("no mkfifo here:", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := LoadTokens(dir); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("FIFO token file accepted")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("LoadTokens hung on a FIFO")
+	}
+}
+
+func TestLoadTokensRefusesAParentOthersCanWrite(t *testing.T) {
+	dir := writeTokenDir(t)
+	if err := os.Chmod(filepath.Dir(dir), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil {
+		t.Fatal("token directory under a world-writable parent accepted")
 	}
 }

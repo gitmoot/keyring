@@ -97,7 +97,7 @@ The relay listens only on loopback, holds one token per role (never an API key),
 keyring relay --listen 127.0.0.1:7700 --upstream http://100.111.92.43:7701 --tokens /etc/keyring/tokens
 ```
 
-`/etc/keyring/tokens` must be mode 700, and each `<role>.token` file mode 600. A call picks its role in the path:
+`/etc/keyring/tokens` must be a real directory (not a symlink), owned by the relay's user, mode 700, inside a parent that only that user can write (for example root-owned `/etc/keyring`). Each `<role>.token` file must be a regular file owned by that user, mode 600. A call picks its role in the path:
 
 ```sh
 curl http://127.0.0.1:7700/phobos/openrouter/api/v1/models
