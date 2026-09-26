@@ -47,20 +47,26 @@ trusted_tree() { # $1: a real directory path (pwd -P)
 		d=$(dirname "$d")
 	done
 }
-for f in "$0" "$BIN_SRC"; do
+# Resolve both files to their real paths ONCE, check those, and use only
+# those afterwards: a symlink anywhere in the typed path could otherwise be
+# swapped after the check. The running script is already open, so only its
+# location needs checking.
+real_path() { printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"; }
+SCRIPT_REAL=$(real_path "$0")
+BIN_REAL=$(real_path "$BIN_SRC")
+for f in "$SCRIPT_REAL" "$BIN_REAL"; do
 	if [ -L "$f" ] || ! [ -f "$f" ] || ! trusted "$f"; then
 		echo "refusing: $f must be a regular root-owned file, not writable by group or others." >&2
 		echo "Copy the release into a root-only directory first (see README.md)." >&2
 		exit 1
 	fi
-done
-for d in "$(cd "$(dirname "$0")" && pwd -P)" "$(cd "$(dirname "$BIN_SRC")" && pwd -P)"; do
-	if bad=$(trusted_tree "$d"); then :; else
-		echo "refusing: $bad (above $d) must be owned by root and not writable by group or others." >&2
+	if bad=$(trusted_tree "$(dirname "$f")"); then :; else
+		echo "refusing: $bad (above $f) must be owned by root and not writable by group or others." >&2
 		echo "Copy the release into a root-only directory first (see README.md)." >&2
 		exit 1
 	fi
 done
+BIN_SRC=$BIN_REAL
 echo "keyring binary sha256: $(shasum -a 256 "$BIN_SRC" | cut -d' ' -f1)"
 
 # 1. The service user and group. Nobody can log in as it: no shell, no
