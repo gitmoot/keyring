@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"compress/zlib"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +66,18 @@ func upstream(t *testing.T) (*httptest.Server, *seen) {
 			w.(http.Flusher).Flush()
 			time.Sleep(10 * time.Millisecond)
 			_, _ = io.WriteString(w, testKey[half:]+" after")
+		case "/v1/reflect":
+			// Echo the query (and so a query key) URL-encoded, in a header
+			// and the body, with upper- and lowercase hex.
+			q := r.URL.RawQuery
+			w.Header().Set("Location", "https://evil.example/cb?"+q)
+			lower := regexp.MustCompile(`%[0-9A-F]{2}`).ReplaceAllStringFunc(q, strings.ToLower)
+			_, _ = io.WriteString(w, "q="+q+" lower="+lower)
+		case "/v1/deflate":
+			w.Header().Set("Content-Encoding", "deflate")
+			zw := zlib.NewWriter(w)
+			_, _ = io.WriteString(zw, "zl:"+r.Header.Get("Authorization"))
+			_ = zw.Close()
 		case "/v1/redirect":
 			http.Redirect(w, r, "https://elsewhere.example/steal", http.StatusFound)
 		default:
@@ -81,6 +95,11 @@ func tokenHash(token string) string {
 
 func newHandler(t *testing.T, base string, auth policy.Service, access policy.Access) (*Handler, *bytes.Buffer) {
 	t.Helper()
+	return newHandlerKey(t, base, auth, access, testKey)
+}
+
+func newHandlerKey(t *testing.T, base string, auth policy.Service, access policy.Access, key string) (*Handler, *bytes.Buffer) {
+	t.Helper()
 	auth.Base, auth.Key = base, "API_KEY"
 	cfg := &policy.Config{
 		Listen:       "127.0.0.1:7701",
@@ -95,7 +114,7 @@ func newHandler(t *testing.T, base string, auth policy.Service, access policy.Ac
 		t.Fatal(err)
 	}
 	audit := &bytes.Buffer{}
-	return New(cfg, map[string]string{"API_KEY": testKey}, audit), audit
+	return New(cfg, map[string]string{"API_KEY": key}, audit), audit
 }
 
 func call(h http.Handler, method, target, token string, headers map[string]string) *httptest.ResponseRecorder {
@@ -139,9 +158,12 @@ func TestProxyAddsKeyAndDropsCallerCredentials(t *testing.T) {
 func TestHeaderAndQueryAuth(t *testing.T) {
 	up, got := upstream(t)
 	h, _ := newHandler(t, up.URL, policy.Service{Auth: policy.AuthHeader, Header: "X-Api-Key"}, allowAll)
-	call(h, "GET", "/api/v1/x", testToken, map[string]string{"X-Api-Key": "caller-supplied"})
+	call(h, "GET", "/api/v1/x", testToken, map[string]string{"X-Api-Key": "caller-supplied", "Authorization": "Bearer caller"})
 	if v := got.last(t).Header.Values("X-Api-Key"); len(v) != 1 || v[0] != testKey {
 		t.Fatalf("X-Api-Key = %v", v)
+	}
+	if a := got.last(t).Header.Get("Authorization"); a != "" {
+		t.Fatalf("caller's Authorization forwarded with header auth: %q", a)
 	}
 	h, audit := newHandler(t, up.URL, policy.Service{Auth: policy.AuthQuery, Param: "api_key"}, allowAll)
 	call(h, "GET", "/api/v1/x?api_key=caller&q=1", testToken, nil)
@@ -170,6 +192,11 @@ func TestRefusalsNeverReachTheService(t *testing.T) {
 		{"dot-dot", "GET", "/api/v1/allowed/../../admin", testToken, caller, 400},
 		{"encoded dot-dot", "GET", "/api/v1/allowed/%2e%2e/%2E%2E/admin", testToken, caller, 400},
 		{"encoded slash", "GET", "/api/v1/allowed%2f..%2fadmin", testToken, caller, 400},
+		{"double-encoded dot-dot", "GET", "/api/v1/allowed/%252e%252e/admin", testToken, caller, 400},
+		{"dot-dot-semicolon", "GET", "/api/v1/allowed/..;/admin", testToken, caller, 400},
+		{"NUL byte", "GET", "/api/v1/allowed/%00/admin", testToken, caller, 400},
+		{"fullwidth dots", "GET", "/api/v1/allowed/%ef%bc%8e%ef%bc%8e/admin", testToken, caller, 400},
+		{"overlong UTF-8 dots", "GET", "/api/v1/allowed/%c0%ae%c0%ae/admin", testToken, caller, 400},
 	}
 	for _, tc := range cases {
 		// Parse the target the way net/http parses a request line: dot
@@ -278,7 +305,7 @@ func TestExpiredRoleRefused(t *testing.T) {
 
 func TestRedactorHoldsBackOnlyAPossiblePrefix(t *testing.T) {
 	var out bytes.Buffer
-	r := newRedactor(&out, []byte("SECRET"))
+	r := newRedactor(&out, secretForms("SECRET"))
 	_, _ = r.Write([]byte("data: hello\n\n"))
 	if out.String() != "data: hello\n\n" {
 		t.Fatalf("unrelated bytes held back: %q", out.String())
@@ -288,5 +315,78 @@ func TestRedactorHoldsBackOnlyAPossiblePrefix(t *testing.T) {
 	_ = r.Close()
 	if out.String() != "data: hello\n\nx"+Mask+"y SE" {
 		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestEncodedEchoOfAQueryKeyIsHidden(t *testing.T) {
+	const awkward = "sk_test+weird/key=="
+	up, _ := upstream(t)
+	h, _ := newHandlerKey(t, up.URL, policy.Service{Auth: policy.AuthQuery, Param: "api_key"}, allowAll, awkward)
+	w := call(h, "GET", "/api/v1/reflect?x=1", testToken, nil)
+	seenByCaller := w.Body.String() + " " + w.Header().Get("Location")
+	// Listed here, not taken from secretForms, so the test checks the code.
+	forms := []string{awkward, "sk_test%2Bweird%2Fkey%3D%3D", "sk_test%2bweird%2fkey%3d%3d"}
+	for _, form := range forms {
+		if strings.Contains(seenByCaller, form) {
+			t.Fatalf("caller saw key form %q in %q", form, seenByCaller)
+		}
+	}
+	if !strings.Contains(seenByCaller, Mask) {
+		t.Fatalf("nothing was masked: %q", seenByCaller)
+	}
+}
+
+func TestReplyInAnUncheckableEncodingIsRefused(t *testing.T) {
+	up, _ := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, allowAll)
+	w := call(h, "GET", "/api/v1/deflate", testToken, nil)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502", w.Code)
+	}
+	if w.Header().Get("Content-Encoding") != "" {
+		t.Fatal("compressed body passed to the caller")
+	}
+}
+
+func TestPathIsForwardedAsChecked(t *testing.T) {
+	up, got := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, allowAll)
+	if w := call(h, "GET", "/api/v1/a%3Ab", testToken, nil); w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	// The raw request line, not the decoded path: the service must receive
+	// the path the rules checked, escaped by the keyring, not the caller's
+	// own escaping.
+	if r := got.last(t); r.RequestURI != "/v1/a:b" {
+		t.Fatalf("upstream request URI %q, want /v1/a:b", r.RequestURI)
+	}
+}
+
+func TestQueryKeyReplacesEveryCasingOfTheParam(t *testing.T) {
+	up, got := upstream(t)
+	h, _ := newHandler(t, up.URL, policy.Service{Auth: policy.AuthQuery, Param: "api_key"}, allowAll)
+	call(h, "GET", "/api/v1/x?API_KEY=caller&Api_Key=caller2&q=1", testToken, nil)
+	q := got.last(t).URL.Query()
+	for name, values := range q {
+		if strings.EqualFold(name, "api_key") && (name != "api_key" || len(values) != 1 || values[0] != testKey) {
+			t.Fatalf("query still carries %s=%v", name, values)
+		}
+	}
+	if w := call(h, "GET", "/api/v1/x?a=%zz", testToken, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed query: status %d, want 400", w.Code)
+	}
+}
+
+func TestUnreachableServiceDoesNotUseTheDailyLimit(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	base := dead.URL
+	dead.Close()
+	limited := allowAll
+	limited.DailyRequests = 1
+	h, _ := newHandler(t, base, bearer, limited)
+	for i := 0; i < 2; i++ {
+		if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusBadGateway {
+			t.Fatalf("call %d: status %d, want 502 (not 429)", i+1, w.Code)
+		}
 	}
 }

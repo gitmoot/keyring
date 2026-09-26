@@ -77,10 +77,14 @@ Rules file example:
 ```
 
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
-- refuses paths with `..` or encoded `/` or `.`;
-- drops the caller's `Authorization`, `Cookie` and role token, and adds the key;
+- accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;
+- drops the caller's `Authorization`, `Cookie` and role token, and every casing of the key's header or query parameter, then adds the key;
 - does not follow redirects;
-- replaces an echoed key with `[REDACTED]`;
-- writes one audit line per call, with no keys, query strings or bodies.
+- replaces an echoed key with `[REDACTED]`, in headers and bodies, as sent, URL-encoded (either hex case), or with JSON-escaped slashes, even when split across chunks;
+- refuses (502) a reply compressed with anything other than gzip, which it decodes, because it could not check that reply for the key;
+- does not count a call against the daily limit if the service was unreachable;
+- writes one audit line per call, with no keys, tokens, query strings or bodies. The audit log, like the store, is refused if other users can read it.
+
+A service that echoes a key in some other encoding (for example base64 inside a larger text) is not protected; do not route such a service through the keyring.
 
 Allowed methods default to GET, HEAD and POST.

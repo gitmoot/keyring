@@ -169,7 +169,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	if missing := missingKeys(cfg, keys); len(missing) > 0 {
 		fmt.Fprintf(stderr, "warning: keys not in the store (their services answer 503): %s\n", strings.Join(missing, ", "))
 	}
-	audit, err := os.OpenFile(cfg.AuditLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	audit, err := openAudit(cfg.AuditLog)
 	if err != nil {
 		return err
 	}
@@ -181,6 +181,10 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	srv := &http.Server{
 		Handler:           server.New(cfg, keys, audit),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Request bodies are small API payloads. No WriteTimeout: model
+		// replies can stream for minutes.
+		ReadTimeout: 5 * time.Minute,
+		IdleTimeout: 2 * time.Minute,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -195,6 +199,25 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// openAudit opens the audit log for appending. The log names roles, services
+// and paths, so a file other users can read is refused, as for the key store.
+func openAudit(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		f.Close()
+		return nil, fmt.Errorf("%s is open to other users (mode %04o); run chmod 600 %s", path, perm, path)
+	}
+	return f, nil
 }
 
 // readSecret reads one value from stdin. On a terminal, echo is turned off so

@@ -104,10 +104,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnauthorized, "role expired")
 		return
 	}
-	service, restEscaped, rest, ok := splitPath(r.URL)
+	service, rest, ok := splitPath(r.URL)
 	rec.Service, rec.Path = service, rest
 	if !ok {
-		fail(http.StatusBadRequest, "path must be /<service>/<path> without .. or encoded / or .")
+		fail(http.StatusBadRequest, "path must be /<service>/<path> in plain printable ASCII, without .., ;, % after decoding, or encoded / . \\")
 		return
 	}
 	svc, known := h.config.Services[service]
@@ -134,11 +134,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Forward exactly the path the rules checked: the decoded path,
+	// escaped again by net/url, never the caller's raw escaping.
 	target := svc.BaseURL()
-	basePath := strings.TrimSuffix(target.Path, "/")
-	baseEscaped := strings.TrimSuffix(target.EscapedPath(), "/")
-	target.Path = basePath + rest
-	target.RawPath = baseEscaped + restEscaped
+	target.Path = strings.TrimSuffix(target.Path, "/") + rest
+	target.RawPath = ""
 	target.RawQuery = r.URL.RawQuery
 	header := outboundHeader(r.Header, svc)
 	switch svc.Auth {
@@ -147,7 +147,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case policy.AuthHeader:
 		header.Set(svc.Header, key)
 	case policy.AuthQuery:
-		q := target.Query()
+		q, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusBadRequest, "malformed query string")
+			return
+		}
+		for name := range q {
+			if strings.EqualFold(name, svc.Param) {
+				delete(q, name)
+			}
+		}
 		q.Set(svc.Param, key)
 		target.RawQuery = q.Encode()
 	}
@@ -160,26 +170,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out.ContentLength = r.ContentLength
 	resp, err := h.client.Do(out)
 	if err != nil {
-		// The error text can include the URL, and so a query-string key.
+		// The call never reached the service: do not charge the limit. The
+		// error text can include the URL, and so a query-string key.
+		h.refund(roleName, service, access.DailyRequests, start)
 		fail(http.StatusBadGateway, "upstream unreachable")
 		return
 	}
 	defer resp.Body.Close()
+	// The transport already decoded gzip. Any other encoding would hide an
+	// echoed key from the redactor, so such a reply is not passed on.
+	if ce := strings.TrimSpace(resp.Header.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+		fail(http.StatusBadGateway, "upstream used an encoding the keyring cannot check")
+		return
+	}
 
-	secret := []byte(key)
+	forms := secretForms(key)
 	for name, values := range resp.Header {
-		if hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") {
+		if hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
 			continue
 		}
 		for _, v := range values {
-			w.Header().Add(name, strings.ReplaceAll(v, key, Mask))
+			w.Header().Add(name, maskString(v, forms))
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
 	rec.Status = resp.StatusCode
 	flusher, _ := w.(http.Flusher)
 	sink := &countingWriter{w: w}
-	red := newRedactor(sink, secret)
+	red := newRedactor(sink, forms)
 	buf := make([]byte, 32<<10)
 	for {
 		n, readErr := resp.Body.Read(buf)
@@ -206,32 +224,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.Bytes = sink.n
 }
 
-// splitPath takes "/<service>/<rest>" and returns the service, the rest as
-// sent (escaped) and decoded. It refuses dot segments and encoded dots,
-// slashes and backslashes, so the rules see the same path the service will.
-func splitPath(u *url.URL) (service, restEscaped, rest string, ok bool) {
+// splitPath takes "/<service>/<rest>" and returns the service and the
+// decoded rest. The rest is accepted only in a plain form that every server
+// reads the same way: printable ASCII after one decode, no "%" left (double
+// encoding), no ";" (path parameters such as "..;"), no backslash, no "." or
+// ".." segment, and no encoded "/", "." or "\" in the request.
+func splitPath(u *url.URL) (service, rest string, ok bool) {
 	escaped := u.EscapedPath()
 	lower := strings.ToLower(escaped)
-	if !strings.HasPrefix(escaped, "/") || strings.Contains(escaped, `\`) ||
-		strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
-		return "", "", "", false
+	if !strings.HasPrefix(escaped, "/") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return "", "", false
 	}
-	trimmed := strings.TrimPrefix(escaped, "/")
-	service, tail, _ := strings.Cut(trimmed, "/")
+	service, tail, _ := strings.Cut(strings.TrimPrefix(escaped, "/"), "/")
 	if service == "" {
-		return "", "", "", false
+		return "", "", false
 	}
-	restEscaped = "/" + tail
-	for _, seg := range strings.Split(tail, "/") {
-		if seg == "." || seg == ".." {
-			return service, "", "", false
+	rest, err := url.PathUnescape("/" + tail)
+	if err != nil {
+		return service, "", false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if c < 0x21 || c > 0x7e || c == '%' || c == ';' || c == '\\' {
+			return service, "", false
 		}
 	}
-	rest, err := url.PathUnescape(restEscaped)
-	if err != nil {
-		return service, "", "", false
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == "." || seg == ".." {
+			return service, "", false
+		}
 	}
-	return service, restEscaped, rest, true
+	return service, rest, true
 }
 
 var hopByHop = map[string]bool{
@@ -262,6 +285,19 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 		out.Del(svc.Header)
 	}
 	return out
+}
+
+// refund gives back a call that never reached the service.
+func (h *Handler) refund(role, service string, limit int, now time.Time) {
+	if limit <= 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	k := [2]string{role, service}
+	if now.UTC().Format("2006-01-02") == h.day && h.counts[k] > 0 {
+		h.counts[k]--
+	}
 }
 
 // take counts one call and reports whether it is within the daily limit.
