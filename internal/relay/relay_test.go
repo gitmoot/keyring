@@ -223,3 +223,49 @@ func TestRelayThroughRealKeyringEndToEnd(t *testing.T) {
 		t.Fatalf("health %d", resp.StatusCode)
 	}
 }
+
+func writeTokenDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "tokens")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "phobos.token"), []byte(tokenPhobos+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestLoadTokensRefusesSymlinks(t *testing.T) {
+	dir := writeTokenDir(t)
+	link := filepath.Join(t.TempDir(), "tokens-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(link); err == nil {
+		t.Fatal("symlinked token directory accepted")
+	}
+	outside := filepath.Join(t.TempDir(), "elsewhere.token")
+	if err := os.WriteFile(outside, []byte(tokenJoltra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "joltra.token")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil {
+		t.Fatal("symlinked token file accepted")
+	}
+}
+
+func TestLoadTokensRefusesADirectoryOwnedBySomeoneElse(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to hand the directory to another user")
+	}
+	dir := writeTokenDir(t)
+	if err := os.Chown(dir, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil || !strings.Contains(err.Error(), "owned by uid 65534") {
+		t.Fatalf("err = %v, want refusal naming the owner", err)
+	}
+}
