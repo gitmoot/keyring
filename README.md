@@ -3,7 +3,7 @@
 Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
 so a key never reaches the machine where agents run.
 
-Status: design only. Nothing is built yet.
+Status: step 1 (#2), the service, is in progress. Plan and steps: #1.
 
 ## Why
 
@@ -45,3 +45,42 @@ machine.
   use another role's access. It still cannot read the keys, and every call is
   logged and revocable.
 - If the keyring machine is off or asleep, API calls fail.
+
+## Using it (step 1)
+
+```sh
+keyring set --store keys.json OPENROUTER_API_KEY   # value read from stdin, not echoed
+keyring list --store keys.json                     # names only
+keyring new-token                                  # role token + sha256 for the rules
+keyring check --config rules.json --store keys.json
+keyring serve --config rules.json --store keys.json
+```
+
+Rules file example:
+
+```json
+{
+  "listen": "100.111.92.43:7701",
+  "allow_sources": ["100.106.218.88"],
+  "audit_log": "/Library/Application Support/keyring/audit.log",
+  "services": {
+    "openrouter": {"base": "https://openrouter.ai", "key": "OPENROUTER_API_KEY", "auth": "bearer"},
+    "tavily": {"base": "https://api.tavily.com", "key": "TAVILY_API_KEY", "auth": "header", "header": "X-Api-Key"}
+  },
+  "roles": {
+    "phobos": {
+      "token_sha256": "<from keyring new-token>",
+      "access": {"openrouter": {"paths": ["/api/v1"], "daily_requests": 2000}}
+    }
+  }
+}
+```
+
+A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
+- refuses paths with `..` or encoded `/` or `.`;
+- drops the caller's `Authorization`, `Cookie` and role token, and adds the key;
+- does not follow redirects;
+- replaces an echoed key with `[REDACTED]`;
+- writes one audit line per call, with no keys, query strings or bodies.
+
+Allowed methods default to GET, HEAD and POST.
