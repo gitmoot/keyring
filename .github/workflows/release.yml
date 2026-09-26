@@ -1,0 +1,49 @@
+name: release
+# A tag v* on a reviewed main commit builds the release. The owner installs on
+# the Mac only an archive whose SHA-256 matches this release page, as seen in
+# the owner's own browser.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag that is not on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./... -count=1
+      - name: Build
+        run: |
+          set -eu
+          tag=${GITHUB_REF_NAME}
+          mkdir -p out mac
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o mac/keyring ./cmd/keyring
+          cp deploy/mac/install.sh deploy/mac/README.md mac/
+          chmod 755 mac/keyring mac/install.sh; chmod 644 mac/README.md
+          tar --owner=0 --group=0 --numeric-owner -czf "out/keyring-$tag-darwin-arm64.tar.gz" -C mac keyring install.sh README.md
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "out/keyring-$tag-linux-amd64" ./cmd/keyring
+          (cd out && sha256sum * > SHA256SUMS)
+          cat out/SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          {
+            echo "Built by GitHub Actions from commit \`$GITHUB_SHA\` (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo
+            echo "Check the SHA-256 below in your own browser before installing (deploy/mac/README.md)."
+            echo
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" out/* --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
