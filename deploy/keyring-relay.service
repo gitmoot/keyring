@@ -1,0 +1,25 @@
+# Keyring relay on the agent server. Install after the keyring runs on the Mac
+# (step #6):
+#   install -m 755 keyring /usr/local/bin/keyring
+#   install -d -m 700 /etc/keyring/tokens
+#   printf '%s\n' '<role token>' > /etc/keyring/tokens/<role>.token && chmod 600 /etc/keyring/tokens/<role>.token
+#   install -m 644 deploy/keyring-relay.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now keyring-relay
+# Check: curl -s http://127.0.0.1:7700/_relay/health
+[Unit]
+Description=Keyring relay (forwards API calls to the keyring on the Mac)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/keyring relay --listen 127.0.0.1:7700 --upstream http://100.111.92.43:7701 --tokens /etc/keyring/tokens
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/etc/keyring
+
+[Install]
+WantedBy=multi-user.target

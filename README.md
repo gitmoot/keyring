@@ -3,7 +3,7 @@
 Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
 so a key never reaches the machine where agents run.
 
-Status: step 1 (#2), the service, is in progress. Plan and steps: #1.
+Status: the service (#2) is done; the relay (#3) is in progress. Nothing is deployed yet. Plan and steps: #1.
 
 ## Why
 
@@ -88,3 +88,21 @@ A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Tok
 A service that echoes a key in some other encoding (for example base64 inside a larger text) is not protected; do not route such a service through the keyring.
 
 Allowed methods default to GET, HEAD and POST.
+
+## Relay on the agent server (step 2)
+
+The relay listens only on loopback, holds one token per role (never an API key), and forwards to the keyring over the tailnet:
+
+```sh
+keyring relay --listen 127.0.0.1:7700 --upstream http://100.111.92.43:7701 --tokens /etc/keyring/tokens
+```
+
+`/etc/keyring/tokens` must be mode 700, and each `<role>.token` file mode 600. A call picks its role in the path:
+
+```sh
+curl http://127.0.0.1:7700/phobos/openrouter/api/v1/models
+# SDKs: set the base URL to http://127.0.0.1:7700/<role>/openrouter/api/v1 and any placeholder key
+curl http://127.0.0.1:7700/_relay/health       # is the keyring reachable?
+```
+
+The relay replaces any caller-supplied role token with the role's own. It refuses plain http except to a tailnet or loopback address. If the keyring is unreachable, calls fail with 502 `keyring unreachable ... never fall back to local keys`. Install steps are in `deploy/keyring-relay.service`.

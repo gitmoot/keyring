@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/relay"
 	"github.com/gitmoot/keyring/internal/server"
 	"github.com/gitmoot/keyring/internal/store"
 )
@@ -35,6 +37,8 @@ const usage = `Usage:
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
   keyring new-token                          make a role token and its hash for the rules file
+  keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
+                                             on the agent machine: forward /<role>/<service>/... to the keyring
 `
 
 func main() {
@@ -51,6 +55,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "rules file")
 	storePath := fs.String("store", "", "key store file")
+	listen := fs.String("listen", "127.0.0.1:7700", "relay: loopback address to listen on")
+	upstream := fs.String("upstream", "", "relay: keyring URL, e.g. http://100.111.92.43:7701")
+	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -115,6 +122,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "token:  %s\nsha256: %s\n", token, hex.EncodeToString(sum[:]))
 			fmt.Fprintln(stderr, "Put the token only on the machine that calls the keyring; put the sha256 in the rules file.")
 		}
+	case "relay":
+		if *upstream == "" || *tokensDir == "" || fs.NArg() != 0 {
+			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")
+			return 2
+		}
+		err = runRelay(*listen, *upstream, *tokensDir, stderr)
 	default:
 		fmt.Fprintf(stderr, "keyring: unknown command %q\n\n%s", cmd, usage)
 		return 2
@@ -195,6 +208,49 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		_ = srv.Shutdown(shutdown)
 	}()
 	fmt.Fprintf(stderr, "keyring listening on %s: %d services, %d roles\n", cfg.Listen, len(cfg.Services), len(cfg.Roles))
+	if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func runRelay(listen, upstreamURL, tokensDir string, stderr io.Writer) error {
+	addr, err := netip.ParseAddrPort(listen)
+	if err != nil || !addr.Addr().IsLoopback() {
+		return fmt.Errorf("--listen %q: the relay must listen on a loopback address", listen)
+	}
+	upstream, err := relay.CheckUpstream(upstreamURL)
+	if err != nil {
+		return err
+	}
+	tokens, err := relay.LoadTokens(tokensDir)
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           relay.New(upstream, tokens),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdown)
+	}()
+	roles := make([]string, 0, len(tokens))
+	for role := range tokens {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	fmt.Fprintf(stderr, "keyring relay on %s -> %s; roles: %s\n", listen, upstream.Host, strings.Join(roles, ", "))
 	if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
