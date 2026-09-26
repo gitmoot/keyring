@@ -33,6 +33,9 @@ SOURCE=100.106.218.88
 # directory above them up to / must be owned by root and writable by nobody
 # else: otherwise someone could rename a directory after this check.
 trusted() {
+	# An ACL can grant write access that the mode bits do not show, so any ACL
+	# entry makes a path untrusted.
+	[ "$(ls -lde "$1" | wc -l)" -eq 1 ] || return 1
 	set -- $(stat -f '%u %Lp' "$1")
 	[ "$1" = 0 ] && [ $(( 0$2 & 022 )) = 0 ]
 }
@@ -78,9 +81,12 @@ if ! dscl . -read "/Groups/$NAME" >/dev/null 2>&1; then
 	echo "created group $NAME ($gid)"
 fi
 gid=$(dscl . -read "/Groups/$NAME" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+# Only an id from the range this script allocates: an existing group with
+# another id (for example 0, wheel, or 20, staff) was not made here.
 case "$gid" in
-'' | *[!0-9]*)
-	echo "group $NAME exists without a numeric PrimaryGroupID; fix or delete it (dscl . -delete /Groups/$NAME) and rerun" >&2
+3[0-9][0-9]) ;;
+*)
+	echo "group $NAME has PrimaryGroupID '$gid', not one this installer allocates (300-399); delete it (dscl . -delete /Groups/$NAME) and rerun" >&2
 	exit 1
 	;;
 esac
@@ -96,6 +102,14 @@ if ! dscl . -read "/Users/$NAME" >/dev/null 2>&1; then
 	dscl . -create "/Users/$NAME" IsHidden 1
 	echo "created user $NAME ($uid)"
 fi
+uid=$(dscl . -read "/Users/$NAME" UniqueID 2>/dev/null | awk '{print $2}')
+case "$uid" in
+3[0-9][0-9]) ;;
+*)
+	echo "user $NAME has UniqueID '$uid', not one this installer allocates (300-399); delete it (dscl . -delete /Users/$NAME) and rerun" >&2
+	exit 1
+	;;
+esac
 ugid=$(dscl . -read "/Users/$NAME" PrimaryGroupID 2>/dev/null | awk '{print $2}')
 if [ "$ugid" != "$gid" ]; then
 	echo "user $NAME has PrimaryGroupID '$ugid', not $gid; fix it (dscl . -create /Users/$NAME PrimaryGroupID $gid) and rerun" >&2
@@ -107,12 +121,6 @@ install -d -m 755 -o root -g wheel /usr/local/libexec
 install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
 
 # 3. Rules (root-owned, readable by the service) and data (the service's own).
-for old in keys.json audit.log service.log; do
-	if [ -e "$DIR/$old" ]; then
-		echo "found $DIR/$old from an earlier layout; move it into $DATA/ (owned by $NAME, mode 600) and rerun" >&2
-		exit 1
-	fi
-done
 install -d -m 750 -o root -g "$NAME" "$DIR"
 install -d -m 700 -o "$NAME" -g "$NAME" "$DATA"
 if [ ! -f "$DIR/rules.json" ]; then
