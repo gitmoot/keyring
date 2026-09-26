@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
@@ -267,5 +269,32 @@ func TestLoadTokensRefusesADirectoryOwnedBySomeoneElse(t *testing.T) {
 	}
 	if _, err := LoadTokens(dir); err == nil || !strings.Contains(err.Error(), "owned by uid 65534") {
 		t.Fatalf("err = %v, want refusal naming the owner", err)
+	}
+}
+
+func TestLoadTokensRefusesAFIFOWithoutHanging(t *testing.T) {
+	dir := writeTokenDir(t)
+	if err := syscall.Mkfifo(filepath.Join(dir, "joltra.token"), 0o600); err != nil {
+		t.Skip("no mkfifo here:", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := LoadTokens(dir); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("FIFO token file accepted")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("LoadTokens hung on a FIFO")
+	}
+}
+
+func TestLoadTokensRefusesAParentOthersCanWrite(t *testing.T) {
+	dir := writeTokenDir(t)
+	if err := os.Chmod(filepath.Dir(dir), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTokens(dir); err == nil {
+		t.Fatal("token directory under a world-writable parent accepted")
 	}
 }

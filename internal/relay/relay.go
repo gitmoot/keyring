@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -80,6 +79,19 @@ func LoadTokens(dir string) (map[string]string, error) {
 	if err := private(dir, info, 0o077, "chmod 700"); err != nil {
 		return nil, err
 	}
+	// Whoever can rename entries in the parent could swap the directory after
+	// this check, so the parent must be closed to other users too.
+	parent := filepath.Dir(filepath.Clean(dir))
+	pinfo, err := os.Lstat(parent)
+	if err != nil {
+		return nil, err
+	}
+	if !pinfo.IsDir() {
+		return nil, fmt.Errorf("%s must be a real directory", parent)
+	}
+	if err := private(parent, pinfo, 0o022, "chmod go-w"); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -106,7 +118,9 @@ func LoadTokens(dir string) (map[string]string, error) {
 }
 
 func readToken(path string) (string, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK: opening a FIFO must not wait for a writer; the regular-file
+	// check below then refuses it.
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)
 	if err != nil {
 		return "", fmt.Errorf("%s: open without following symlinks: %w", path, err)
 	}
@@ -139,12 +153,12 @@ func private(path string, info os.FileInfo, open os.FileMode, fix string) error 
 	if perm := info.Mode().Perm(); perm&open != 0 {
 		return fmt.Errorf("%s is open to other users (mode %04o); run %s %s", path, perm, fix, path)
 	}
-	st, ok := info.Sys().(*syscall.Stat_t)
+	uid, ok := ownerUID(info)
 	if !ok {
-		return fmt.Errorf("%s: cannot read owner", path)
+		return fmt.Errorf("%s: cannot read owner on this platform", path)
 	}
-	if int(st.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s is owned by uid %d, not the relay's user (uid %d)", path, st.Uid, os.Geteuid())
+	if uid != os.Geteuid() {
+		return fmt.Errorf("%s is owned by uid %d, not the relay's user (uid %d)", path, uid, os.Geteuid())
 	}
 	return nil
 }
