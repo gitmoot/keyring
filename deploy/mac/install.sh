@@ -28,17 +28,32 @@ PLIST=/Library/LaunchDaemons/$LABEL.plist
 LISTEN=100.111.92.43:7701
 SOURCE=100.106.218.88
 
-# 0. Only run code nobody else could have changed: the script, the binary and
-# their directories must be owned by root and writable by nobody else.
+# 0. Only run code nobody else could have changed. The script and binary must
+# be regular files (not symlinks), and they, their directories and EVERY
+# directory above them up to / must be owned by root and writable by nobody
+# else: otherwise someone could rename a directory after this check.
 trusted() {
 	set -- $(stat -f '%u %Lp' "$1")
 	[ "$1" = 0 ] && [ $(( 0$2 & 022 )) = 0 ]
 }
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
-BIN_DIR=$(cd "$(dirname "$BIN_SRC")" && pwd -P)
-for p in "$0" "$SCRIPT_DIR" "$BIN_SRC" "$BIN_DIR"; do
-	if ! trusted "$p"; then
-		echo "refusing: $p must be owned by root and not writable by group or others." >&2
+trusted_tree() { # $1: a real directory path (pwd -P)
+	d=$1
+	while :; do
+		trusted "$d" || { echo "$d"; return 1; }
+		[ "$d" = / ] && return 0
+		d=$(dirname "$d")
+	done
+}
+for f in "$0" "$BIN_SRC"; do
+	if [ -L "$f" ] || ! [ -f "$f" ] || ! trusted "$f"; then
+		echo "refusing: $f must be a regular root-owned file, not writable by group or others." >&2
+		echo "Copy the release into a root-only directory first (see README.md)." >&2
+		exit 1
+	fi
+done
+for d in "$(cd "$(dirname "$0")" && pwd -P)" "$(cd "$(dirname "$BIN_SRC")" && pwd -P)"; do
+	if bad=$(trusted_tree "$d"); then :; else
+		echo "refusing: $bad (above $d) must be owned by root and not writable by group or others." >&2
 		echo "Copy the release into a root-only directory first (see README.md)." >&2
 		exit 1
 	fi
@@ -62,7 +77,13 @@ if ! dscl . -read "/Groups/$NAME" >/dev/null 2>&1; then
 	dscl . -create "/Groups/$NAME" RealName "Keyring service"
 	echo "created group $NAME ($gid)"
 fi
-gid=$(dscl . -read "/Groups/$NAME" PrimaryGroupID | awk '{print $2}')
+gid=$(dscl . -read "/Groups/$NAME" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+case "$gid" in
+'' | *[!0-9]*)
+	echo "group $NAME exists without a numeric PrimaryGroupID; fix or delete it (dscl . -delete /Groups/$NAME) and rerun" >&2
+	exit 1
+	;;
+esac
 if ! dscl . -read "/Users/$NAME" >/dev/null 2>&1; then
 	uid=$(free_id)
 	dscl . -create "/Users/$NAME"
@@ -75,12 +96,23 @@ if ! dscl . -read "/Users/$NAME" >/dev/null 2>&1; then
 	dscl . -create "/Users/$NAME" IsHidden 1
 	echo "created user $NAME ($uid)"
 fi
+ugid=$(dscl . -read "/Users/$NAME" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+if [ "$ugid" != "$gid" ]; then
+	echo "user $NAME has PrimaryGroupID '$ugid', not $gid; fix it (dscl . -create /Users/$NAME PrimaryGroupID $gid) and rerun" >&2
+	exit 1
+fi
 
 # 2. The binary: owned by root, so the service cannot rewrite itself.
 install -d -m 755 -o root -g wheel /usr/local/libexec
 install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
 
 # 3. Rules (root-owned, readable by the service) and data (the service's own).
+for old in keys.json audit.log service.log; do
+	if [ -e "$DIR/$old" ]; then
+		echo "found $DIR/$old from an earlier layout; move it into $DATA/ (owned by $NAME, mode 600) and rerun" >&2
+		exit 1
+	fi
+done
 install -d -m 750 -o root -g "$NAME" "$DIR"
 install -d -m 700 -o "$NAME" -g "$NAME" "$DATA"
 if [ ! -f "$DIR/rules.json" ]; then
