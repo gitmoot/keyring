@@ -135,14 +135,20 @@ if [ ! -f "$DIR/rules.json" ]; then
   "listen": "$LISTEN",
   "allow_sources": ["$SOURCE"],
   "audit_log": "$DATA/audit.log",
-  "services": {},
-  "roles": {}
+  "access_file": "$DATA/access.json"
 }
 EOF
-	echo "wrote first rules file (no services yet)"
+	if [ ! -e "$DATA/access.json" ]; then
+		printf '{\n  "services": {},\n  "roles": {}\n}\n' >"$DATA/access.json"
+	fi
+	echo "wrote first rules and access files (no services yet)"
 fi
 chown "root:$NAME" "$DIR/rules.json"
 chmod 640 "$DIR/rules.json"
+# A rules file from before the split still holds services and roles: move them
+# into the access file, which the service owns. On a split rules file this
+# changes nothing except making sure the service owns its access file.
+"$BIN" migrate --config "$DIR/rules.json" --access "$DATA/access.json"
 sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json"
 
 # 4. Start at boot as _keyring. KeepAlive restarts it until the tailnet

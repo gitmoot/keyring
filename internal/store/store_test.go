@@ -37,7 +37,7 @@ func TestSetLoadDeleteKeepsFilePrivate(t *testing.T) {
 	if err := Delete(path, "TAVILY_API_KEY"); err == nil {
 		t.Fatal("deleting a missing key succeeded")
 	}
-	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".keys-*"))
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".keys.json-*"))
 	if len(leftovers) != 0 {
 		t.Fatalf("temporary files left behind: %v", leftovers)
 	}
@@ -46,6 +46,10 @@ func TestSetLoadDeleteKeepsFilePrivate(t *testing.T) {
 func TestLoadRefusesAStoreOthersCanRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keys.json")
 	if err := os.WriteFile(path, []byte(`{"A":"secret-value"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Set the mode explicitly: WriteFile applies the umask.
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Load(path)

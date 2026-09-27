@@ -46,23 +46,34 @@ machine.
   logged and revocable.
 - If the keyring machine is off or asleep, API calls fail.
 
-## Using it (step 1)
+## Using it
 
 ```sh
 keyring set --store keys.json OPENROUTER_API_KEY   # value read from stdin, not echoed
 keyring list --store keys.json                     # names only
-keyring new-token                                  # role token + sha256 for the rules
+keyring new-token                                  # role token + sha256 for the access file
 keyring check --config rules.json --store keys.json
 keyring serve --config rules.json --store keys.json
+kill -HUP <pid>                                    # re-read access file and keys, no restart
 ```
 
-Rules file example:
+There are two settings files.
+
+**`rules.json`**: who may connect. It is owned by root, and the service can only read it:
 
 ```json
 {
   "listen": "100.111.92.43:7701",
   "allow_sources": ["100.106.218.88"],
-  "audit_log": "/Library/Application Support/keyring/audit.log",
+  "audit_log": "/Library/Application Support/keyring/data/audit.log",
+  "access_file": "/Library/Application Support/keyring/data/access.json"
+}
+```
+
+**`access.json`**: which services exist and what each role may do. It is owned by the service user, mode 600:
+
+```json
+{
   "services": {
     "openrouter": {"base": "https://openrouter.ai", "key": "OPENROUTER_API_KEY", "auth": "bearer"},
     "tavily": {"base": "https://api.tavily.com", "key": "TAVILY_API_KEY", "auth": "header", "header": "X-Api-Key"}
@@ -75,6 +86,10 @@ Rules file example:
   }
 }
 ```
+
+A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
+
+`SIGHUP` re-reads the access file and keys. An invalid access file, or a changed `listen` or `audit_log`, is refused, and the previous settings stay in use. Daily counts carry over.
 
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
 - accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;

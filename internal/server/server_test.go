@@ -102,12 +102,16 @@ func newHandlerKey(t *testing.T, base string, auth policy.Service, access policy
 	t.Helper()
 	auth.Base, auth.Key = base, "API_KEY"
 	cfg := &policy.Config{
-		Listen:       "127.0.0.1:7701",
-		AllowSources: []string{caller},
-		AuditLog:     "audit.log",
-		Services:     map[string]policy.Service{"api": auth},
-		Roles: map[string]policy.Role{
-			"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"api": access}},
+		Rules: policy.Rules{
+			Listen:       "127.0.0.1:7701",
+			AllowSources: []string{caller},
+			AuditLog:     "audit.log",
+		},
+		AccessList: policy.AccessList{
+			Services: map[string]policy.Service{"api": auth},
+			Roles: map[string]policy.Role{
+				"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"api": access}},
+			},
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -285,7 +289,7 @@ func TestDailyLimitAndAudit(t *testing.T) {
 func TestMissingKeyAnswers503(t *testing.T) {
 	up, got := upstream(t)
 	h, _ := newHandler(t, up.URL, bearer, allowAll)
-	h.keys = map[string]string{}
+	h.Swap(h.snap.Load().config, map[string]string{})
 	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusServiceUnavailable || got.count() != 0 {
 		t.Fatalf("status %d, upstream calls %d", w.Code, got.count())
 	}
@@ -295,9 +299,10 @@ func TestExpiredRoleRefused(t *testing.T) {
 	up, got := upstream(t)
 	h, _ := newHandler(t, up.URL, bearer, allowAll)
 	past := time.Now().Add(-time.Hour)
-	role := h.config.Roles["phobos"]
+	cfg := h.snap.Load().config
+	role := cfg.Roles["phobos"]
 	role.Expires = &past
-	h.config.Roles["phobos"] = role
+	cfg.Roles["phobos"] = role
 	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusUnauthorized || got.count() != 0 {
 		t.Fatalf("status %d, upstream calls %d", w.Code, got.count())
 	}
@@ -389,4 +394,73 @@ func TestUnreachableServiceDoesNotUseTheDailyLimit(t *testing.T) {
 			t.Fatalf("call %d: status %d, want 502 (not 429)", i+1, w.Code)
 		}
 	}
+}
+
+func withAccess(t *testing.T, h *Handler, access policy.Access) *policy.Config {
+	t.Helper()
+	old := h.snap.Load().config
+	cfg := &policy.Config{Rules: old.Rules, AccessList: policy.AccessList{
+		Services: old.Services,
+		Roles: map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken),
+			Access: map[string]policy.Access{"api": access}}},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestSwapAppliesToTheNextRequest(t *testing.T) {
+	up, got := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, policy.Access{Paths: []string{"/v1/a"}, Methods: []string{"GET"}})
+	if w := call(h, "GET", "/api/v1/b", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("before swap: %d, want 403", w.Code)
+	}
+	h.Swap(withAccess(t, h, policy.Access{Paths: []string{"/v1/b"}, Methods: []string{"GET"}}), map[string]string{"API_KEY": "sk-new-key-0123456789"})
+	if w := call(h, "GET", "/api/v1/b", testToken, nil); w.Code != 200 {
+		t.Fatalf("after swap: %d, want 200", w.Code)
+	}
+	if a := got.last(t).Header.Get("Authorization"); a != "Bearer sk-new-key-0123456789" {
+		t.Fatalf("after swap the service got %q, want the new key", a)
+	}
+	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("old path after swap: %d, want 403", w.Code)
+	}
+}
+
+func TestDailyCountSurvivesASwap(t *testing.T) {
+	up, _ := upstream(t)
+	limited := allowAll
+	limited.DailyRequests = 1
+	h, _ := newHandler(t, up.URL, bearer, limited)
+	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != 200 {
+		t.Fatalf("first call %d", w.Code)
+	}
+	h.Swap(withAccess(t, h, limited), map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after swap %d, want 429: a reload must not reset the limit", w.Code)
+	}
+}
+
+func TestSwapDuringRequestsIsRaceFree(t *testing.T) {
+	up, _ := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, allowAll)
+	next := withAccess(t, h, allowAll)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != 200 {
+					t.Errorf("status %d", w.Code)
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 50; i++ {
+		h.Swap(next, map[string]string{"API_KEY": testKey})
+	}
+	wg.Wait()
 }
