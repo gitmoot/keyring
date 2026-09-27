@@ -216,6 +216,8 @@ func TestConnectTakesSettingsPastedFromAnAgent(t *testing.T) {
 	for name, pasted := range map[string]string{
 		"not json":      `service: acme2`,
 		"unknown field": `{"service":"acme2","base":"https://api.acme.example","auth":"bearer","key":"OTHER_KEY"}`,
+		"trailing text": `{"service":"acme2","base":"https://api.acme.example","auth":"bearer"} {"x":1}`,
+		"stray brace":   `{"service":"acme2","base":"https://api.acme.example","auth":"bearer"}}`,
 	} {
 		w := e.request("POST", "/keys/ACME_KEY/connect", url.Values{"pasted": {pasted}, "password": {password}})
 		if w.Code != http.StatusBadRequest {
