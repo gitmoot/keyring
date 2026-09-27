@@ -34,6 +34,7 @@ const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
   keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
+  keyring admin-password --config FILE       set the dashboard password (asked twice, not shown)
   keyring set --store FILE NAME              add or replace a key; the value is read from stdin
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
@@ -90,6 +91,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = migrate(*configPath, *accessPath, stdout)
+	case "admin-password":
+		if !need("config") || fs.NArg() != 0 {
+			return 2
+		}
+		err = setAdminPassword(*configPath, stdin, stdout, stderr)
 	case "set":
 		if !need("store") || fs.NArg() != 1 {
 			fmt.Fprintln(stderr, "keyring set: pass --store FILE and one NAME")
@@ -200,6 +206,13 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		return err
 	}
 	handler := server.New(cfg, keys, audit)
+	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr)
+	if err != nil {
+		return err
+	}
+	if dashboardSrv != nil {
+		defer dashboardSrv.Close()
+	}
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -214,7 +227,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	rl := reloader{configPath: configPath, storePath: storePath, listen: cfg.Listen, auditLog: cfg.AuditLog, handler: handler}
+	rl := reloader{configPath: configPath, storePath: storePath, fixed: cfg.Rules, handler: handler, dashboard: dashboard}
 	go func() {
 		for {
 			select {
@@ -308,9 +321,15 @@ func openAudit(path string) (*os.File, error) {
 // readSecret reads one value from stdin. On a terminal, echo is turned off so
 // the value is not shown.
 func readSecret(stdin io.Reader, stderr io.Writer, name string) (string, error) {
+	return readHidden(bufio.NewReader(stdin), stdin, stderr, "value for "+name+" (not shown): ")
+}
+
+// readHidden reads one line from in. When stdin is a terminal it prints
+// prompt and turns echo off for the read.
+func readHidden(in *bufio.Reader, stdin io.Reader, stderr io.Writer, prompt string) (string, error) {
 	if f, ok := stdin.(*os.File); ok {
 		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintf(stderr, "value for %s (not shown): ", name)
+			fmt.Fprint(stderr, prompt)
 			off := exec.Command("stty", "-echo")
 			off.Stdin = f
 			if off.Run() == nil {
@@ -323,7 +342,7 @@ func readSecret(stdin io.Reader, stderr io.Writer, name string) (string, error) 
 			}
 		}
 	}
-	line, err := bufio.NewReader(stdin).ReadString('\n')
+	line, err := in.ReadString('\n')
 	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
 		return "", errors.New("no value on stdin")
 	}

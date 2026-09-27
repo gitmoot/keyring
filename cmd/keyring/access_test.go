@@ -220,7 +220,7 @@ func TestReloadAppliesAccessChangesAndRefusesListenChanges(t *testing.T) {
 	}
 	keys, _ := store.Load(keysPath)
 	h := server.New(cfg, keys, &bytes.Buffer{})
-	rl := reloader{configPath: rules, storePath: keysPath, listen: cfg.Listen, auditLog: cfg.AuditLog, handler: h}
+	rl := reloader{configPath: rules, storePath: keysPath, fixed: cfg.Rules, handler: h}
 	get := func(path string) int {
 		r := httptest.NewRequest("GET", path, nil)
 		r.RemoteAddr = "127.0.0.1:5000"
@@ -261,5 +261,19 @@ func TestReloadAppliesAccessChangesAndRefusesListenChanges(t *testing.T) {
 	}
 	if code := get("/api/v1/x"); code != http.StatusForbidden {
 		t.Fatalf("after refused reload: %d, want the previous settings (403)", code)
+	}
+	// Turning the dashboard on also needs a restart.
+	if err := os.WriteFile(rules, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	withAdmin := bytes.Replace(raw, []byte(`"listen":`), []byte(`"admin_listen": "127.0.0.1:7709", "admin_password_file": "/tmp/admin.pw", "listen":`), 1)
+	if bytes.Equal(withAdmin, raw) {
+		t.Fatal("test setup: could not add admin settings")
+	}
+	if err := os.WriteFile(rules, withAdmin, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rl.reload(); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("admin settings change: err = %v", err)
 	}
 }
