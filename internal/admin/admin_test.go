@@ -115,7 +115,7 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 	} {
 		h := w.Header()
 		if !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") || h.Get("X-Content-Type-Options") != "nosniff" ||
-			h.Get("Referrer-Policy") != "no-referrer" || h.Get("Cache-Control") != "no-store" {
+			h.Get("Referrer-Policy") != "same-origin" || h.Get("Cache-Control") != "no-store" {
 			t.Fatalf("status %d headers %v", w.Code, h)
 		}
 	}

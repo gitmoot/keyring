@@ -109,7 +109,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, not no-referrer: with no-referrer Chrome sends
+	// "Origin: null" on the dashboard's own form posts, which the Origin check
+	// below must refuse, so nobody could log in.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
 	if !s.hosts[r.Host] {
 		http.Error(w, "unknown host", http.StatusMisdirectedRequest)
