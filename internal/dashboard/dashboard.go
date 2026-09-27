@@ -64,6 +64,7 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/replace", b.replaceKey)
 	a.Handle("POST /keys/{name}/leaked", b.markLeaked)
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)
+	a.Handle("POST /keys/{name}/connect", b.connectKey)
 	registerAccess(b)
 }
 
@@ -222,22 +223,12 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Notice": r.URL.Query().Get("done")})
 }
 
-type newKeyForm struct {
-	Name, Mode, Existing, SvcName, Base, Auth, Header, Param, TestMethod, TestPath string
-}
-
 func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string) {
-	b.renderNewKey(w, sid, http.StatusOK, newKeyForm{Mode: "new", Auth: policy.AuthBearer, TestMethod: "GET"}, "")
+	b.renderNewKey(w, sid, http.StatusOK, "", "")
 }
 
-func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, f newKeyForm, msg string) {
-	cfg := b.Proxy.Config()
-	services := make([]string, 0, len(cfg.Services))
-	for name := range cfg.Services {
-		services = append(services, name)
-	}
-	sort.Strings(services)
-	b.render(w, status, "newkey", sid, map[string]any{"Form": f, "Services": services, "Error": msg})
+func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, name, msg string) {
+	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg})
 }
 
 // readValue takes the posted value. Only surrounding line breaks are removed.
@@ -252,24 +243,21 @@ func readValue(r *http.Request) (string, error) {
 	return v, nil
 }
 
+// addKey stores a new key: a name and a value, nothing else. Which API it is
+// for is set later on the key's page ("Connect to a service").
 func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
-	f := newKeyForm{
-		Name: strings.TrimSpace(r.PostFormValue("name")), Mode: r.PostFormValue("mode"), Existing: r.PostFormValue("existing"),
-		SvcName: strings.TrimSpace(r.PostFormValue("svc_name")), Base: strings.TrimSpace(r.PostFormValue("base")), Auth: r.PostFormValue("auth"),
-		Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
-		TestMethod: r.PostFormValue("test_method"), TestPath: strings.TrimSpace(r.PostFormValue("test_path")),
-	}
+	name := strings.TrimSpace(r.PostFormValue("name"))
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
-		b.renderNewKey(w, sid, http.StatusForbidden, f, "Enter your dashboard password to add a key.")
+		b.renderNewKey(w, sid, http.StatusForbidden, name, "Enter your dashboard password to add a key.")
 		return
 	}
-	if !store.ValidName(f.Name) {
-		b.renderNewKey(w, sid, http.StatusBadRequest, f, "The name must be letters, digits and _, not starting with a digit.")
+	if !store.ValidName(name) {
+		b.renderNewKey(w, sid, http.StatusBadRequest, name, "The name must be letters, digits and _, not starting with a digit.")
 		return
 	}
 	value, err := readValue(r)
 	if err != nil {
-		b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
+		b.renderNewKey(w, sid, http.StatusBadRequest, name, "Paste the value, on one line.")
 		return
 	}
 	b.Mu.Lock()
@@ -279,66 +267,98 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	if _, taken := keys[f.Name]; taken {
-		b.renderNewKey(w, sid, http.StatusConflict, f, "A key with this name exists. Open it and use Replace.")
+	if _, taken := keys[name]; taken {
+		b.renderNewKey(w, sid, http.StatusConflict, name, "A key with this name exists. Open it and use Replace.")
 		return
 	}
-	// Edit the file, not the running copy: hand edits not yet reloaded stay.
+	if err := store.Set(b.StorePath, name, value); err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	keys[name] = value
+	b.Proxy.Swap(b.Proxy.Config(), keys)
+	b.Admin.Audit("key_added", sid, map[string]any{"key": name})
+	http.Redirect(w, r, "/keys/"+name+"?done=added", http.StatusSeeOther)
+}
+
+// connectForm is "Connect to a service" on a key's page.
+type connectForm struct {
+	Preset, Service, Base, Auth, Header, Param, TestPath, Pasted string
+}
+
+// agentSettings is what an agent may hand the owner to paste: the same
+// fields as the form, as JSON.
+type agentSettings struct {
+	Service  string `json:"service"`
+	Base     string `json:"base"`
+	Auth     string `json:"auth"`
+	Header   string `json:"header,omitempty"`
+	Param    string `json:"param,omitempty"`
+	TestPath string `json:"test_path,omitempty"`
+}
+
+// connectFormFor fills the form from a preset for key name.
+func (b *Backend) connectFormFor(name, id string) connectForm {
+	f := connectForm{Preset: id, Auth: policy.AuthBearer}
+	if p, ok := presetByID(id); ok {
+		f.Service = serviceName(p.ID, name, b.Proxy.Config().Services)
+		f.Base, f.Auth, f.Header, f.Param, f.TestPath = p.Base, p.Auth, p.Header, p.Param, p.TestPath
+	}
+	return f
+}
+
+// connectKey adds a service that uses this key: from a preset, typed fields,
+// or settings an agent wrote as JSON. The whole access list is checked before
+// anything is written.
+func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string) {
+	name := r.PathValue("name")
+	f := connectForm{
+		Preset: r.PostFormValue("preset"), Service: strings.TrimSpace(r.PostFormValue("service")),
+		Base: strings.TrimSpace(r.PostFormValue("base")), Auth: r.PostFormValue("auth"),
+		Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
+		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
+	}
+	again := func(status int, msg string) { b.renderKey(w, r, sid, status, name, f, msg) }
+	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
+		again(http.StatusForbidden, "Enter your dashboard password to connect the key.")
+		return
+	}
+	if f.Pasted != "" {
+		var a agentSettings
+		dec := json.NewDecoder(strings.NewReader(f.Pasted))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&a); err != nil {
+			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
+			return
+		}
+		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath
+	}
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	if ok, err := b.known(name); err != nil || !ok {
+		b.unknownKey(w, r, sid, err)
+		return
+	}
 	next, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	switch f.Mode {
-	case "existing":
-		svc, ok := next.Services[f.Existing]
-		if !ok {
-			b.renderNewKey(w, sid, http.StatusBadRequest, f, "Pick a service.")
-			return
-		}
-		svc.Key = f.Name
-		next.Services[f.Existing] = svc
-	case "new":
-		if _, taken := next.Services[f.SvcName]; taken {
-			b.renderNewKey(w, sid, http.StatusConflict, f, "A service with this name exists. Pick it under “existing service”.")
-			return
-		}
-		next.Services[f.SvcName] = policy.Service{Base: f.Base, Key: f.Name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestMethod: f.TestMethod, TestPath: f.TestPath}
-	case "none":
-	default:
-		b.renderNewKey(w, sid, http.StatusBadRequest, f, "Choose how the key is used.")
+	if _, taken := next.Services[f.Service]; taken {
+		again(http.StatusConflict, "A service named "+f.Service+" exists already. Pick another name.")
 		return
 	}
-	// Check the whole change before writing, so a refused form leaves nothing
-	// behind; after that only the two writes can fail, and a failed access
-	// write takes the value back out. The running config is swapped last,
-	// from what was checked, as in saveAndApply.
-	cfg := &policy.Config{Rules: b.rules(), AccessList: next}
-	if err := cfg.Validate(); err != nil {
-		b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath}
+	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+		again(http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := store.Set(b.StorePath, f.Name, value); err != nil {
+	if err := b.saveAndApply(next); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	if f.Mode != "none" {
-		if cfg, err = policy.SaveAccess(b.rules(), next); err != nil {
-			if undo := store.Delete(b.StorePath, f.Name); undo != nil {
-				err = errors.Join(err, undo)
-			}
-			b.fail(w, sid, err)
-			return
-		}
-	}
-	keys[f.Name] = value
-	b.Proxy.Swap(cfg, keys)
-	service := f.Existing
-	if f.Mode == "new" {
-		service = f.SvcName
-	}
-	b.Admin.Audit("key_added", sid, map[string]any{"key": f.Name, "service": service})
-	http.Redirect(w, r, "/keys/"+f.Name+"?done=added", http.StatusSeeOther)
+	b.Admin.Audit("key_connected", sid, map[string]any{"key": name, "service": f.Service, "base": f.Base})
+	http.Redirect(w, r, "/keys/"+name+"?done=connected", http.StatusSeeOther)
 }
 
 // apply loads the saved access file and keys and swaps them into the proxy,
@@ -362,6 +382,14 @@ func (b *Backend) apply() error {
 
 func (b *Backend) keyPage(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
+	id := r.URL.Query().Get("preset")
+	if id == "" {
+		id = suggestPreset(name)
+	}
+	b.renderKey(w, r, sid, http.StatusOK, name, b.connectFormFor(name, id), "")
+}
+
+func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, status int, name string, f connectForm, msg string) {
 	rows, err := b.rows()
 	if err != nil {
 		b.fail(w, sid, err)
@@ -370,9 +398,11 @@ func (b *Backend) keyPage(w http.ResponseWriter, r *http.Request, sid string) {
 	for _, row := range rows {
 		if row.Name == name {
 			meta, _ := b.loadMeta()
-			b.render(w, http.StatusOK, "key", sid, map[string]any{
+			errCode := r.URL.Query().Get("error")
+			b.render(w, status, "key", sid, map[string]any{
 				"Row": row, "Meta": meta[name], "Testable": b.testService(name) != "",
-				"Notice": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"),
+				"Notice": r.URL.Query().Get("done"), "Error": errCode, "ConnectError": msg,
+				"Connect": f, "Presets": presetOptions(),
 			})
 			return
 		}

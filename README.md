@@ -128,8 +128,11 @@ Safety:
 - Failed passwords (at login or on a change) are slowed after 5 and locked for an hour after 20. Attempts sent at once count too.
 - Every login, logout, password change and failed password is written to the audit log without secrets.
 
-The **Keys** page (`/keys`) lists every key the access file names or the store holds: its service, which roles use it, status, last use and calls today. A value is never shown, not even in part.
-- **Add key**: name, value and how it is used (an existing service, a new service, or none yet). A new service is checked like the access file before anything is stored, so a refused form leaves nothing behind.
+The pages are one column and work on a phone; they follow the system's light or dark mode.
+
+The **Keys** page (`/keys`) lists every key the access file names or the store holds: its services, how many agents use it, status, last use and calls today. A value is never shown, not even in part.
+- **Add key** asks for a name and a value only. The key works as soon as a service names it.
+- **Connect to a service** on a key's page adds the service that uses it. The API is guessed from the key's name (`OPENROUTER_API_KEY` is OpenRouter, `vCF_TOKEN` is Cloudflare), with the base URL, how the key is sent and a test request filled in from a built-in list; pick another, or "Other" and fill in the fields. An agent that works out the settings can hand them over as JSON to paste: `{"service":"acme","base":"https://api.acme.com","auth":"header","header":"X-Api-Key","test_path":"/v1/ping"}` (unknown fields are refused). The whole access list is checked before anything is written.
 - **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
 - **Replace** takes effect at once; it clears the leaked flag and the test result.
 - **Mark as leaked** flags the key until it is replaced.
@@ -138,8 +141,8 @@ The **Keys** page (`/keys`) lists every key the access file names or the store h
 
 Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
 
-The **Access** page (`/access`) is a grid: rows are agents (roles), columns are services. A cell shows off, or the methods it allows with today's calls and the daily limit. Calls today count every attempt, refused ones too; the limit counts only calls that went out.
-- **Open a cell** to switch access on or off and set the methods (read only, full, or a custom list), the allowed paths, the daily limit and an end date (UTC). A refused change leaves the access file as it was.
+The **Agents** page (`/access`) shows each agent with the services it may use: the methods, today's calls and the daily limit. Calls today count every attempt, refused ones too; the limit counts only calls that went out. "Add a service…" lists the services it may not use yet.
+- **Open a service** to switch access on or off and set the methods (read only, full, or a custom list), the allowed paths, the daily limit and an end date (UTC). A refused change leaves the access file as it was.
 - **Add agent** makes a role with no access and shows its token once, with a copy button and the file it belongs in on the calling machine. Only the token's SHA-256 is kept.
 - **New token** on an agent's page shows a new token once; the old one stops working at once. Sending the form twice (reloading the result page) does not replace the token again.
 - **Revoke** removes the agent after a tick; its calls fail at once (401).
