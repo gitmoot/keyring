@@ -170,6 +170,13 @@ func LoadAccess(path string) (AccessList, error) {
 	if err := decodeStrict(raw, &access); err != nil {
 		return AccessList{}, fmt.Errorf("%s: %w", path, err)
 	}
+	// Both lists may be left out of the file; callers add to them.
+	if access.Services == nil {
+		access.Services = map[string]Service{}
+	}
+	if access.Roles == nil {
+		access.Roles = map[string]Role{}
+	}
 	return access, nil
 }
 

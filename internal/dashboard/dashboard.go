@@ -41,7 +41,7 @@ type Backend struct {
 type KeyMeta struct {
 	Status    string     `json:"status"` // "working", "failing" or "" (not tested)
 	Reason    string     `json:"reason,omitempty"`
-	CheckedAt time.Time  `json:"checked_at,omitempty"`
+	CheckedAt time.Time  `json:"checked_at,omitzero"`
 	LeakedAt  *time.Time `json:"leaked_at,omitempty"`
 }
 
@@ -274,16 +274,14 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	names, err := store.Names(b.StorePath)
+	keys, err := store.Load(b.StorePath)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	for _, n := range names {
-		if n == f.Name {
-			b.renderNewKey(w, sid, http.StatusConflict, f, "A key with this name exists. Open it and use Replace.")
-			return
-		}
+	if _, taken := keys[f.Name]; taken {
+		b.renderNewKey(w, sid, http.StatusConflict, f, "A key with this name exists. Open it and use Replace.")
+		return
 	}
 	// Edit the file, not the running copy: hand edits not yet reloaded stay.
 	next, err := policy.LoadAccess(b.rules().AccessFile)
@@ -311,28 +309,30 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.renderNewKey(w, sid, http.StatusBadRequest, f, "Choose how the key is used.")
 		return
 	}
-	// Validate the service change before storing the value, so a refused
-	// form leaves nothing behind.
-	if f.Mode != "none" {
-		if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
-			b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
-			return
-		}
+	// Check the whole change before writing, so a refused form leaves nothing
+	// behind; after that only the two writes can fail, and a failed access
+	// write takes the value back out. The running config is swapped last,
+	// from what was checked, as in saveAndApply.
+	cfg := &policy.Config{Rules: b.rules(), AccessList: next}
+	if err := cfg.Validate(); err != nil {
+		b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
+		return
 	}
 	if err := store.Set(b.StorePath, f.Name, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
 	if f.Mode != "none" {
-		if _, err := policy.SaveAccess(b.rules(), next); err != nil {
+		if cfg, err = policy.SaveAccess(b.rules(), next); err != nil {
+			if undo := store.Delete(b.StorePath, f.Name); undo != nil {
+				err = errors.Join(err, undo)
+			}
 			b.fail(w, sid, err)
 			return
 		}
 	}
-	if err := b.apply(); err != nil {
-		b.fail(w, sid, err)
-		return
-	}
+	keys[f.Name] = value
+	b.Proxy.Swap(cfg, keys)
 	service := f.Existing
 	if f.Mode == "new" {
 		service = f.SvcName
@@ -545,6 +545,8 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		http.Redirect(w, r, "/keys/"+name+"?error=password", http.StatusSeeOther)
 		return
 	}
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	rows, err := b.rows()
 	if err != nil {
 		b.fail(w, sid, err)
@@ -556,8 +558,6 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 			return
 		}
 	}
-	b.Mu.Lock()
-	defer b.Mu.Unlock()
 	keys, err := store.Load(b.StorePath)
 	if err != nil {
 		b.fail(w, sid, err)

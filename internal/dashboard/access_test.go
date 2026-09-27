@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 func (e *env) call(method, path, tok string) int {
@@ -292,5 +294,49 @@ func TestAgentNamedNewHasAPage(t *testing.T) {
 	tokenFrom(t, e.request("POST", "/agents", url.Values{"name": {"new"}, "password": {password}}))
 	if body := e.request("GET", "/agents/new", nil).Body.String(); !strings.Contains(body, `action="/agents/new/revoke"`) {
 		t.Fatalf("/agents/new is not the agent's page:\n%s", body)
+	}
+}
+
+func TestChangesWorkWhenTheAccessFileLeavesAListOut(t *testing.T) {
+	e := newEnv(t)
+	path := e.proxy.Config().AccessFile
+	if err := os.WriteFile(path, []byte(`{"services":{"api":{"base":"https://api.example.com","key":"API_KEY","auth":"bearer"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenFrom(t, e.request("POST", "/agents", url.Values{"name": {"deimos"}, "password": {password}}))
+	if err := os.WriteFile(path, []byte(`{"roles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"sk-new-0123456789"}, "mode": {"new"}, "password": {password},
+		"svc_name": {"newsvc"}, "base": {"https://new.example.com"}, "auth": {"bearer"}})
+	if !strings.Contains(w.Header().Get("Location"), "done=added") {
+		t.Fatalf("add key with no services list: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestFailedAddKeyLeavesNoValueBehind(t *testing.T) {
+	e := newEnv(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	// The access file moves to its own read-only directory: it can be read
+	// but not replaced, while the store beside the old one stays writable.
+	cfg := *e.proxy.Config()
+	dir := t.TempDir()
+	moved := filepath.Join(dir, "access.json")
+	if err := os.Rename(cfg.AccessFile, moved); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AccessFile = moved
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(&cfg, keys)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"sk-new-0123456789"}, "mode": {"new"}, "password": {password},
+		"svc_name": {"newsvc"}, "base": {"https://new.example.com"}, "auth": {"bearer"}})
+	if keys, _ := store.Load(e.backend.StorePath); keys["NEW_KEY"] != "" {
+		t.Fatal("the value stayed although the access file was not written")
 	}
 }
