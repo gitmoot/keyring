@@ -14,9 +14,10 @@
 #   /Library/Application Support/keyring/            root:_keyring 750
 #     rules.json                                     root:_keyring 640  (the service cannot change its rules)
 #     admin.pw                                       root:_keyring 640  (dashboard password hash)
+#     service.log                                    _keyring 600       (in root's directory: see step 3)
 #     data/                                          _keyring 700
 #       keys.json, access.json, keymeta.json,
-#       usage.json, audit.log, service.log           _keyring 600
+#       usage.json, audit.log                        _keyring 600
 #
 # Running it again upgrades the binary and restarts the service. It never
 # changes existing keys or logs, the network settings in rules.json, or a
@@ -184,10 +185,14 @@ chmod 640 "$DIR/rules.json"
 "$BIN" enable-dashboard --config "$DIR/rules.json"
 "$BIN" admin-password --config "$DIR/rules.json" --if-missing
 sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json"
-# launchd creates the service log with mode 644 whatever the Umask says. The
-# data directory is the service's, so this is done by the binary, which never
-# follows a link the service could have put there.
-"$BIN" service-file "$DATA/service.log"
+# The service log is in root's directory, not in data/: launchd opens it at
+# every start, possibly as root, and in data/ the service could swap it for a
+# link to any file. Here only root can add or rename entries. The file itself
+# is the service's, mode 600 (launchd would make it 644).
+LOG=$DIR/service.log
+touch "$LOG"
+chown "$NAME:$NAME" "$LOG"
+chmod 600 "$LOG"
 
 # 4. Start at boot as _keyring. KeepAlive restarts it until the tailnet
 # address is up after boot.
@@ -209,7 +214,7 @@ cat >"$PLIST" <<EOF
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>Umask</key><integer>63</integer>
-  <key>StandardErrorPath</key><string>$DATA/service.log</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
 </dict>
 </plist>
 EOF
@@ -238,12 +243,12 @@ else
 fi
 ADMIN=$(sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json" | sed -n 's/^dashboard: //p')
 if [ -n "$ADMIN" ]; then
-	code=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN/login" || true)
+	code=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$ADMIN/login" || true)
 	if [ "$code" != 200 ]; then
-		echo "FAILED: the dashboard $ADMIN/login answers $code, not 200; see $DATA/service.log" >&2
-		tail -n 5 "$DATA/service.log" >&2 || true
+		echo "FAILED: the dashboard $ADMIN/login answers $code, not 200; see $LOG" >&2
+		tail -n 5 "$LOG" >&2 || true
 		exit 1
 	fi
 	echo "dashboard $ADMIN/login answers 200: ok"
 fi
-tail -n 3 "$DATA/service.log" 2>/dev/null || true
+tail -n 3 "$LOG" 2>/dev/null || true

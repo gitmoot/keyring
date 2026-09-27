@@ -186,3 +186,28 @@ func TestAdminPasswordIfMissingRefusesADamagedFile(t *testing.T) {
 		t.Fatalf("a damaged password file was kept: %s", out.String())
 	}
 }
+
+func TestEnableDashboardCompletesAHalfSetDashboard(t *testing.T) {
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.json")
+	access := filepath.Join(dir, "access.json")
+	raw := `{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"` + filepath.Join(dir, "a.log") +
+		`","access_file":"` + access + `","admin_listen":"127.0.0.1:7800"}`
+	if err := os.WriteFile(rules, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(access, []byte(`{"services":{},"roles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"enable-dashboard", "--config", rules}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("enable: %d %s", code, errOut.String())
+	}
+	cfg, err := policy.Load(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminListen != "127.0.0.1:7800" || cfg.AdminPasswordFile != filepath.Join(dir, "admin.pw") {
+		t.Fatalf("after enable: listen %q, password file %q", cfg.AdminListen, cfg.AdminPasswordFile)
+	}
+}

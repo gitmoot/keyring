@@ -127,16 +127,12 @@ func rewriteRules(configPath string, out []byte) error {
 	return nil
 }
 
-// ownAccessFile gives the access file to the service, as ownServiceFile.
-func ownAccessFile(path string) error { return ownServiceFile(path, false) }
-
-// ownServiceFile gives a file in the service's data directory to the owner of
-// that directory (the service user), mode 600, when run as root; with create,
-// it makes an empty one first if there is none. The directory is the service
+// ownAccessFile gives the access file to the owner of its directory (the
+// service user), mode 600, when run as root. The directory is the service
 // user's, so the file is opened without following a symlink and must have one
 // link, and the owner and mode are set on the open file: otherwise root could
-// be tricked into handing over, or creating, another file.
-func ownServiceFile(path string, create bool) error {
+// be tricked into handing over another file.
+func ownAccessFile(path string) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
@@ -144,11 +140,7 @@ func ownServiceFile(path string, create bool) error {
 	if !ok {
 		return fmt.Errorf("%s: cannot read the directory's owner", path)
 	}
-	flags := os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
-	if create {
-		flags |= os.O_CREATE
-	}
-	f, err := os.OpenFile(path, flags, 0o600)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}

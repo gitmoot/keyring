@@ -51,12 +51,12 @@ server; use your own addresses (for example their tailnet IPs).
 `install.sh`:
 - creates the hidden group and user `_keyring`, with no shell and no password, so nobody can log in as it;
 - installs `/usr/local/libexec/keyring`, owned by root;
-- creates `/Library/Application Support/keyring/` with root-owned `rules.json` (the network boundary and dashboard address), which the service can read but not change, and `data/`, which only the service can read (keys, `access.json` with services and roles, test results, usage, audit log, service log);
+- creates `/Library/Application Support/keyring/` with root-owned `rules.json` (the network boundary and dashboard address), which the service can read but not change, the service log (the service's file, in root's directory so the service cannot swap it for a link), and `data/`, which only the service can read (keys, `access.json` with services and roles, test results, usage, audit log);
 - moves services and roles out of a `rules.json` from before v0.2 into `data/access.json` (`keyring migrate`);
 - turns on the dashboard at `http://127.0.0.1:7702`, on this Mac only, and sets its password if none is set (`keyring enable-dashboard`, `keyring admin-password --if-missing`);
 - starts the LaunchDaemon `org.gitmoot.keyring`.
 
-It stops, changing nothing further, if `--listen` or `--allow` is invalid, if a file in `data/` is a link, or if the stored dashboard password is damaged (then set a new one with `keyring admin-password`). It ends by checking that the account you ran `sudo` from can read neither the rules, the password hash nor the data, and cannot change the binary, and that the dashboard answers; if not, it fails. Running it again upgrades the binary and keeps the existing rules, keys, logs and dashboard password.
+It stops, changing nothing further, if `--listen` or `--allow` is invalid, if the access file in `data/` is a link, or if the stored dashboard password is damaged (then set a new one with `keyring admin-password`). It ends by checking that the account you ran `sudo` from can read neither the rules, the password hash nor the data, and cannot change the binary, and that the dashboard answers; if not, it fails. Running it again upgrades the binary and keeps the existing rules, keys, logs and dashboard password.
 
 5. Check from the agents' server: `curl -s http://192.0.2.10:7701/_keyring/health` should print `ok`.
 

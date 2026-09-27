@@ -135,7 +135,7 @@ func enableDashboard(configPath, listen string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if rules.AdminListen != "" {
+	if rules.AdminListen != "" && rules.AdminPasswordFile != "" {
 		fmt.Fprintf(stdout, "dashboard already on: http://%s\n", rules.AdminListen)
 		return nil
 	}
@@ -147,8 +147,13 @@ func enableDashboard(configPath, listen string, stdout io.Writer) error {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return fmt.Errorf("%s: %w", configPath, err)
 	}
-	fields["admin_listen"], _ = json.Marshal(listen)
-	if rules.AdminPasswordFile == "" { // keep a password file the owner already named
+	// Fill in only what is missing: the owner's own settings stay.
+	if rules.AdminListen == "" {
+		fields["admin_listen"], _ = json.Marshal(listen)
+	} else {
+		listen = rules.AdminListen
+	}
+	if rules.AdminPasswordFile == "" {
 		fields["admin_password_file"], _ = json.Marshal(filepath.Join(filepath.Dir(configPath), "admin.pw"))
 	}
 	out, err := json.MarshalIndent(fields, "", "  ")
