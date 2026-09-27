@@ -141,6 +141,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "role may not use this service")
 		return
 	}
+	if access.Expired(start) {
+		fail(http.StatusForbidden, "access to this service expired")
+		return
+	}
 	if !access.AllowsMethod(r.Method) {
 		fail(http.StatusForbidden, "method not allowed for this role")
 		return

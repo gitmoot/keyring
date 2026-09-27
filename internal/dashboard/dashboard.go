@@ -64,6 +64,7 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/replace", b.replaceKey)
 	a.Handle("POST /keys/{name}/leaked", b.markLeaked)
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)
+	registerAccess(b)
 }
 
 // keyRow is one line of the keys table.
@@ -284,8 +285,12 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 			return
 		}
 	}
-	cfg := b.Proxy.Config()
-	next := cloneAccess(cfg.AccessList)
+	// Edit the file, not the running copy: hand edits not yet reloaded stay.
+	next, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
 	switch f.Mode {
 	case "existing":
 		svc, ok := next.Services[f.Existing]
@@ -309,7 +314,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	// Validate the service change before storing the value, so a refused
 	// form leaves nothing behind.
 	if f.Mode != "none" {
-		if err := (&policy.Config{Rules: b.rules(), AccessList: cloneAccess(next)}).Validate(); err != nil {
+		if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 			b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
 			return
 		}
@@ -580,24 +585,6 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 	}
 	b.Admin.Audit("key_deleted", sid, map[string]any{"key": name})
 	http.Redirect(w, r, "/keys?done=deleted", http.StatusSeeOther)
-}
-
-func cloneAccess(a policy.AccessList) policy.AccessList {
-	out := policy.AccessList{Services: make(map[string]policy.Service, len(a.Services)), Roles: make(map[string]policy.Role, len(a.Roles))}
-	for k, v := range a.Services {
-		out.Services[k] = v
-	}
-	for k, v := range a.Roles {
-		acc := make(map[string]policy.Access, len(v.Access))
-		for s, x := range v.Access {
-			x.Methods = append([]string(nil), x.Methods...)
-			x.Paths = append([]string(nil), x.Paths...)
-			acc[s] = x
-		}
-		v.Access = acc
-		out.Roles[k] = v
-	}
-	return out
 }
 
 func (b *Backend) fail(w http.ResponseWriter, sid string, err error) {

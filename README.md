@@ -102,7 +102,7 @@ A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Tok
 
 A service that echoes a key in some other encoding (for example base64 inside a larger text) is not protected; do not route such a service through the keyring.
 
-Allowed methods default to GET, HEAD and POST.
+Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its access (401); an access's own `"expires"` (RFC 3339, like `"2026-12-31T00:00:00Z"`) ends only that service (403).
 
 A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
 
@@ -135,6 +135,13 @@ The **Keys** page (`/keys`) lists every key the access file names or the store h
 - Add, replace, mark as leaked and delete ask for the password every time. They work only on keys the page lists.
 
 Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
+
+The **Access** page (`/access`) is a grid: rows are agents (roles), columns are services. A cell shows off, or the methods it allows with today's calls and the daily limit. Calls today count every attempt, refused ones too; the limit counts only calls that went out.
+- **Open a cell** to switch access on or off and set the methods (read only, full, or a custom list), the allowed paths, the daily limit and an end date (UTC). A refused change leaves the access file as it was.
+- **Add agent** makes a role with no access and shows its token once, with a copy button and the file it belongs in on the calling machine. Only the token's SHA-256 is kept.
+- **New token** on an agent's page shows a new token once; the old one stops working at once. Sending the form twice (reloading the result page) does not replace the token again.
+- **Revoke** removes the agent after a tick; its calls fail at once (401).
+- Every change asks for the password and takes effect on the next call. The dashboard edits the access file on disk, so hand edits made since the last reload are kept, and applied.
 
 ## Relay on the agent server (step 2)
 
