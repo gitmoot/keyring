@@ -145,7 +145,7 @@ func TestKeysPageListsWithoutValues(t *testing.T) {
 	e.proxyCall()
 	w := e.request("GET", "/keys", nil)
 	body := w.Body.String()
-	if w.Code != 200 || !strings.Contains(body, "API_KEY") || !strings.Contains(body, "phobos") || !strings.Contains(body, "just now") {
+	if w.Code != 200 || !strings.Contains(body, "API_KEY") || !strings.Contains(body, "1 agent") || !strings.Contains(body, "used just now") {
 		t.Fatalf("keys page %d:\n%s", w.Code, body)
 	}
 	if strings.Contains(e.everyPage("/keys/API_KEY"), oldValue) {
@@ -156,11 +156,19 @@ func TestKeysPageListsWithoutValues(t *testing.T) {
 	}
 }
 
-func TestAddKeyWithNewServiceNeverEchoesTheValue(t *testing.T) {
+// addAndConnect adds a key (name and value only), then connects it.
+func (e *env) addAndConnect(name, value string, connect url.Values) (add, conn *httptest.ResponseRecorder) {
+	add = e.request("POST", "/keys", url.Values{"name": {name}, "value": {value}, "password": {password}})
+	connect.Set("password", password)
+	conn = e.request("POST", "/keys/"+name+"/connect", connect)
+	return add, conn
+}
+
+func TestAddKeyNeedsOnlyNameAndValueAndConnectsLater(t *testing.T) {
 	e := newEnv(t)
 	const value = "sk-added-VALUE-abcdef012345"
-	w := e.request("POST", "/keys", url.Values{"name": {"TAVILY_API_KEY"}, "value": {value}, "mode": {"new"}, "password": {password},
-		"svc_name": {"tavily"}, "base": {"https://api.tavily.com"}, "auth": {"bearer"}, "test_method": {"GET"}, "test_path": {"/usage"}})
+	before, _ := os.ReadFile(e.proxy.Config().AccessFile)
+	w := e.request("POST", "/keys", url.Values{"name": {"TAVILY_API_KEY"}, "value": {value}, "password": {password}})
 	if w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), value) {
 		t.Fatalf("add: %d %s", w.Code, w.Body.String())
 	}
@@ -168,42 +176,114 @@ func TestAddKeyWithNewServiceNeverEchoesTheValue(t *testing.T) {
 	if keys["TAVILY_API_KEY"] != value {
 		t.Fatal("value not stored")
 	}
-	if svc, ok := e.proxy.Config().Services["tavily"]; !ok || svc.Key != "TAVILY_API_KEY" {
+	if after, _ := os.ReadFile(e.proxy.Config().AccessFile); !bytes.Equal(before, after) {
+		t.Fatal("adding a key changed the access file")
+	}
+	// The key page suggests the API from the name.
+	page := e.request("GET", "/keys/TAVILY_API_KEY", nil).Body.String()
+	if !strings.Contains(page, `value="tavily" selected`) || !strings.Contains(page, `value="https://api.tavily.com"`) || !strings.Contains(page, "not connected yet") {
+		t.Fatalf("key page does not suggest Tavily:\n%s", page)
+	}
+	w = e.request("POST", "/keys/TAVILY_API_KEY/connect", url.Values{"preset": {"tavily"}, "service": {"tavily"}, "base": {"https://api.tavily.com"},
+		"auth": {"bearer"}, "test_path": {"/usage"}, "password": {password}})
+	if w.Header().Get("Location") != "/keys/TAVILY_API_KEY?done=connected" {
+		t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+	}
+	if svc, ok := e.proxy.Config().Services["tavily"]; !ok || svc.Key != "TAVILY_API_KEY" || svc.TestPath != "/usage" {
 		t.Fatalf("service not added to the running proxy: %+v", e.proxy.Config().Services)
 	}
 	if strings.Contains(e.everyPage("/keys/TAVILY_API_KEY"), value) || strings.Contains(e.audit.String(), value) {
 		t.Fatal("the value appears in a page or the audit log")
 	}
-	if !strings.Contains(e.audit.String(), `"admin":"key_added"`) {
-		t.Fatalf("audit: %s", e.audit.String())
+	for _, ev := range []string{`"admin":"key_added"`, `"admin":"key_connected"`} {
+		if !strings.Contains(e.audit.String(), ev) {
+			t.Fatalf("audit lacks %s: %s", ev, e.audit.String())
+		}
 	}
 }
 
-func TestRefusedAddLeavesNothingBehind(t *testing.T) {
+func TestConnectTakesSettingsPastedFromAnAgent(t *testing.T) {
+	e := newEnv(t)
+	_, w := e.addAndConnect("ACME_KEY", "sk-acme-0123456789", url.Values{
+		"pasted": {`{"service":"acme","base":"https://api.acme.example","auth":"header","header":"X-Acme-Key","test_path":"/v1/ping"}`}})
+	if w.Header().Get("Location") != "/keys/ACME_KEY?done=connected" {
+		t.Fatalf("connect with pasted settings: %d %s", w.Code, w.Body.String())
+	}
+	svc := e.proxy.Config().Services["acme"]
+	if svc.Key != "ACME_KEY" || svc.Auth != "header" || svc.Header != "X-Acme-Key" || svc.Base != "https://api.acme.example" {
+		t.Fatalf("service from pasted settings: %+v", svc)
+	}
+	for name, pasted := range map[string]string{
+		"not json":      `service: acme2`,
+		"unknown field": `{"service":"acme2","base":"https://api.acme.example","auth":"bearer","key":"OTHER_KEY"}`,
+	} {
+		w := e.request("POST", "/keys/ACME_KEY/connect", url.Values{"pasted": {pasted}, "password": {password}})
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, w.Code)
+		}
+	}
+	if _, ok := e.proxy.Config().Services["acme2"]; ok {
+		t.Fatal("refused settings were applied")
+	}
+}
+
+func TestRefusedAddOrConnectLeavesNothingBehind(t *testing.T) {
 	e := newEnv(t)
 	before, _ := os.ReadFile(e.proxy.Config().AccessFile)
-	w := e.request("POST", "/keys", url.Values{"name": {"BAD_KEY"}, "value": {"sk-bad-VALUE-0123456789"}, "mode": {"new"}, "password": {password},
-		"svc_name": {"bad"}, "base": {"http://example.com"}, "auth": {"bearer"}})
+	_, w := e.addAndConnect("BAD_KEY", "sk-bad-VALUE-0123456789", url.Values{"service": {"bad"}, "base": {"http://example.com"}, "auth": {"bearer"}})
 	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "sk-bad-VALUE") {
 		t.Fatalf("plain-http service: %d", w.Code)
 	}
-	if keys, _ := store.Load(e.backend.StorePath); keys["BAD_KEY"] != "" {
-		t.Fatal("value stored although the service was refused")
-	}
 	if after, _ := os.ReadFile(e.proxy.Config().AccessFile); !bytes.Equal(before, after) {
-		t.Fatal("access file changed")
+		t.Fatal("access file changed by a refused connect")
 	}
-	if w := e.request("POST", "/keys", url.Values{"name": {"API_KEY"}, "value": {"x"}, "mode": {"none"}, "password": {password}}); w.Code != http.StatusConflict {
+	if _, w := e.addAndConnect("BAD_KEY", "x", url.Values{"service": {"api"}, "base": {"https://example.com"}, "auth": {"bearer"}}); w.Code != http.StatusConflict {
+		t.Fatalf("service name taken: %d, want 409", w.Code)
+	}
+	if w := e.request("POST", "/keys/GHOST_KEY/connect", url.Values{"service": {"ghost"}, "base": {"https://example.com"}, "auth": {"bearer"}, "password": {password}}); w.Code != http.StatusNotFound {
+		t.Fatalf("connect an unknown key: %d, want 404", w.Code)
+	}
+	if w := e.request("POST", "/keys", url.Values{"name": {"API_KEY"}, "value": {"x"}, "password": {password}}); w.Code != http.StatusConflict {
 		t.Fatalf("existing name: %d, want 409", w.Code)
 	}
-	if w := e.request("POST", "/keys", url.Values{"name": {"1bad"}, "value": {"x"}, "mode": {"none"}, "password": {password}}); w.Code != http.StatusBadRequest {
+	if w := e.request("POST", "/keys", url.Values{"name": {"1bad"}, "value": {"x"}, "password": {password}}); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad name: %d", w.Code)
+	}
+}
+
+func TestConnectNeedsThePassword(t *testing.T) {
+	e := newEnv(t)
+	e.request("POST", "/keys", url.Values{"name": {"ACME_KEY"}, "value": {"sk-acme-0123456789"}, "password": {password}})
+	w := e.request("POST", "/keys/ACME_KEY/connect", url.Values{"service": {"acme"}, "base": {"https://api.acme.example"}, "auth": {"bearer"}})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("connect without password: %d, want 403", w.Code)
+	}
+	if _, ok := e.proxy.Config().Services["acme"]; ok {
+		t.Fatal("connected without the password")
+	}
+}
+
+func TestAddedKeyServesAServiceWaitingForIt(t *testing.T) {
+	e := newEnv(t)
+	// The access file already names a key that is not stored yet: its calls
+	// answer 503 until the key is added, then work without a reload.
+	if err := store.Delete(e.backend.StorePath, "API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(e.proxy.Config(), keys)
+	if code := e.proxyCall(); code != http.StatusServiceUnavailable {
+		t.Fatalf("before: %d, want 503", code)
+	}
+	e.request("POST", "/keys", url.Values{"name": {"API_KEY"}, "value": {newValue}, "password": {password}})
+	if code := e.proxyCall(); code != 200 || e.seenAuth.Load() != "Bearer "+newValue {
+		t.Fatalf("after adding the key: %d %v", code, e.seenAuth.Load())
 	}
 }
 
 func TestSensitiveChangesNeedThePasswordEveryTime(t *testing.T) {
 	e := newEnv(t) // just logged in: that alone must not be enough
-	if w := e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"v-0123456789"}, "mode": {"none"}}); w.Code != http.StatusForbidden {
+	if w := e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"v-0123456789"}}); w.Code != http.StatusForbidden {
 		t.Fatalf("add without password: %d, want 403", w.Code)
 	}
 	w := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {newValue}})

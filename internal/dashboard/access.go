@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -43,10 +44,14 @@ type gridCell struct {
 	Label, Detail string
 }
 
+// gridRow is one agent's card: the services it may use (Cells) and the ones
+// it may not (Off), for "Add a service".
 type gridRow struct {
-	Role  string
-	Ended bool
-	Cells []gridCell
+	Role       string
+	Ended      bool
+	Cells      []gridCell
+	Off        []string
+	CallsToday int
 }
 
 // methodsLabel names a method list the way the cell form offers it.
@@ -124,6 +129,7 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 				c.On, c.Ended = true, row.Ended || acc.Expired(now)
 				c.Label = methodsLabel(acc.Methods)
 				n := count[[2]string{role, svc}]
+				row.CallsToday += n
 				switch {
 				case c.Ended:
 					c.Detail = "ended"
@@ -135,7 +141,11 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 					c.Detail = calls(n) + " today · no limit"
 				}
 			}
-			row.Cells = append(row.Cells, c)
+			if c.On {
+				row.Cells = append(row.Cells, c)
+			} else {
+				row.Off = append(row.Off, svc)
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -229,6 +239,10 @@ func (f cellForm) access(now time.Time) (policy.Access, error) {
 
 func (b *Backend) cellPage(w http.ResponseWriter, r *http.Request, sid string) {
 	role, service := r.PathValue("role"), r.PathValue("service")
+	if service == "-" { // "Add a service" without JavaScript: ?service=NAME
+		http.Redirect(w, r, "/access/"+url.PathEscape(role)+"/"+url.PathEscape(r.URL.Query().Get("service")), http.StatusSeeOther)
+		return
+	}
 	cfg := b.Proxy.Config()
 	rl, ok := cfg.Roles[role]
 	if _, known := cfg.Services[service]; !ok || !known {
@@ -386,12 +400,18 @@ func (b *Backend) agentPage(w http.ResponseWriter, r *http.Request, sid string) 
 	for _, s := range sortedNames(rl.Access) {
 		services = append(services, svcRow{s, methodsLabel(rl.Access[s].Methods)})
 	}
+	var off []string
+	for _, s := range sortedNames(cfg.Services) {
+		if _, on := rl.Access[s]; !on {
+			off = append(off, s)
+		}
+	}
 	expires := ""
 	if rl.Expires != nil {
 		expires = rl.Expires.UTC().Format(time.DateOnly)
 	}
 	b.render(w, http.StatusOK, "agent", sid, map[string]any{
-		"Role": role, "Services": services, "Expires": expires, "Ended": rl.Expired(b.Now()),
+		"Role": role, "Services": services, "Off": off, "Expires": expires, "Ended": rl.Expired(b.Now()),
 		"File": tokenDir + "/" + role + ".token", "Current": rl.TokenSHA256[:12],
 		"Error": agentErrors[r.URL.Query().Get("error")],
 	})

@@ -383,14 +383,22 @@ func randomToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// js is the dashboard's only script: a copy button for a token shown once.
-// A button with data-copy="ID" copies the value of the element with that ID.
+// js is the dashboard's only script, and the pages work without it: a copy
+// button for a token shown once (data-copy="ID"), and selects that act when
+// changed (data-autosubmit submits the form; a form with data-pathpick opens
+// its action with the chosen value in place of the final "-").
 const js = `document.addEventListener("click", function (e) {
   var b = e.target.closest("[data-copy]");
   if (!b) return;
   var el = document.getElementById(b.dataset.copy);
   el.select();
   navigator.clipboard.writeText(el.value).then(function () { b.textContent = "Copied"; });
+});
+document.addEventListener("change", function (e) {
+  var t = e.target;
+  if (t.matches("select[data-autosubmit]")) t.form.submit();
+  var f = t.closest("form[data-pathpick]");
+  if (f && t.value) location.href = f.getAttribute("action").replace(/\/-$/, "/" + encodeURIComponent(t.value));
 });
 `
 
@@ -405,42 +413,73 @@ func serveCSS(w http.ResponseWriter, _ *http.Request) {
 }
 
 var pages = template.Must(template.New("pages").Parse(`
-{{define "head"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"></head><body>{{end}}
+{{define "head"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"></head><body>{{end}}
 {{define "login"}}{{template "head"}}
 <main class="narrow"><h1>Keyring</h1>
 {{with .Message}}<p class="error">{{.}}</p>{{end}}
-<form method="post" action="/login"><label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label><button>Log in</button></form>
+<form method="post" action="/login" class="card"><label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label><button>Log in</button></form>
 </main></body></html>{{end}}
 {{define "home"}}{{template "head"}}
 <header class="top"><h1>Keyring</h1><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Log out</button></form></header>
 <main><p>Logged in. The keys and access pages come next.</p></main></body></html>{{end}}
 `))
 
-const css = `*{box-sizing:border-box}body{margin:0;font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#15181d}
-main{padding:24px;max-width:1180px}main.narrow{max-width:360px;margin:12vh auto}
-h1{font-size:22px;margin:0 0 16px}header.top{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid #e5e7eb;background:#fff}header.top h1{margin:0}
-label{display:block;font-size:13px;color:#6b7280}input{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;color:#15181d}
-button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}button.ghost{background:#fff;color:#15181d;border:1px solid #e5e7eb}
-.error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px}
-.notice{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 10px}
-nav.tabs{display:flex;gap:6px}nav.tabs a{padding:6px 12px;border-radius:999px;color:#15181d;text-decoration:none;border:1px solid #e5e7eb;background:#fff}nav.tabs a.on{background:#15181d;color:#fff;border-color:#15181d}
-.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}.bar form{display:flex;gap:8px}.bar input{margin:0;width:240px}
-a.btn{display:inline-block;background:#4f46e5;color:#fff;border-radius:8px;padding:9px 16px;font-weight:600;text-decoration:none}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;font-size:14px}
-th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #e5e7eb;vertical-align:middle}th{color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.03em;background:#fafafa}
-td a{color:#15181d;font-weight:600}code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.masked{letter-spacing:2px;color:#9ca3af}.mute{color:#6b7280}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#cbd5e1}.dot.ok{background:#16a34a}.dot.bad{background:#dc2626}.dot.warn{background:#d97706}
-.chip{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#f1f5f9;margin:1px 2px}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px 18px;margin-bottom:14px;max-width:720px}.card h2{font-size:16px;margin:0 0 10px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.row label{flex:1;min-width:160px}
-select{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;background:#fff}
-button.danger{background:#dc2626}.check{display:flex;gap:8px;align-items:center;color:#15181d;font-size:14px;margin-bottom:12px}.check input{width:auto;margin:0}
-dl{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;margin:0}dt{color:#6b7280}dd{margin:0}
-.grid{overflow-x:auto}.grid td,.grid th{text-align:center;white-space:nowrap}.grid td:first-child,.grid th:first-child{text-align:left}
-.cell{display:inline-block;min-width:92px;padding:6px 8px;border-radius:8px;text-decoration:none;font-weight:500;font-size:13px}
-.cell.on{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}.cell.off{background:#f8fafc;color:#94a3b8;border:1px dashed #e2e8f0}.cell.ended{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
-.cell small{display:block;font-weight:400;color:#6b7280}textarea{display:block;width:100%;min-height:80px;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
-.token{display:flex;gap:8px}.token input{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}.warnbox{background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:8px 10px}`
+const css = `:root{--bg:#f5f6f8;--card:#fff;--text:#111418;--mute:#667085;--line:#e4e7ec;--brand:#4f46e5;--brand-text:#fff;--ok:#067647;--ok-bg:#ecfdf3;--bad:#b42318;--bad-bg:#fef3f2;--warn:#b54708;--warn-bg:#fffaeb;--chip:#f2f4f7;--radius:14px;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#0c0e12;--card:#161a21;--text:#eceef2;--mute:#98a2b3;--line:#262b35;--brand:#7c74ff;--chip:#222833;--ok:#47cd89;--ok-bg:#0e2a1d;--bad:#f97066;--bad-bg:#2d1411;--warn:#fdb022;--warn-bg:#2b200a}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+a{color:inherit}.wrap{max-width:760px;margin:0 auto;padding:0 16px}
+main.wrap{padding-top:18px;padding-bottom:calc(40px + env(safe-area-inset-bottom))}
+header.top{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding-top:env(safe-area-inset-top)}
+header.top .wrap{display:flex;align-items:center;gap:12px;height:56px}
+.brand{font-weight:700;font-size:18px;text-decoration:none;margin-right:auto}
+.tabs{display:flex;gap:4px;background:var(--chip);padding:3px;border-radius:10px}
+.tabs a{padding:6px 14px;border-radius:8px;text-decoration:none;font-size:15px;color:var(--mute)}.tabs a.on{background:var(--card);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.logout{margin:0}button.link{background:none;border:0;color:var(--mute);padding:8px 4px;font:inherit;font-size:14px;min-height:0}
+h1{font-size:24px;line-height:1.25;margin:0}h2{font-size:17px;margin:0 0 12px}
+.head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:4px 0 16px}.head h1{margin-right:auto;word-break:break-all}
+.back{flex-basis:100%;font-size:14px;color:var(--mute);text-decoration:none}.back::before{content:"‹ "}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+label{display:block;font-size:14px;color:var(--mute);margin-bottom:14px}
+input::placeholder,textarea::placeholder{color:var(--mute);opacity:.6}
+input,select,textarea{display:block;width:100%;margin-top:6px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--text);font:inherit;font-size:16px;min-height:46px}
+textarea{min-height:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--brand);outline-offset:-1px;border-color:transparent}
+button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:0 18px;border:0;border-radius:10px;background:var(--brand);color:var(--brand-text);font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
+button.ghost,.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}button.danger{background:var(--bad);color:#fff}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}.inline{margin-top:14px}
+.notice,.error,.warnbox{border-radius:10px;padding:10px 12px;margin:0 0 14px}.notice{background:var(--ok-bg);color:var(--ok)}.error{background:var(--bad-bg);color:var(--bad)}.warnbox{background:var(--warn-bg);color:var(--warn)}
+.mute,.hint{color:var(--mute)}.hint{font-size:14px;margin:-6px 0 14px}
+.pill{display:inline-block;font-size:13px;font-weight:600;padding:2px 10px;border-radius:999px;background:var(--chip);color:var(--mute);white-space:nowrap}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.bad{background:var(--bad-bg);color:var(--bad)}.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.chip{display:inline-block;font-size:14px;padding:3px 10px;border-radius:999px;background:var(--chip);margin:2px 4px 2px 0;text-decoration:none}
+.search{margin:0 0 12px}.search input{margin:0}
+.list{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.list li+li{border-top:1px solid var(--line)}.list .empty{padding:18px;color:var(--mute)}
+.item{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:12px 16px;text-decoration:none;align-items:center}.item:active{background:var(--chip)}
+.item .name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .meta{grid-column:1/-1;font-size:14px;color:var(--mute)}
+dl{display:grid;grid-template-columns:96px 1fr;gap:8px 12px;margin:0}dt{color:var(--mute);font-size:14px;padding-top:2px}dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.masked{letter-spacing:2px;color:var(--mute)}code{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+details>summary{cursor:pointer;font-weight:600;list-style:none;padding:4px 0;margin-bottom:10px}details>summary::-webkit-details-marker{display:none}details>summary::before{content:"▸ ";color:var(--mute)}details[open]>summary::before{content:"▾ "}
+.card details{border-top:1px solid var(--line);padding-top:10px;margin-bottom:10px}details.card>summary{margin-bottom:0}details.card[open]>summary{margin-bottom:12px}
+.danger>summary{color:var(--bad)}hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}@media (max-width:420px){.two{grid-template-columns:1fr}}
+.check{display:flex;align-items:center;gap:10px;color:var(--text);font-size:15px;margin-bottom:12px}.check input{width:22px;height:22px;min-height:0;margin:0;flex:none;accent-color:var(--brand)}
+.switch{display:flex;align-items:center;gap:12px;color:var(--text);font-size:16px;font-weight:600;margin-bottom:16px}.switch input{width:24px;height:24px;min-height:0;margin:0;accent-color:var(--brand)}
+.lbl{font-size:14px;color:var(--mute);margin:0 0 6px}
+.seg{display:flex;background:var(--chip);border-radius:10px;padding:3px;margin-bottom:12px}
+.seg label{flex:1;margin:0;text-align:center;min-width:0;position:relative}.seg input{position:absolute;inset:0;width:100%;height:100%;min-height:0;margin:0;opacity:0;pointer-events:none}.seg span{display:block;padding:9px 4px;border-radius:8px;color:var(--mute);font-size:15px;white-space:nowrap}.seg input:checked+span{background:var(--card);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}.seg input:focus-visible+span{outline:2px solid var(--brand)}
+.methods{display:none;flex-wrap:wrap;gap:4px 16px}form:has(input[value=custom]:checked) .methods{display:flex}.methods .check{margin-bottom:8px;font-size:14px}
+.agenthead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}.agenthead .name{font-weight:700;font-size:17px;text-decoration:none;margin-right:auto}
+.grants{list-style:none;margin:0 0 4px;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.grant{display:flex;flex-direction:column;gap:1px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;text-decoration:none}
+.grant .svc{font-weight:600}.grant .what{font-size:13px;color:var(--ok);font-weight:600}.grant .mute{font-size:13px}.grant.ended .what{color:var(--warn)}
+.add{margin-top:10px}.add select{margin:0}
+.token{display:flex;gap:8px}.token input{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
+.empty{color:var(--mute)}
+main.narrow{max-width:400px;margin:0 auto;padding:18vh 16px 40px}main.narrow h1{margin-bottom:20px}main.narrow button{width:100%}`
 
 // CSRF returns the session's CSRF token, for forms ("" once the session has
 // ended, for instance by a logout in another tab).

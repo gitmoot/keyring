@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
-	"github.com/gitmoot/keyring/internal/store"
 )
 
 func (e *env) call(method, path, tok string) int {
@@ -74,8 +72,8 @@ func TestGridChangesApplyToTheNextCall(t *testing.T) {
 	if code := e.call("GET", "/api/v2/x", token); code != http.StatusForbidden {
 		t.Fatalf("after switching off: %d, want 403", code)
 	}
-	if !strings.Contains(e.request("GET", "/access", nil).Body.String(), `cell off" href="/access/phobos/api">off</a>`) {
-		t.Fatal("grid does not show the cell off")
+	if page := e.request("GET", "/access", nil).Body.String(); strings.Contains(page, `href="/access/phobos/api"`) || !strings.Contains(page, "<option>api</option>") {
+		t.Fatal("the agents page still shows api as granted, or does not offer to add it")
 	}
 }
 
@@ -224,7 +222,7 @@ func TestCellEndDateAndEditorRoundTrip(t *testing.T) {
 	end := time.Now().UTC().AddDate(0, 0, 3).Format(time.DateOnly)
 	e.saveCell("phobos", "api", url.Values{"on": {"yes"}, "mode": {"custom"}, "method": {"GET", "DELETE"}, "paths": {"/v1\n/v3"}, "daily": {"50"}, "expires": {end}})
 	page := e.request("GET", "/access/phobos/api", nil).Body.String()
-	for _, want := range []string{`value="custom" selected`, `value="DELETE" checked`, "/v1\n/v3", `value="50"`, `value="` + end + `"`} {
+	for _, want := range []string{`value="custom" checked`, `value="DELETE" checked`, "/v1\n/v3", `value="50"`, `value="` + end + `"`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("editor does not show %q:\n%s", want, page)
 		}
@@ -250,8 +248,7 @@ func TestChangesKeepHandEditsNotYetReloaded(t *testing.T) {
 	if _, err := policy.SaveAccess(e.proxy.Config().Rules, access); err != nil { // by hand, no SIGHUP
 		t.Fatal(err)
 	}
-	e.request("POST", "/keys", url.Values{"name": {"OTHER_KEY"}, "value": {"sk-other-0123456789"}, "mode": {"new"}, "password": {password},
-		"svc_name": {"other"}, "base": {"https://other.example.com"}, "auth": {"bearer"}})
+	e.addAndConnect("OTHER_KEY", "sk-other-0123456789", url.Values{"service": {"other"}, "base": {"https://other.example.com"}, "auth": {"bearer"}})
 	e.saveCell("phobos", "other", url.Values{"on": {"yes"}, "mode": {"read"}, "paths": {"/"}})
 	after, err := policy.LoadAccess(e.proxy.Config().AccessFile)
 	if err != nil {
@@ -307,36 +304,8 @@ func TestChangesWorkWhenTheAccessFileLeavesAListOut(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"roles":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w := e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"sk-new-0123456789"}, "mode": {"new"}, "password": {password},
-		"svc_name": {"newsvc"}, "base": {"https://new.example.com"}, "auth": {"bearer"}})
-	if !strings.Contains(w.Header().Get("Location"), "done=added") {
-		t.Fatalf("add key with no services list: %d %s", w.Code, w.Body.String())
-	}
-}
-
-func TestFailedAddKeyLeavesNoValueBehind(t *testing.T) {
-	e := newEnv(t)
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-	// The access file moves to its own read-only directory: it can be read
-	// but not replaced, while the store beside the old one stays writable.
-	cfg := *e.proxy.Config()
-	dir := t.TempDir()
-	moved := filepath.Join(dir, "access.json")
-	if err := os.Rename(cfg.AccessFile, moved); err != nil {
-		t.Fatal(err)
-	}
-	cfg.AccessFile = moved
-	keys, _ := store.Load(e.backend.StorePath)
-	e.proxy.Swap(&cfg, keys)
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {"sk-new-0123456789"}, "mode": {"new"}, "password": {password},
-		"svc_name": {"newsvc"}, "base": {"https://new.example.com"}, "auth": {"bearer"}})
-	if keys, _ := store.Load(e.backend.StorePath); keys["NEW_KEY"] != "" {
-		t.Fatal("the value stayed although the access file was not written")
+	_, w := e.addAndConnect("NEW_KEY", "sk-new-0123456789", url.Values{"service": {"newsvc"}, "base": {"https://new.example.com"}, "auth": {"bearer"}})
+	if !strings.Contains(w.Header().Get("Location"), "done=connected") {
+		t.Fatalf("connect with no services list: %d %s", w.Code, w.Body.String())
 	}
 }
