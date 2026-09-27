@@ -206,6 +206,18 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		return err
 	}
 	handler := server.New(cfg, keys, audit)
+	usageFile := usagePath(storePath)
+	if rows, err := loadUsage(usageFile); err != nil {
+		// Usage is only statistics: start without it rather than not start.
+		fmt.Fprintf(stderr, "usage history not loaded: %v\n", err)
+	} else {
+		handler.RestoreUsage(rows)
+	}
+	defer func() {
+		if err := saveUsage(usageFile, handler.Usage()); err != nil {
+			fmt.Fprintf(stderr, "usage not saved: %v\n", err)
+		}
+	}()
 	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr)
 	if err != nil {
 		return err
@@ -228,11 +240,17 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 	rl := reloader{configPath: configPath, storePath: storePath, fixed: cfg.Rules, handler: handler, dashboard: dashboard}
+	saveTick := time.NewTicker(time.Minute)
+	defer saveTick.Stop()
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-saveTick.C:
+				if err := saveUsage(usageFile, handler.Usage()); err != nil {
+					fmt.Fprintf(stderr, "usage not saved: %v\n", err)
+				}
 			case <-hup:
 				next, keys, err := rl.reload()
 				var missing []string

@@ -37,6 +37,8 @@ type Handler struct {
 	day    string
 	counts map[[2]string]int
 
+	usage usageBook
+
 	auditMu sync.Mutex
 }
 
@@ -103,6 +105,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		rec.Ms = h.now().Sub(start).Milliseconds()
 		h.writeAudit(rec)
+		if _, known := snap.config.Services[rec.Service]; known && rec.Role != "" {
+			h.usage.record(rec.Role, rec.Service, rec.Status, start)
+		}
 	}()
 	fail := func(status int, note string) {
 		rec.Status, rec.Note = status, note
