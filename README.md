@@ -90,6 +90,7 @@ There are two settings files.
 A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
 
 `SIGHUP` re-reads the access file and keys. An invalid access file, or a changed `listen` or `audit_log`, is refused, and the previous settings stay in use. Daily counts carry over.
+
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
 - accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;
 - drops the caller's `Authorization`, `Cookie` and role token, and every casing of the key's header or query parameter, then adds the key;
