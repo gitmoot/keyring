@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
@@ -34,6 +35,9 @@ func migrate(configPath, accessPath string, stdout io.Writer) error {
 	if !hasServices && !hasRoles {
 		rules, err := policy.LoadRules(configPath)
 		if err != nil {
+			return err
+		}
+		if err := ownAccessFile(rules.AccessFile); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "already migrated: access file %s\n", rules.AccessFile)
@@ -87,16 +91,12 @@ func migrate(configPath, accessPath string, stdout io.Writer) error {
 		if err := fileutil.WriteAtomic(accessPath, append(accessOut, '\n'), 0o600); err != nil {
 			return err
 		}
-		// Run as root by the installer: the access file belongs to whoever
-		// owns its directory (the service user).
-		if os.Geteuid() == 0 {
-			if uid, gid, ok := fileutil.Owner(filepath.Dir(accessPath)); ok {
-				if err := os.Chown(accessPath, uid, gid); err != nil {
-					return err
-				}
-			}
-		}
 	} else {
+		return err
+	}
+	// Also on the paths that did not write: a run killed between writing and
+	// chown must not leave a file the service cannot read.
+	if err := ownAccessFile(accessPath); err != nil {
 		return err
 	}
 
@@ -115,6 +115,37 @@ func migrate(configPath, accessPath string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "moved %d services and %d roles to %s\n", len(access.Services), len(access.Roles), accessPath)
 	return nil
+}
+
+// ownAccessFile gives the access file to the owner of its directory (the
+// service user), mode 600, when run as root. The directory is the service
+// user's, so the file is opened without following a symlink and must have one
+// link: otherwise root could be tricked into handing over another file.
+func ownAccessFile(path string) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	uid, gid, ok := fileutil.Owner(filepath.Dir(path))
+	if !ok {
+		return fmt.Errorf("%s: cannot read the directory's owner", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || uint64(st.Nlink) != 1 {
+		return fmt.Errorf("%s must be a regular file with one link", path)
+	}
+	if err := f.Chown(uid, gid); err != nil {
+		return err
+	}
+	return f.Chmod(0o600)
 }
 
 func strictJSON(raw []byte, v any) error {

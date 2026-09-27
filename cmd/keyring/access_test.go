@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/policy"
@@ -101,6 +102,101 @@ func TestMigrateRefusesToOverwriteADifferentAccessFile(t *testing.T) {
 	}
 	if err := migrate(rules, access, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "different content") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// serviceDir makes a data directory owned by an unprivileged user, as the
+// installer does for _keyring. Needs root.
+func serviceDir(t *testing.T) (dir, data string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: checks the owner migrate gives the access file")
+	}
+	dir = t.TempDir()
+	data = filepath.Join(dir, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(data, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	return dir, data
+}
+
+func ownerOf(t *testing.T, path string) (uid, gid int, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := info.Sys().(*syscall.Stat_t)
+	return int(st.Uid), int(st.Gid), info.Mode().Perm()
+}
+
+func TestMigrateAsRootAlwaysGivesTheServiceItsAccessFile(t *testing.T) {
+	dir, data := serviceDir(t)
+	rules := filepath.Join(dir, "rules.json")
+	access := filepath.Join(data, "access.json")
+	if err := os.WriteFile(rules, []byte(oldRules(dir, "127.0.0.1:7701")), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// A run killed between writing the access file and chown left it root's.
+	if err := os.WriteFile(access, []byte(`{"services":{"api":{"base":"https://api.example.com","key":"API_KEY","auth":"bearer"}},"roles":{"phobos":{"token_sha256":"`+tokenHashOf("tok-phobos")+`","access":{"api":{"paths":["/v1"]}}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(access, 0o644); err != nil { // WriteFile applies the umask
+		t.Fatal(err)
+	}
+	if err := migrate(rules, access, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if uid, gid, mode := ownerOf(t, access); uid != 65534 || gid != 65534 || mode != 0o600 {
+		t.Fatalf("after resumed migrate: %d:%d %04o, want 65534:65534 0600", uid, gid, mode)
+	}
+	// The installer runs migrate on every upgrade; an already split layout
+	// with a root-owned access file (as a fresh install writes it) is fixed too.
+	if err := os.Chown(access, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := migrate(rules, access, &out); err != nil || !strings.Contains(out.String(), "already migrated") {
+		t.Fatalf("second run: %v %q", err, out.String())
+	}
+	if uid, _, _ := ownerOf(t, access); uid != 65534 {
+		t.Fatalf("already-migrated run left the access file owned by %d", uid)
+	}
+}
+
+func TestMigrateAsRootNeverHandsOverAnotherFile(t *testing.T) {
+	for _, link := range []string{"symlink", "hardlink"} {
+		t.Run(link, func(t *testing.T) {
+			dir, data := serviceDir(t)
+			rules := filepath.Join(dir, "rules.json")
+			access := filepath.Join(data, "access.json")
+			if err := os.WriteFile(rules, []byte(`{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"`+filepath.Join(dir, "audit.log")+`","access_file":"`+access+`"}`), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			// A root-only file elsewhere, which the service user links into
+			// its own directory hoping root will chown it.
+			secret := filepath.Join(dir, "secret")
+			if err := os.WriteFile(secret, []byte(`{"services":{},"roles":{}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if link == "symlink" {
+				err := os.Symlink(secret, access)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Link(secret, access); err != nil {
+				t.Fatal(err)
+			}
+			if err := migrate(rules, access, &bytes.Buffer{}); err == nil {
+				t.Fatal("migrate accepted a linked access file")
+			}
+			if uid, gid, mode := ownerOf(t, secret); uid != 0 || gid != 0 || mode != 0o600 {
+				t.Fatalf("the linked file was handed over: %d:%d %04o", uid, gid, mode)
+			}
+		})
 	}
 }
 

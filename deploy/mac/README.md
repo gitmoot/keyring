@@ -42,7 +42,8 @@ anywhere else.
 `install.sh`:
 - creates the hidden group and user `_keyring`, with no shell and no password, so nobody can log in as it;
 - installs `/usr/local/libexec/keyring`, owned by root;
-- creates `/Library/Application Support/keyring/` with root-owned `rules.json`, which the service can read but not change, and `data/`, which only the service can read (keys, audit log, service log);
+- creates `/Library/Application Support/keyring/` with root-owned `rules.json` (network boundary), which the service can read but not change, and `data/`, which only the service can read (keys, `access.json` with services and roles, audit log, service log);
+- moves services and roles out of a `rules.json` from before v0.2 into `data/access.json` (`keyring migrate`);
 - starts the LaunchDaemon `org.gitmoot.keyring`. It listens on `100.111.92.43:7701` and accepts only the agent server `100.106.218.88`.
 
 It ends by checking that `jerry` can read neither the rules nor the data and cannot change the binary. Running it again upgrades the binary and keeps the existing rules, keys and logs.
@@ -56,9 +57,11 @@ K="sudo -u _keyring /usr/local/libexec/keyring"
 D="/Library/Application Support/keyring"
 $K set --store "$D/data/keys.json" OPENROUTER_API_KEY   # paste the value; it is not shown
 $K list --store "$D/data/keys.json"
-sudo nano "$D/rules.json"                               # rules are edited as root
+sudo nano "$D/rules.json"                               # network boundary, edited as root
+sudo nano "$D/data/access.json"                         # services and roles
 $K check --config "$D/rules.json" --store "$D/data/keys.json"
-sudo launchctl kickstart -k system/org.gitmoot.keyring  # restart after changing rules or keys
+sudo launchctl kill SIGHUP system/org.gitmoot.keyring      # apply access or key changes, no restart
+sudo launchctl kickstart -k system/org.gitmoot.keyring  # restart after changing rules.json
 sudo tail -f "$D/data/audit.log"
 ```
 
