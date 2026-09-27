@@ -113,15 +113,16 @@ Add two lines to `rules.json` to serve a dashboard on a **loopback** address of 
 "admin_password_file": "/Library/Application Support/keyring/admin.pw"
 ```
 
-Set the password as root with `keyring admin-password --config rules.json`. It asks twice, needs at least 12 characters, and stores only a PBKDF2-SHA256 hash, root-owned and mode 640. Reload with SIGHUP to apply it; that ends every session. Then open `http://127.0.0.1:7702` in a browser on that machine.
+Set the password as root with `keyring admin-password --config rules.json`. It asks twice, needs at least 12 characters, and stores only a PBKDF2-SHA256 hash, root-owned and mode 640, in a directory only root can change (it refuses any other). Reload with SIGHUP to apply it; that ends every session. Then open `http://127.0.0.1:7702` in a browser on that machine.
 
 Safety:
 - The dashboard listener only accepts a loopback address, and never serves the proxy. The proxy listener never serves the dashboard.
 - Requests with a `Host` other than the listener's address are refused, against DNS rebinding.
 - Every change needs a same-origin `Origin` header and the session's CSRF token.
 - Sessions are in memory only: `HttpOnly`, `SameSite=Strict`, 30 minutes idle, 8 hours at most.
-- Failed logins are slowed after 5 and locked for an hour after 20.
-- Every login, logout and password change is written to the audit log without secrets.
+- Every change to keys or access asks for the password, however recently you logged in. Browsers send the session cookie to every port of `127.0.0.1`, so any other local web page you open could get it; with the cookie alone it can only look at names and usage.
+- Failed passwords (at login or on a change) are slowed after 5 and locked for an hour after 20. Attempts sent at once count too.
+- Every login, logout, password change and failed password is written to the audit log without secrets.
 
 ## Relay on the agent server (step 2)
 

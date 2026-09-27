@@ -25,8 +25,6 @@ const (
 	csrfHeader  = "X-CSRF-Token"
 	IdleTimeout = 30 * time.Minute
 	MaxLifetime = 8 * time.Hour
-	// ReauthWindow: sensitive changes need the password again after this.
-	ReauthWindow = 5 * time.Minute
 	// Login limits: after freeFailures failed logins in an hour, each further
 	// attempt waits longer; after lockFailures the login is closed for an hour.
 	freeFailures = 5
@@ -35,8 +33,8 @@ const (
 )
 
 type session struct {
-	csrf                        string
-	created, lastSeen, lastAuth time.Time
+	csrf              string
+	created, lastSeen time.Time
 }
 
 // Server is the dashboard handler.
@@ -69,7 +67,6 @@ func New(listen string, password PasswordHash, audit io.Writer) *Server {
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /logout", s.withSession(s.logout))
-	mux.HandleFunc("POST /reauth", s.withSession(s.reauth))
 	mux.HandleFunc("GET /api/session", s.withSession(s.sessionInfo))
 	mux.HandleFunc("GET /static/app.css", serveCSS)
 	mux.HandleFunc("GET /{$}", s.withSession(s.home))
@@ -95,13 +92,24 @@ func (s *Server) Handle(pattern string, h func(w http.ResponseWriter, r *http.Re
 	s.mux.HandleFunc(pattern, s.withSession(h))
 }
 
-// RecentlyAuthenticated reports whether the session entered the password
-// within ReauthWindow. Sensitive handlers must check it.
-func (s *Server) RecentlyAuthenticated(sid string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[sid]
-	return ok && s.now().Sub(sess.lastAuth) < ReauthWindow
+// Confirm checks the password for a sensitive change. Every change asks for
+// it: browsers send the session cookie to every port of the host, so a local
+// web server the owner visits could replay a stolen session, and no time
+// window may make that enough. Attempts count toward the login limits.
+func (s *Server) Confirm(sid, password string) bool {
+	if password == "" { // forgot to type it: not a guess
+		return false
+	}
+	if _, ok := s.beginAttempt(); !ok {
+		s.writeAudit("confirm_refused_rate_limit", sid)
+		return false
+	}
+	if !s.passwordMatches(password) {
+		s.writeAudit("confirm_failed", sid)
+		return false
+	}
+	s.attemptSucceeded()
+	return true
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -181,9 +189,11 @@ func (s *Server) csrfMatches(sid, token string) bool {
 	return ok && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(sess.csrf)) == 1
 }
 
-// allowAttempt applies the login limits. It returns how long to wait when
-// refused.
-func (s *Server) allowAttempt() (time.Duration, bool) {
+// beginAttempt applies the login limits and, in the same step, counts the
+// attempt as a failure until attemptSucceeded clears it, so requests sent at
+// once cannot all pass the check before any failure is recorded. It returns
+// how long to wait when refused.
+func (s *Server) beginAttempt() (time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -198,13 +208,6 @@ func (s *Server) allowAttempt() (time.Duration, bool) {
 	if now.Before(s.blocked) {
 		return s.blocked.Sub(now), false
 	}
-	return 0, true
-}
-
-func (s *Server) recordFailure() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
 	s.failures = append(s.failures, now)
 	switch n := len(s.failures); {
 	case n >= lockFailures:
@@ -213,6 +216,15 @@ func (s *Server) recordFailure() {
 		wait := time.Second << min(n-freeFailures, 6) // 2s, 4s, ... 64s
 		s.blocked = now.Add(wait)
 	}
+	return 0, true
+}
+
+// attemptSucceeded forgets the failures: the password was right.
+func (s *Server) attemptSucceeded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = nil
+	s.blocked = time.Time{}
 }
 
 func (s *Server) passwordMatches(password string) bool {
@@ -223,24 +235,22 @@ func (s *Server) passwordMatches(password string) bool {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if wait, ok := s.allowAttempt(); !ok {
+	if wait, ok := s.beginAttempt(); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 		s.writeAudit("login_refused_rate_limit", "")
 		http.Error(w, "too many failed logins; try again later", http.StatusTooManyRequests)
 		return
 	}
 	if !s.passwordMatches(r.PostFormValue("password")) {
-		s.recordFailure()
 		s.writeAudit("login_failed", "")
 		s.renderLogin(w, http.StatusUnauthorized, "Wrong password.")
 		return
 	}
+	s.attemptSucceeded()
 	sid, csrf := randomToken(), randomToken()
 	now := s.now()
 	s.mu.Lock()
-	s.sessions[sid] = &session{csrf: csrf, created: now, lastSeen: now, lastAuth: now}
-	s.failures = nil
-	s.blocked = time.Time{}
+	s.sessions[sid] = &session{csrf: csrf, created: now, lastSeen: now}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	s.writeAudit("login", sid)
@@ -256,41 +266,14 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, sid string) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (s *Server) reauth(w http.ResponseWriter, r *http.Request, sid string) {
-	if wait, ok := s.allowAttempt(); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-		http.Error(w, "too many failed attempts; try again later", http.StatusTooManyRequests)
-		return
-	}
-	if !s.passwordMatches(r.PostFormValue("password")) {
-		s.recordFailure()
-		s.writeAudit("reauth_failed", sid)
-		http.Error(w, "wrong password", http.StatusUnauthorized)
-		return
-	}
-	s.mu.Lock()
-	if sess, ok := s.sessions[sid]; ok {
-		sess.lastAuth = s.now()
-	}
-	s.mu.Unlock()
-	s.writeAudit("reauth", sid)
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request, sid string) {
-	s.mu.Lock()
-	csrf := s.sessions[sid].csrf
-	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"csrf": csrf, "recently_authenticated": s.RecentlyAuthenticated(sid)})
+	_ = json.NewEncoder(w).Encode(map[string]any{"csrf": s.CSRF(sid)})
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request, sid string) {
-	s.mu.Lock()
-	csrf := s.sessions[sid].csrf
-	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = pages.ExecuteTemplate(w, "home", map[string]string{"CSRF": csrf})
+	_ = pages.ExecuteTemplate(w, "home", map[string]string{"CSRF": s.CSRF(sid)})
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
@@ -363,3 +346,14 @@ h1{font-size:22px;margin:0 0 16px}header.top{display:flex;justify-content:space-
 label{display:block;font-size:13px;color:#6b7280}input{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;color:#15181d}
 button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}button.ghost{background:#fff;color:#15181d;border:1px solid #e5e7eb}
 .error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px}`
+
+// CSRF returns the session's CSRF token, for forms ("" once the session has
+// ended, for instance by a logout in another tab).
+func (s *Server) CSRF(sid string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[sid]; ok {
+		return sess.csrf
+	}
+	return ""
+}

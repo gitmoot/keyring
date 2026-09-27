@@ -48,3 +48,39 @@ func TestAdminPasswordCommand(t *testing.T) {
 		t.Fatalf("password file mode %04o", info.Mode().Perm())
 	}
 }
+
+func TestAdminPasswordRefusesADirectoryOthersCanChange(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: the check applies when root writes the password file")
+	}
+	for name, setup := range map[string]func(dir string) error{
+		"group-writable":    func(dir string) error { return os.Chmod(dir, 0o770) },
+		"owned by the user": func(dir string) error { return os.Chown(dir, 65534, 65534) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			pwDir := filepath.Join(dir, "pw")
+			if err := os.Mkdir(pwDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := setup(pwDir); err != nil {
+				t.Fatal(err)
+			}
+			rules := filepath.Join(dir, "rules.json")
+			pw := filepath.Join(pwDir, "admin.pw")
+			raw := `{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"` + filepath.Join(dir, "a.log") +
+				`","access_file":"` + filepath.Join(dir, "access.json") + `","admin_listen":"127.0.0.1:7702","admin_password_file":"` + pw + `"}`
+			if err := os.WriteFile(rules, []byte(raw), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			const good = "a long enough password"
+			var out, errOut bytes.Buffer
+			if code := run([]string{"admin-password", "--config", rules}, strings.NewReader(good+"\n"+good+"\n"), &out, &errOut); code == 0 {
+				t.Fatal("password written into a directory others can change")
+			}
+			if _, err := os.Lstat(pw); !os.IsNotExist(err) {
+				t.Fatal("password file written")
+			}
+		})
+	}
+}

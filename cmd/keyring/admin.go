@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gitmoot/keyring/internal/admin"
@@ -25,6 +26,11 @@ func setAdminPassword(configPath string, stdin io.Reader, stdout, stderr io.Writ
 	}
 	if rules.AdminPasswordFile == "" {
 		return errors.New("the rules file has no admin_password_file")
+	}
+	if os.Geteuid() == 0 {
+		if err := rootOnlyDir(filepath.Dir(rules.AdminPasswordFile)); err != nil {
+			return err
+		}
 	}
 	in := bufio.NewReader(stdin)
 	first, err := readHidden(in, stdin, stderr, "new dashboard password (not shown): ")
@@ -86,4 +92,20 @@ func startDashboard(cfg *policy.Config, audit io.Writer, stderr io.Writer) (*adm
 	}()
 	fmt.Fprintf(stderr, "dashboard on http://%s\n", cfg.AdminListen)
 	return dashboard, srv, nil
+}
+
+// rootOnlyDir refuses a directory that anyone but root could change. The
+// password file must stay root's: if the service or another user could
+// replace it, or put a link in its place before the chown below, they could
+// choose the dashboard password.
+func rootOnlyDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	uid, _, ok := fileutil.Owner(dir)
+	if !ok || uid != 0 || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s: the password file's directory must be owned by root and writable only by root", dir)
+	}
+	return nil
 }

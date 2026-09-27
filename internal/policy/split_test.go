@@ -106,6 +106,7 @@ func TestAdminListenMustBeLoopbackWithAPasswordFile(t *testing.T) {
 		"tailnet address": func(c *Config) { c.AdminListen = "100.111.92.43:7702" },
 		"wildcard":        func(c *Config) { c.AdminListen = "0.0.0.0:7702" },
 		"no port":         func(c *Config) { c.AdminListen = "127.0.0.1" },
+		"port 0":          func(c *Config) { c.AdminListen = "127.0.0.1:0" },
 		"same as listen": func(c *Config) {
 			c.Listen = "127.0.0.1:7701"
 			c.AllowSources = []string{"127.0.0.1"}

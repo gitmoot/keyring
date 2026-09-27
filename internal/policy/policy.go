@@ -226,7 +226,7 @@ func (c *Config) Validate() error {
 	}
 	if c.AdminListen != "" {
 		admin, err := netip.ParseAddrPort(c.AdminListen)
-		if err != nil || !admin.Addr().IsLoopback() {
+		if err != nil || !admin.Addr().IsLoopback() || admin.Port() == 0 {
 			return fmt.Errorf("admin_listen %q: must be a loopback IP:port", c.AdminListen)
 		}
 		if admin == listen {

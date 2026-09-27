@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -201,27 +203,59 @@ func TestSessionsExpire(t *testing.T) {
 	}
 }
 
-func TestReauthWindow(t *testing.T) {
-	s, _, now := newTestServer(t)
-	sid, csrf := login(t, s)
-	if !s.RecentlyAuthenticated(sid) {
-		t.Fatal("fresh login not recent")
+func TestConfirmNeedsThePasswordEveryTime(t *testing.T) {
+	s, audit, _ := newTestServer(t)
+	sid, _ := login(t, s)
+	// Right after login, a stolen session alone must not be enough.
+	if s.Confirm(sid, "") {
+		t.Fatal("confirmed without a password right after login")
 	}
-	*now = now.Add(ReauthWindow + time.Second)
-	if s.RecentlyAuthenticated(sid) {
-		t.Fatal("still recent after the window")
+	if s.Confirm(sid, "nope nope nope") {
+		t.Fatal("confirmed with a wrong password")
 	}
-	if w := s.do(req{method: "POST", path: "/reauth", origin: testOrigin, cookie: sid, csrf: csrf, form: url.Values{"password": {"nope nope nope"}}}); w.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong reauth: %d", w.Code)
+	if !s.Confirm(sid, testPassword) {
+		t.Fatal("right password refused")
 	}
-	if s.RecentlyAuthenticated(sid) {
-		t.Fatal("wrong password renewed the window")
+	if s.Confirm(sid, "") {
+		t.Fatal("a confirmed change made the next one free")
 	}
-	if w := s.do(req{method: "POST", path: "/reauth", origin: testOrigin, cookie: sid, csrf: csrf, form: url.Values{"password": {testPassword}}}); w.Code != http.StatusNoContent {
-		t.Fatalf("reauth: %d", w.Code)
+	if !strings.Contains(audit.String(), `"admin":"confirm_failed"`) {
+		t.Fatalf("failed confirm not audited: %s", audit.String())
 	}
-	if !s.RecentlyAuthenticated(sid) {
-		t.Fatal("reauth did not renew the window")
+	// Wrong passwords given to Confirm count toward the login limits.
+	for i := 0; i < lockFailures; i++ {
+		s.Confirm(sid, "nope nope nope")
+	}
+	if s.Confirm(sid, testPassword) {
+		t.Fatal("confirm guesses are not limited")
+	}
+}
+
+func TestLoginLimitsHoldForRequestsSentAtOnce(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// A slow hash widens the gap between the limit check and the result.
+	line, _ := NewPasswordHash(testPassword, 100000)
+	hash, _ := ParsePasswordHash(line)
+	s.SetPassword(hash)
+	const burst = 60
+	var checked atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			w := s.do(req{method: "POST", path: "/login", origin: testOrigin, form: url.Values{"password": {"not the password"}}})
+			if w.Code == http.StatusUnauthorized {
+				checked.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if n := checked.Load(); n > freeFailures+1 {
+		t.Fatalf("%d of %d simultaneous guesses were checked; the limit allows %d", n, burst, freeFailures+1)
 	}
 }
 
