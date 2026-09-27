@@ -309,3 +309,27 @@ func TestChangesWorkWhenTheAccessFileLeavesAListOut(t *testing.T) {
 		t.Fatalf("connect with no services list: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestAddAgentWithItsOwnTokenShowsNoToken(t *testing.T) {
+	e := newEnv(t)
+	tok, sha, err := policy.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, fp := range map[string]string{"short": sha[:63], "not hex": strings.Repeat("z", 64)} {
+		if w := e.request("POST", "/agents", url.Values{"name": {"deimos"}, "fingerprint": {fp}, "password": {password}}); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "fingerprint must be") {
+			t.Errorf("%s fingerprint: %d, want 400 naming the fingerprint", name, w.Code)
+		}
+	}
+	w := e.request("POST", "/agents", url.Values{"name": {"deimos"}, "fingerprint": {strings.ToUpper(sha)}, "password": {password}})
+	if w.Header().Get("Location") != "/agents/deimos?done=added" || tokenInPage.MatchString(w.Body.String()) {
+		t.Fatalf("add with fingerprint: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	e.saveCell("deimos", "api", url.Values{"on": {"yes"}, "mode": {"read"}, "paths": {"/"}})
+	if code := e.call("GET", "/api/v1/x", tok); code != 200 {
+		t.Fatalf("the agent's own token: %d", code)
+	}
+	if !strings.Contains(e.request("GET", "/agents/deimos?done=added", nil).Body.String(), "own token") {
+		t.Fatal("no notice after adding")
+	}
+}

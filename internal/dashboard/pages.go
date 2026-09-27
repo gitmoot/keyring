@@ -138,7 +138,8 @@ var pages = template.Must(template.New("pages").Parse(`
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/agents"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Name<input name="name" value="{{.Name}}" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="aste-screener" autocapitalize="none" spellcheck="false"></label>
-<p class="hint">The next page shows its token once. It starts with no services.</p>
+<label>Token fingerprint from the agent (optional)<input name="fingerprint" value="{{.Fingerprint}}" placeholder="64 hex characters" autocapitalize="none" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{64}"></label>
+<p class="hint">If the agent made its own token, paste the sha256 it gives you: the token then never leaves its machine. Leave it empty and the next page shows a new token once. The agent starts with no services.</p>
 {{template "password" .}}<div class="actions"><button>Add agent</button></div></form></div>
 {{template "bottom"}}{{end}}
 
@@ -152,6 +153,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{template "bottom"}}{{end}}
 
 {{define "agent"}}{{template "top" .}}
+{{if .Added}}<p class="notice">Agent added with its own token. Give it services below.</p>{{end}}
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <div class="head"><a class="back" href="/access">Agents</a><h1>{{.Role}}</h1>{{if .Ended}}<span class="pill warn">ended</span>{{end}}</div>
 <div class="card"><h2>Services</h2>

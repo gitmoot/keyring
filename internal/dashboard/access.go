@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -338,8 +339,11 @@ func (b *Backend) newAgentPage(w http.ResponseWriter, r *http.Request, sid strin
 
 func (b *Backend) addAgent(w http.ResponseWriter, r *http.Request, sid string) {
 	name := strings.TrimSpace(r.PostFormValue("name"))
+	// fingerprint: the SHA-256 of a token made on the calling machine
+	// (keyring new-token). Then no token is shown here or ever leaves it.
+	fingerprint := strings.ToLower(strings.TrimSpace(r.PostFormValue("fingerprint")))
 	again := func(status int, msg string) {
-		b.render(w, status, "newagent", sid, map[string]any{"Name": name, "Error": msg})
+		b.render(w, status, "newagent", sid, map[string]any{"Name": name, "Fingerprint": fingerprint, "Error": msg})
 	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		again(http.StatusForbidden, "Enter your dashboard password to add an agent.")
@@ -356,9 +360,14 @@ func (b *Backend) addAgent(w http.ResponseWriter, r *http.Request, sid string) {
 		again(http.StatusConflict, "An agent with this name exists. Open it to make a new token.")
 		return
 	}
-	token, sha, err := policy.NewToken()
-	if err != nil {
-		b.fail(w, sid, err)
+	token, sha := "", fingerprint
+	if sha == "" {
+		if token, sha, err = policy.NewToken(); err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+	} else if !fingerprintShape.MatchString(sha) {
+		again(http.StatusBadRequest, "The fingerprint must be the 64-character sha256 that keyring new-token prints.")
 		return
 	}
 	next.Roles[name] = policy.Role{TokenSHA256: sha, Access: map[string]policy.Access{}}
@@ -370,9 +379,15 @@ func (b *Backend) addAgent(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	b.Admin.Audit("agent_added", sid, map[string]any{"role": name})
+	b.Admin.Audit("agent_added", sid, map[string]any{"role": name, "own_token": token == ""})
+	if token == "" {
+		http.Redirect(w, r, "/agents/"+url.PathEscape(name)+"?done=added", http.StatusSeeOther)
+		return
+	}
 	b.showToken(w, sid, name, token, false)
 }
+
+var fingerprintShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // showToken is the only response that ever contains the token.
 func (b *Backend) showToken(w http.ResponseWriter, sid, role, token string, replaced bool) {
@@ -413,7 +428,7 @@ func (b *Backend) agentPage(w http.ResponseWriter, r *http.Request, sid string) 
 	b.render(w, http.StatusOK, "agent", sid, map[string]any{
 		"Role": role, "Services": services, "Off": off, "Expires": expires, "Ended": rl.Expired(b.Now()),
 		"File": tokenDir + "/" + role + ".token", "Current": rl.TokenSHA256[:12],
-		"Error": agentErrors[r.URL.Query().Get("error")],
+		"Error": agentErrors[r.URL.Query().Get("error")], "Added": r.URL.Query().Get("done") == "added",
 	})
 }
 
