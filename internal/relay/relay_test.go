@@ -176,12 +176,16 @@ func TestRelayThroughRealKeyringEndToEnd(t *testing.T) {
 	defer api.Close()
 	sum := sha256.Sum256([]byte(tokenPhobos))
 	cfg := &policy.Config{
-		Listen:       "127.0.0.1:7701",
-		AllowSources: []string{"127.0.0.1"},
-		AuditLog:     "audit.log",
-		Services:     map[string]policy.Service{"openrouter": {Base: api.URL, Key: "OPENROUTER_API_KEY", Auth: policy.AuthBearer}},
-		Roles: map[string]policy.Role{"phobos": {TokenSHA256: hex.EncodeToString(sum[:]),
-			Access: map[string]policy.Access{"openrouter": {Paths: []string{"/api/v1"}}}}},
+		Rules: policy.Rules{
+			Listen:       "127.0.0.1:7701",
+			AllowSources: []string{"127.0.0.1"},
+			AuditLog:     "audit.log",
+		},
+		AccessList: policy.AccessList{
+			Services: map[string]policy.Service{"openrouter": {Base: api.URL, Key: "OPENROUTER_API_KEY", Auth: policy.AuthBearer}},
+			Roles: map[string]policy.Role{"phobos": {TokenSHA256: hex.EncodeToString(sum[:]),
+				Access: map[string]policy.Access{"openrouter": {Paths: []string{"/api/v1"}}}}},
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)

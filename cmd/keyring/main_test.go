@@ -21,6 +21,10 @@ func TestOpenAuditRefusesAFileOthersCanRead(t *testing.T) {
 	if err := os.WriteFile(open, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Set the mode explicitly: WriteFile applies the umask.
+	if err := os.Chmod(open, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if f, err := openAudit(open); err == nil {
 		f.Close()
 		t.Fatal("audit log readable by others was accepted")

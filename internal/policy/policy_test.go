@@ -14,14 +14,18 @@ func hash(token string) string {
 
 func validConfig() *Config {
 	return &Config{
-		Listen:       "100.111.92.43:7701",
-		AllowSources: []string{"100.106.218.88"},
-		AuditLog:     "/tmp/audit.log",
-		Services: map[string]Service{
-			"openrouter": {Base: "https://openrouter.ai", Key: "OPENROUTER_API_KEY", Auth: AuthBearer},
+		Rules: Rules{
+			Listen:       "100.111.92.43:7701",
+			AllowSources: []string{"100.106.218.88"},
+			AuditLog:     "/tmp/audit.log",
 		},
-		Roles: map[string]Role{
-			"phobos": {TokenSHA256: hash("t1"), Access: map[string]Access{"openrouter": {Paths: []string{"/api/v1"}}}},
+		AccessList: AccessList{
+			Services: map[string]Service{
+				"openrouter": {Base: "https://openrouter.ai", Key: "OPENROUTER_API_KEY", Auth: AuthBearer},
+			},
+			Roles: map[string]Role{
+				"phobos": {TokenSHA256: hash("t1"), Access: map[string]Access{"openrouter": {Paths: []string{"/api/v1"}}}},
+			},
 		},
 	}
 }

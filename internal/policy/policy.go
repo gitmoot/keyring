@@ -13,10 +13,12 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/store"
 )
 
@@ -27,15 +29,29 @@ const (
 	AuthQuery  = "query"  // ?<Param>=<key>
 )
 
-type Config struct {
-	// Listen is one specific IP and port, for example the Mac's tailnet
-	// address. Wildcard addresses are refused.
+// Rules is the root-owned rules file: the network boundary. The service can
+// read it but not change it.
+type Rules struct {
+	// Listen is one specific IP and port. Wildcard addresses are refused.
 	Listen string `json:"listen"`
 	// AllowSources lists the addresses or CIDR ranges allowed to connect.
-	AllowSources []string           `json:"allow_sources"`
-	AuditLog     string             `json:"audit_log"`
-	Services     map[string]Service `json:"services"`
-	Roles        map[string]Role    `json:"roles"`
+	AllowSources []string `json:"allow_sources"`
+	AuditLog     string   `json:"audit_log"`
+	// AccessFile is the absolute path of the access file.
+	AccessFile string `json:"access_file"`
+}
+
+// AccessList is the access file: which services exist and what each role may
+// do. The service owns it, so access can change without touching the rules.
+type AccessList struct {
+	Services map[string]Service `json:"services"`
+	Roles    map[string]Role    `json:"roles"`
+}
+
+// Config is the rules and the access list together, validated.
+type Config struct {
+	Rules
+	AccessList
 
 	sources []netip.Prefix
 }
@@ -75,22 +91,100 @@ var (
 	methods     = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
 )
 
-// Load reads and validates a rules file.
-func Load(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+// ErrNeedsMigration: the rules file still holds services or roles.
+var ErrNeedsMigration = errors.New("rules file still holds services and roles; move them to the access file with: keyring migrate")
+
+// Load reads the rules file and the access file it names, and validates both.
+func Load(rulesPath string) (*Config, error) {
+	rules, err := LoadRules(rulesPath)
 	if err != nil {
 		return nil, err
 	}
+	access, err := LoadAccess(rules.AccessFile)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &Config{Rules: rules, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadRules reads the rules file without validating its values.
+func LoadRules(path string) (Rules, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Rules{}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return Rules{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if _, ok := fields["services"]; ok {
+		return Rules{}, fmt.Errorf("%s: %w", path, ErrNeedsMigration)
+	}
+	if _, ok := fields["roles"]; ok {
+		return Rules{}, fmt.Errorf("%s: %w", path, ErrNeedsMigration)
+	}
+	var rules Rules
+	if err := decodeStrict(raw, &rules); err != nil {
+		return Rules{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if !filepath.IsAbs(rules.AccessFile) {
+		return Rules{}, fmt.Errorf("%s: access_file must be an absolute path", path)
+	}
+	return rules, nil
+}
+
+// LoadAccess reads an access file. Like the key store, it must not be open to
+// other users.
+func LoadAccess(path string) (AccessList, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return AccessList{}, err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return AccessList{}, fmt.Errorf("%s is open to other users (mode %04o); run chmod 600 %s", path, perm, path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return AccessList{}, err
+	}
+	var access AccessList
+	if err := decodeStrict(raw, &access); err != nil {
+		return AccessList{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return access, nil
+}
+
+// SaveAccess validates access against rules, then replaces the access file
+// atomically. An invalid access list is never written.
+func SaveAccess(rules Rules, access AccessList) (*Config, error) {
+	cfg := &Config{Rules: rules, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	raw, err := json.MarshalIndent(access, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := fileutil.WriteAtomic(rules.AccessFile, append(raw, '\n'), 0o600); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func decodeStrict(raw []byte, v any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var cfg Config
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if err := decoder.Decode(v); err != nil {
+		return err
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if decoder.More() {
+		return errors.New("trailing data after the JSON object")
 	}
-	return &cfg, nil
+	return nil
 }
 
 // Validate checks every field and prepares the parsed forms.
@@ -122,6 +216,12 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.AuditLog) == "" {
 		return errors.New("audit_log is empty")
+	}
+	if c.Services == nil {
+		c.Services = map[string]Service{}
+	}
+	if c.Roles == nil {
+		c.Roles = map[string]Role{}
 	}
 	for name, svc := range c.Services {
 		if !serviceName.MatchString(name) {

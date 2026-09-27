@@ -10,9 +10,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
+
+	"github.com/gitmoot/keyring/internal/fileutil"
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -105,40 +106,5 @@ func save(path string, keys map[string]string) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".keys-*") // created with mode 0600
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(name)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(append(raw, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	ok = true
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		d.Close()
-	}
-	return nil
+	return fileutil.WriteAtomic(path, append(raw, '\n'), 0o600)
 }

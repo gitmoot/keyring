@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
@@ -25,8 +26,9 @@ const (
 
 // Handler serves proxied API calls.
 type Handler struct {
-	config *policy.Config
-	keys   map[string]string
+	// snap holds the rules, access list and keys in use. Each request reads
+	// it once, so a reload never mixes old and new settings in one request.
+	snap   atomic.Pointer[snapshot]
 	audit  io.Writer
 	client *http.Client
 	now    func() time.Time
@@ -38,6 +40,11 @@ type Handler struct {
 	auditMu sync.Mutex
 }
 
+type snapshot struct {
+	config *policy.Config
+	keys   map[string]string
+}
+
 // New builds a handler. keys maps key names to values; audit receives one JSON
 // line per call.
 func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handler {
@@ -45,10 +52,8 @@ func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handle
 	// Never send keys through an environment-configured proxy.
 	transport.Proxy = nil
 	transport.ResponseHeaderTimeout = 5 * time.Minute
-	return &Handler{
-		config: config,
-		keys:   keys,
-		audit:  audit,
+	h := &Handler{
+		audit: audit,
 		client: &http.Client{
 			Transport: transport,
 			// A redirect could point anywhere; hand it back to the caller.
@@ -57,6 +62,15 @@ func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handle
 		now:    time.Now,
 		counts: map[[2]string]int{},
 	}
+	h.Swap(config, keys)
+	return h
+}
+
+// Swap replaces the settings and keys for every later request. config must be
+// validated. Requests already running keep what they started with; daily
+// counts carry over.
+func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
+	h.snap.Store(&snapshot{config: config, keys: keys})
 }
 
 type auditRecord struct {
@@ -74,8 +88,9 @@ type auditRecord struct {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := h.now()
+	snap := h.snap.Load()
 	addr, ok := remoteAddr(r.RemoteAddr)
-	if !ok || !h.config.SourceAllowed(addr) {
+	if !ok || !snap.config.SourceAllowed(addr) {
 		// Not logged: a stranger could otherwise fill the audit log.
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -94,7 +109,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(status)+": "+note, status)
 	}
 
-	roleName, role, ok := h.config.RoleForToken(r.Header.Get(TokenHeader))
+	roleName, role, ok := snap.config.RoleForToken(r.Header.Get(TokenHeader))
 	if !ok {
 		fail(http.StatusUnauthorized, "unknown role token")
 		return
@@ -110,7 +125,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "path must be /<service>/<path> in plain printable ASCII, without .., ;, % after decoding, or encoded / . \\")
 		return
 	}
-	svc, known := h.config.Services[service]
+	svc, known := snap.config.Services[service]
 	access, allowed := role.Access[service]
 	if !known || !allowed {
 		fail(http.StatusForbidden, "role may not use this service")
@@ -124,7 +139,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "path not allowed for this role")
 		return
 	}
-	key := h.keys[svc.Key]
+	key := snap.keys[svc.Key]
 	if key == "" {
 		fail(http.StatusServiceUnavailable, "key not loaded")
 		return

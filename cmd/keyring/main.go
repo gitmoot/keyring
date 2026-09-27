@@ -32,7 +32,8 @@ import (
 
 const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
-  keyring check --config FILE [--store FILE] check the rules (and which keys are missing)
+  keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
+  keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
   keyring set --store FILE NAME              add or replace a key; the value is read from stdin
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
@@ -55,6 +56,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "rules file")
 	storePath := fs.String("store", "", "key store file")
+	accessPath := fs.String("access", "", "migrate: absolute path of the access file to create")
 	listen := fs.String("listen", "127.0.0.1:7700", "relay: loopback address to listen on")
 	upstream := fs.String("upstream", "", "relay: keyring URL, e.g. http://100.111.92.43:7701")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
@@ -82,6 +84,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = check(*configPath, *storePath, stdout)
+	case "migrate":
+		if !need("config") || *accessPath == "" || fs.NArg() != 0 {
+			fmt.Fprintln(stderr, "keyring migrate: --config and --access are required")
+			return 2
+		}
+		err = migrate(*configPath, *accessPath, stdout)
 	case "set":
 		if !need("store") || fs.NArg() != 1 {
 			fmt.Fprintln(stderr, "keyring set: pass --store FILE and one NAME")
@@ -191,8 +199,9 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	handler := server.New(cfg, keys, audit)
 	srv := &http.Server{
-		Handler:           server.New(cfg, keys, audit),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Request bodies are small API payloads. No WriteTimeout: model
 		// replies can stream for minutes.
@@ -201,6 +210,26 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// SIGHUP re-reads the access file, rules and keys without a restart.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	rl := reloader{configPath: configPath, storePath: storePath, listen: cfg.Listen, auditLog: cfg.AuditLog, handler: handler}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				next, keys, err := rl.reload()
+				var missing []string
+				if err == nil {
+					missing = missingKeys(next, keys)
+				}
+				fmt.Fprintln(stderr, reloadMessage(next, err, missing))
+			}
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
