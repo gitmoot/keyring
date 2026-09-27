@@ -70,6 +70,7 @@ func New(listen string, password PasswordHash, audit io.Writer) *Server {
 	mux.HandleFunc("POST /logout", s.withSession(s.logout))
 	mux.HandleFunc("GET /api/session", s.withSession(s.sessionInfo))
 	mux.HandleFunc("GET /static/app.css", serveCSS)
+	mux.HandleFunc("GET /static/app.js", serveJS)
 	mux.HandleFunc("GET /{$}", s.withSession(s.home))
 	s.mux = mux
 	return s
@@ -346,6 +347,22 @@ func randomToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// js is the dashboard's only script: a copy button for a token shown once.
+// A button with data-copy="ID" copies the value of the element with that ID.
+const js = `document.addEventListener("click", function (e) {
+  var b = e.target.closest("[data-copy]");
+  if (!b) return;
+  var el = document.getElementById(b.dataset.copy);
+  el.select();
+  navigator.clipboard.writeText(el.value).then(function () { b.textContent = "Copied"; });
+});
+`
+
+func serveJS(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	_, _ = io.WriteString(w, js)
+}
+
 func serveCSS(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	_, _ = io.WriteString(w, css)
@@ -382,7 +399,12 @@ td a{color:#15181d;font-weight:600}code{font:13px ui-monospace,SFMono-Regular,Me
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.row label{flex:1;min-width:160px}
 select{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;background:#fff}
 button.danger{background:#dc2626}.check{display:flex;gap:8px;align-items:center;color:#15181d;font-size:14px;margin-bottom:12px}.check input{width:auto;margin:0}
-dl{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;margin:0}dt{color:#6b7280}dd{margin:0}`
+dl{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;margin:0}dt{color:#6b7280}dd{margin:0}
+.grid{overflow-x:auto}.grid td,.grid th{text-align:center;white-space:nowrap}.grid td:first-child,.grid th:first-child{text-align:left}
+.cell{display:inline-block;min-width:92px;padding:6px 8px;border-radius:8px;text-decoration:none;font-weight:500;font-size:13px}
+.cell.on{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}.cell.off{background:#f8fafc;color:#94a3b8;border:1px dashed #e2e8f0}.cell.ended{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
+.cell small{display:block;font-weight:400;color:#6b7280}textarea{display:block;width:100%;min-height:80px;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+.token{display:flex;gap:8px}.token input{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}.warnbox{background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:8px 10px}`
 
 // CSRF returns the session's CSRF token, for forms ("" once the session has
 // ended, for instance by a logout in another tab).

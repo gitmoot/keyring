@@ -308,6 +308,19 @@ func TestExpiredRoleRefused(t *testing.T) {
 	}
 }
 
+func TestExpiredAccessRefusedOnlyForThatService(t *testing.T) {
+	up, got := upstream(t)
+	past, later := time.Now().Add(-time.Minute), time.Now().Add(time.Hour)
+	h, _ := newHandler(t, up.URL, bearer, policy.Access{Paths: []string{"/"}, Expires: &past})
+	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != http.StatusForbidden || got.count() != 0 {
+		t.Fatalf("expired access: status %d, upstream calls %d", w.Code, got.count())
+	}
+	h.Swap(withAccess(t, h, policy.Access{Paths: []string{"/"}, Expires: &later}), map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/api/v1/a", testToken, nil); w.Code != 200 {
+		t.Fatalf("access ending later: %d, want 200", w.Code)
+	}
+}
+
 func TestRedactorHoldsBackOnlyAPossiblePrefix(t *testing.T) {
 	var out bytes.Buffer
 	r := newRedactor(&out, secretForms("SECRET"))

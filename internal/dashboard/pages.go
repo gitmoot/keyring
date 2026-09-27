@@ -7,7 +7,7 @@ import "html/template"
 var pages = template.Must(template.New("pages").Parse(`
 {{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"></head><body>
 <header class="top"><h1>Keyring</h1>
-<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a></nav>
+<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Access</a></nav>
 <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Log out</button></form></header><main>{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
 
@@ -73,4 +73,62 @@ var pages = template.Must(template.New("pages").Parse(`
 {{template "bottom"}}{{end}}
 
 {{define "error"}}{{template "top" .}}<p class="error">{{.Error}}</p><p><a href="/keys">Back to keys</a></p>{{template "bottom"}}{{end}}
+
+{{define "access"}}{{template "top" .}}
+{{with .Notice}}<p class="notice">{{.}}</p>{{end}}
+<div class="bar"><span class="mute">Rows are agents, columns are services. Open a cell to change it.</span><a class="btn" href="/new/agent">+ Add agent</a></div>
+<div class="grid"><table><tr><th>Agent</th>{{range .Services}}<th>{{.}}</th>{{end}}</tr>
+{{range .Rows}}<tr><td><a href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}} <span class="chip">ended</span>{{end}}</td>
+{{range .Cells}}<td><a class="cell {{if .Ended}}ended{{else if .On}}on{{else}}off{{end}}" href="/access/{{.Role}}/{{.Service}}">{{if .On}}{{.Label}}<small>{{.Detail}}</small>{{else}}off{{end}}</a></td>{{end}}</tr>
+{{else}}<tr><td colspan="99" class="mute">No agents yet.</td></tr>{{end}}
+</table></div>
+{{template "bottom"}}{{end}}
+
+{{define "cell"}}{{template "top" .}}
+<div class="card"><h2>{{.Form.Role}} → {{.Form.Service}}</h2>
+{{with .Error}}<p class="error">{{.}}</p>{{end}}
+<form method="post" action="/access/{{.Form.Role}}/{{.Form.Service}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label class="check"><input type="checkbox" name="on" value="yes"{{if .Form.On}} checked{{end}}> {{.Form.Role}} may use {{.Form.Service}}</label>
+<label>Methods<select name="mode">
+<option value="read"{{if eq .Form.Mode "read"}} selected{{end}}>read only (GET, HEAD)</option>
+<option value="full"{{if eq .Form.Mode "full"}} selected{{end}}>full (GET, HEAD, POST, PUT, PATCH, DELETE)</option>
+<option value="custom"{{if eq .Form.Mode "custom"}} selected{{end}}>custom (tick below)</option>
+</select></label>
+<div class="row">{{$f := .Form}}{{range .AllMethods}}<label class="check"><input type="checkbox" name="method" value="{{.}}"{{if $f.Has .}} checked{{end}}> {{.}}</label>{{end}}</div>
+<label>Allowed paths, one per line (/ allows every path; /v1 allows /v1 and below)<textarea name="paths">{{.Form.Paths}}</textarea></label>
+<div class="row"><label>Daily limit (calls per UTC day; empty for none)<input name="daily" inputmode="numeric" value="{{.Form.Daily}}"></label>
+<label>Ends on (UTC date; empty for never)<input type="date" name="expires" value="{{.Form.Expires}}"></label></div>
+{{template "password" .}}<button>Save</button> <a href="/access">Cancel</a></form></div>
+{{template "bottom"}}{{end}}
+
+{{define "newagent"}}{{template "top" .}}
+<div class="card"><h2>Add an agent</h2>
+{{with .Error}}<p class="error">{{.}}</p>{{end}}
+<form method="post" action="/agents"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Name (like phobos)<input name="name" value="{{.Name}}" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"></label>
+<p class="mute">The next page shows its token once. It starts with no access; give it some in the grid.</p>
+{{template "password" .}}<button>Add agent</button></form></div>
+{{template "bottom"}}{{end}}
+
+{{define "token"}}{{template "top" .}}
+<div class="card"><h2>Token for {{.Role}}</h2>
+<p class="warnbox">Shown once. Copy it now: it is not stored here and cannot be shown again.{{if .Replaced}} The old token stopped working just now.{{end}}</p>
+<div class="token"><input id="token" readonly autocomplete="off" value="{{.Token}}"><button type="button" data-copy="token">Copy</button></div>
+<p>On the machine that calls the keyring, save it as <code>{{.File}}</code>, owned by the relay's user, mode 600.</p>
+<p><a href="/access">Back to access</a></p></div>
+<script src="/static/app.js"></script>
+{{template "bottom"}}{{end}}
+
+{{define "agent"}}{{template "top" .}}
+<h2>{{.Role}}{{if .Ended}} <span class="chip">ended</span>{{end}}</h2>
+{{with .Error}}<p class="error">{{.}}</p>{{end}}
+<div class="card"><dl><dt>Services</dt><dd>{{range .Services}}<a class="chip" href="/access/{{$.Role}}/{{.Service}}">{{.Service}}: {{.Label}}</a>{{else}}<span class="mute">none yet</span>{{end}}</dd>
+<dt>Ends</dt><dd>{{with .Expires}}{{.}}{{else}}<span class="mute">never</span>{{end}}</dd>
+<dt>Token file</dt><dd><code>{{.File}}</code> on the calling machine</dd></dl></div>
+<div class="card"><h2>New token</h2><form method="post" action="/agents/{{.Role}}/token"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="current" value="{{.Current}}">
+<p class="mute">Shown once. The old token stops working at once.</p>{{template "password" .}}<button>Make a new token</button></form></div>
+<div class="card"><h2>Revoke</h2><form method="post" action="/agents/{{.Role}}/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label class="check"><input type="checkbox" name="confirm" value="yes" required> Remove {{.Role}} and all its access; its calls fail at once</label>
+{{template "password" .}}<button class="danger">Revoke agent</button></form></div>
+{{template "bottom"}}{{end}}
 `))

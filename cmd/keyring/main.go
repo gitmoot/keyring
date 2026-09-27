@@ -5,10 +5,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -133,11 +129,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if fs.NArg() != 0 {
 			return 2
 		}
-		raw := make([]byte, 32)
-		if _, err = rand.Read(raw); err == nil {
-			token := base64.RawURLEncoding.EncodeToString(raw)
-			sum := sha256.Sum256([]byte(token))
-			fmt.Fprintf(stdout, "token:  %s\nsha256: %s\n", token, hex.EncodeToString(sum[:]))
+		var token, sha string
+		if token, sha, err = policy.NewToken(); err == nil {
+			fmt.Fprintf(stdout, "token:  %s\nsha256: %s\n", token, sha)
 			fmt.Fprintln(stderr, "Put the token only on the machine that calls the keyring; put the sha256 in the rules file.")
 		}
 	case "relay":

@@ -4,8 +4,10 @@ package policy
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -92,6 +94,8 @@ type Access struct {
 	Paths []string `json:"paths"`
 	// DailyRequests caps calls per UTC day; 0 means no cap.
 	DailyRequests int `json:"daily_requests,omitempty"`
+	// Expires ends this access (the role keeps its others); nil means never.
+	Expires *time.Time `json:"expires,omitempty"`
 }
 
 var (
@@ -165,6 +169,13 @@ func LoadAccess(path string) (AccessList, error) {
 	var access AccessList
 	if err := decodeStrict(raw, &access); err != nil {
 		return AccessList{}, fmt.Errorf("%s: %w", path, err)
+	}
+	// Both lists may be left out of the file; callers add to them.
+	if access.Services == nil {
+		access.Services = map[string]Service{}
+	}
+	if access.Roles == nil {
+		access.Roles = map[string]Role{}
 	}
 	return access, nil
 }
@@ -390,6 +401,23 @@ func (c *Config) RoleForToken(token string) (string, Role, bool) {
 // Expired reports whether the role's expiry has passed.
 func (r Role) Expired(now time.Time) bool {
 	return r.Expires != nil && !now.Before(*r.Expires)
+}
+
+// Expired reports whether this access has ended.
+func (a Access) Expired(now time.Time) bool {
+	return a.Expires != nil && !now.Before(*a.Expires)
+}
+
+// NewToken makes a role token and the hex SHA-256 that goes in the access
+// file. Only the caller's machine keeps the token.
+func NewToken() (token, sha string, err error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	token = base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+	return token, hex.EncodeToString(sum[:]), nil
 }
 
 // AllowsMethod reports whether method is allowed.
