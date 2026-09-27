@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -19,13 +21,27 @@ import (
 // setAdminPassword asks for the dashboard password twice and writes its hash
 // to the rules file's admin_password_file. Run as root, the file is owned by
 // root with the rules file's group (the service can read it, not change it).
-func setAdminPassword(configPath string, stdin io.Reader, stdout, stderr io.Writer) error {
+// With ifMissing, an existing password file is kept (installer upgrades).
+func setAdminPassword(configPath string, ifMissing bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
 		return err
 	}
 	if rules.AdminPasswordFile == "" {
 		return errors.New("the rules file has no admin_password_file")
+	}
+	if ifMissing {
+		if _, err := os.Lstat(rules.AdminPasswordFile); err == nil {
+			// Keep it only if the service can use it: a damaged file would
+			// leave the dashboard off without anyone asked for a password.
+			if _, err := admin.LoadPasswordFile(rules.AdminPasswordFile); err != nil {
+				return fmt.Errorf("%w; run admin-password without --if-missing to set a new password", err)
+			}
+			fmt.Fprintln(stdout, "dashboard password already set: kept")
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	if os.Geteuid() == 0 {
 		if err := rootOnlyDir(filepath.Dir(rules.AdminPasswordFile)); err != nil {
@@ -108,5 +124,56 @@ func rootOnlyDir(dir string) error {
 	if !ok || uid != 0 || info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s: the password file's directory must be owned by root and writable only by root", dir)
 	}
+	return nil
+}
+
+// enableDashboard adds admin_listen and admin_password_file (admin.pw next to
+// the rules file) to a rules file that has neither. A rules file that already
+// names a dashboard is left as it is, so upgrades keep the owner's settings.
+func enableDashboard(configPath, listen string, stdout io.Writer) error {
+	rules, err := policy.LoadRules(configPath)
+	if err != nil {
+		return err
+	}
+	if rules.AdminListen != "" && rules.AdminPasswordFile != "" {
+		fmt.Fprintf(stdout, "dashboard already on: http://%s\n", rules.AdminListen)
+		return nil
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("%s: %w", configPath, err)
+	}
+	// Fill in only what is missing: the owner's own settings stay.
+	if rules.AdminListen == "" {
+		fields["admin_listen"], _ = json.Marshal(listen)
+	} else {
+		listen = rules.AdminListen
+	}
+	if rules.AdminPasswordFile == "" {
+		fields["admin_password_file"], _ = json.Marshal(filepath.Join(filepath.Dir(configPath), "admin.pw"))
+	}
+	out, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return err
+	}
+	var next policy.Rules
+	if err := strictJSON(out, &next); err != nil {
+		return fmt.Errorf("%s: %w", configPath, err)
+	}
+	access, err := policy.LoadAccess(next.AccessFile)
+	if err != nil {
+		return err
+	}
+	if err := (&policy.Config{Rules: next, AccessList: access}).Validate(); err != nil {
+		return fmt.Errorf("dashboard not enabled: %w", err)
+	}
+	if err := rewriteRules(configPath, out); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "dashboard enabled on http://%s; set its password with keyring admin-password\n", listen)
 	return nil
 }

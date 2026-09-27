@@ -103,27 +103,35 @@ func migrate(configPath, accessPath string, stdout io.Writer) error {
 		return err
 	}
 
+	if err := rewriteRules(configPath, rulesOut); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "moved %d services and %d roles to %s\n", len(access.Services), len(access.Roles), accessPath)
+	return nil
+}
+
+// rewriteRules replaces the rules file, keeping its mode and (as root) its
+// owner and group.
+func rewriteRules(configPath string, out []byte) error {
 	info, err := os.Stat(configPath)
 	if err != nil {
 		return err
 	}
 	uid, gid, owned := fileutil.Owner(configPath)
-	if err := fileutil.WriteAtomic(configPath, append(rulesOut, '\n'), info.Mode().Perm()); err != nil {
+	if err := fileutil.WriteAtomic(configPath, append(out, '\n'), info.Mode().Perm()); err != nil {
 		return err
 	}
 	if owned && os.Geteuid() == 0 {
-		if err := os.Chown(configPath, uid, gid); err != nil {
-			return err
-		}
+		return os.Chown(configPath, uid, gid)
 	}
-	fmt.Fprintf(stdout, "moved %d services and %d roles to %s\n", len(access.Services), len(access.Roles), accessPath)
 	return nil
 }
 
 // ownAccessFile gives the access file to the owner of its directory (the
 // service user), mode 600, when run as root. The directory is the service
 // user's, so the file is opened without following a symlink and must have one
-// link: otherwise root could be tricked into handing over another file.
+// link, and the owner and mode are set on the open file: otherwise root could
+// be tricked into handing over another file.
 func ownAccessFile(path string) error {
 	if os.Geteuid() != 0 {
 		return nil

@@ -22,7 +22,7 @@ import (
 const (
 	testKey   = "sk-live-0123456789abcdefghij"
 	testToken = "role-token-phobos"
-	caller    = "100.106.218.88"
+	caller    = "100.64.0.20"
 )
 
 type seen struct {
@@ -187,7 +187,7 @@ func TestRefusalsNeverReachTheService(t *testing.T) {
 		name, method, target, token, source string
 		want                                int
 	}{
-		{"wrong source", "GET", "/api/v1/allowed", testToken, "100.106.218.89", 403},
+		{"wrong source", "GET", "/api/v1/allowed", testToken, "100.64.0.21", 403},
 		{"no token", "GET", "/api/v1/allowed", "", caller, 401},
 		{"wrong token", "GET", "/api/v1/allowed", "guess", caller, 401},
 		{"unknown service", "GET", "/other/v1/allowed", testToken, caller, 403},

@@ -4,6 +4,7 @@
 #   install -d -m 700 /etc/keyring/tokens
 #   printf '%s\n' '<role token>' > /etc/keyring/tokens/<role>.token && chmod 600 /etc/keyring/tokens/<role>.token
 #   install -m 644 deploy/keyring-relay.service /etc/systemd/system/
+#   (then put the keyring machine's address in place of 192.0.2.10 below)
 #   systemctl daemon-reload && systemctl enable --now keyring-relay
 # Check: curl -s http://127.0.0.1:7700/_relay/health
 [Unit]
@@ -12,7 +13,7 @@ After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/keyring relay --listen 127.0.0.1:7700 --upstream http://100.111.92.43:7701 --tokens /etc/keyring/tokens
+ExecStart=/usr/local/bin/keyring relay --listen 127.0.0.1:7700 --upstream http://192.0.2.10:7701 --tokens /etc/keyring/tokens
 Restart=always
 RestartSec=5
 # Root only so it can read the root-owned token files; it keeps no
