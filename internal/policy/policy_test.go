@@ -15,8 +15,8 @@ func hash(token string) string {
 func validConfig() *Config {
 	return &Config{
 		Rules: Rules{
-			Listen:       "100.111.92.43:7701",
-			AllowSources: []string{"100.106.218.88"},
+			Listen:       "100.64.0.10:7701",
+			AllowSources: []string{"100.64.0.20"},
 			AuditLog:     "/tmp/audit.log",
 		},
 		AccessList: AccessList{
@@ -85,10 +85,10 @@ func TestRoleForTokenAndSources(t *testing.T) {
 			t.Fatalf("RoleForToken(%q) matched", token)
 		}
 	}
-	if !c.SourceAllowed(netip.MustParseAddr("100.106.218.88")) || !c.SourceAllowed(netip.MustParseAddr("::ffff:100.106.218.88")) {
+	if !c.SourceAllowed(netip.MustParseAddr("100.64.0.20")) || !c.SourceAllowed(netip.MustParseAddr("::ffff:100.64.0.20")) {
 		t.Fatal("allowed source refused")
 	}
-	if c.SourceAllowed(netip.MustParseAddr("100.106.218.89")) {
+	if c.SourceAllowed(netip.MustParseAddr("100.64.0.21")) {
 		t.Fatal("other source allowed")
 	}
 }

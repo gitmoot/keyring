@@ -103,7 +103,7 @@ func TestAdminListenMustBeLoopbackWithAPasswordFile(t *testing.T) {
 		t.Fatalf("valid admin settings refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"tailnet address": func(c *Config) { c.AdminListen = "100.111.92.43:7702" },
+		"tailnet address": func(c *Config) { c.AdminListen = "100.64.0.10:7702" },
 		"wildcard":        func(c *Config) { c.AdminListen = "0.0.0.0:7702" },
 		"no port":         func(c *Config) { c.AdminListen = "127.0.0.1" },
 		"port 0":          func(c *Config) { c.AdminListen = "127.0.0.1:0" },

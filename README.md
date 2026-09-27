@@ -3,7 +3,7 @@
 Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
 so a key never reaches the machine where agents run.
 
-Status: the service (#2) is done; the relay (#3) is in progress. Nothing is deployed yet. Plan and steps: #1.
+Status: the service, the relay and the Mac installer are done and in use; the dashboard is #15. Plan and steps: #1.
 
 ## Why
 
@@ -63,8 +63,8 @@ There are two settings files.
 
 ```json
 {
-  "listen": "100.111.92.43:7701",
-  "allow_sources": ["100.106.218.88"],
+  "listen": "192.0.2.10:7701",
+  "allow_sources": ["192.0.2.20"],
   "audit_log": "/Library/Application Support/keyring/data/audit.log",
   "access_file": "/Library/Application Support/keyring/data/access.json"
 }
@@ -106,9 +106,9 @@ Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its
 
 A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
 
-## Dashboard (in progress, #15)
+## Dashboard (#15)
 
-Add two lines to `rules.json` to serve a dashboard on a **loopback** address of the keyring machine:
+The Mac installer turns it on and asks for its password (`deploy/mac/README.md`). By hand: `keyring enable-dashboard --config rules.json` adds two lines to `rules.json`, serving the dashboard on a **loopback** address of the keyring machine:
 
 ```json
 "admin_listen": "127.0.0.1:7702",
@@ -148,7 +148,7 @@ The **Access** page (`/access`) is a grid: rows are agents (roles), columns are 
 The relay listens only on loopback, holds one token per role (never an API key), and forwards to the keyring over the tailnet:
 
 ```sh
-keyring relay --listen 127.0.0.1:7700 --upstream http://100.111.92.43:7701 --tokens /etc/keyring/tokens
+keyring relay --listen 127.0.0.1:7700 --upstream http://192.0.2.10:7701 --tokens /etc/keyring/tokens
 ```
 
 `/etc/keyring/tokens` must be a real directory (not a symlink), owned by the relay's user, mode 700, inside a parent that only that user can write (for example root-owned `/etc/keyring`). Each `<role>.token` file must be a regular file owned by that user, mode 600. A call picks its role in the path:

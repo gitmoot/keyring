@@ -3,21 +3,39 @@
 # a directory only root can write, after checking the release's SHA-256 (see
 # README.md):
 #
-#   sudo sh /var/root/keyring-install/install.sh /var/root/keyring-install/keyring
+#   sudo sh /var/root/keyring-install/install.sh /var/root/keyring-install/keyring \
+#       --listen 192.0.2.10:7701 --allow 192.0.2.20
+#
+# --listen (this Mac's address for the agents' server) and --allow (that
+# server's address) are needed on the first install only; an upgrade keeps the
+# existing rules.
 #
 # Layout:
 #   /Library/Application Support/keyring/            root:_keyring 750
 #     rules.json                                     root:_keyring 640  (the service cannot change its rules)
+#     admin.pw                                       root:_keyring 640  (dashboard password hash)
 #     data/                                          _keyring 700
-#       keys.json, audit.log, service.log            _keyring 600
+#       keys.json, access.json, keymeta.json,
+#       usage.json, audit.log, service.log           _keyring 600
 #
-# Running it again upgrades the binary and restarts the service; it never
-# touches existing rules, keys or logs.
+# Running it again upgrades the binary and restarts the service. It never
+# changes existing keys or logs, the network settings in rules.json, or a
+# dashboard password that is already set.
 set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
+usage() { echo "usage: sudo sh install.sh KEYRING_BINARY [--listen IP:PORT --allow IP]" >&2; exit 2; }
 BIN_SRC=${1:-}
-[ -n "$BIN_SRC" ] && [ -f "$BIN_SRC" ] || { echo "usage: sudo sh install.sh KEYRING_BINARY" >&2; exit 2; }
+[ -n "$BIN_SRC" ] && [ -f "$BIN_SRC" ] || usage
+shift
+LISTEN= SOURCE=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--listen) [ $# -ge 2 ] || usage; LISTEN=$2; shift 2 ;;
+	--allow) [ $# -ge 2 ] || usage; SOURCE=$2; shift 2 ;;
+	*) usage ;;
+	esac
+done
 
 NAME=_keyring
 LABEL=org.gitmoot.keyring
@@ -25,8 +43,12 @@ DIR="/Library/Application Support/keyring"
 DATA="$DIR/data"
 BIN=/usr/local/libexec/keyring
 PLIST=/Library/LaunchDaemons/$LABEL.plist
-LISTEN=100.111.92.43:7701
-SOURCE=100.106.218.88
+if [ -f "$DIR/rules.json" ]; then
+	[ -z "$LISTEN$SOURCE" ] || echo "rules.json exists: --listen and --allow ignored (edit rules.json to change them)"
+elif [ -z "$LISTEN" ] || [ -z "$SOURCE" ]; then
+	echo "first install: give --listen IP:PORT (this Mac) and --allow IP (the agents' server)" >&2
+	exit 2
+fi
 
 # 0. Only run code nobody else could have changed. The script and binary must
 # be regular files (not symlinks), and they, their directories and EVERY
@@ -149,7 +171,15 @@ chmod 640 "$DIR/rules.json"
 # into the access file, which the service owns. On a split rules file this
 # changes nothing except making sure the service owns its access file.
 "$BIN" migrate --config "$DIR/rules.json" --access "$DATA/access.json"
+# The dashboard: loopback only, with a password stored as a root-owned hash.
+# An upgrade keeps the dashboard settings and password that are already there.
+"$BIN" enable-dashboard --config "$DIR/rules.json"
+"$BIN" admin-password --config "$DIR/rules.json" --if-missing
 sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json"
+# launchd creates the service log with mode 644 whatever the Umask says.
+[ -f "$DATA/service.log" ] || : >"$DATA/service.log"
+chown "$NAME:$NAME" "$DATA/service.log"
+chmod 600 "$DATA/service.log"
 
 # 4. Start at boot as _keyring. KeepAlive restarts it until the tailnet
 # address is up after boot.
@@ -186,13 +216,21 @@ sleep 2
 # 5. Check.
 launchctl print "system/$LABEL" | grep -E '^[[:space:]]*(state|pid) =' || true
 ls -la "$DIR" "$DATA"
-if id jerry >/dev/null 2>&1; then
-	if sudo -u jerry test -r "$DIR/rules.json" || sudo -u jerry test -r "$DATA" || sudo -u jerry test -w "$BIN"; then
-		echo "FAILED: jerry can read the keyring's files or change its binary" >&2
+# The user who ran sudo stands for every other account on this Mac.
+U=${SUDO_USER:-}
+if [ -n "$U" ] && [ "$U" != root ]; then
+	if sudo -u "$U" test -r "$DIR/rules.json" || sudo -u "$U" test -r "$DATA" || sudo -u "$U" test -w "$BIN" ||
+		sudo -u "$U" test -r "$DIR/admin.pw"; then
+		echo "FAILED: $U can read the keyring's files or change its binary" >&2
 		exit 1
 	fi
-	echo "jerry cannot read the rules or data, or change the binary: ok"
+	echo "$U cannot read the rules, password or data, or change the binary: ok"
 else
-	echo "no user jerry here: access check skipped"
+	echo "run from a normal account with sudo to check what other users can read"
+fi
+ADMIN=$(sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json" | sed -n 's/^dashboard: //p')
+if [ -n "$ADMIN" ]; then
+	code=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN/login" || true)
+	echo "dashboard $ADMIN/login answers $code (want 200)"
 fi
 tail -n 3 "$DATA/service.log" 2>/dev/null || true

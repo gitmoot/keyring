@@ -122,13 +122,13 @@ func TestUnreachableKeyringGivesAClearError(t *testing.T) {
 
 func TestCheckUpstream(t *testing.T) {
 	for raw, ok := range map[string]bool{
-		"http://100.111.92.43:7701":   true,
+		"http://100.64.0.10:7701":   true,
 		"http://127.0.0.1:7701":       true,
 		"https://keyring.example":     true,
 		"http://192.168.1.5:7701":     false, // LAN in clear
 		"http://keyring.example":      false, // hostname in clear
-		"http://100.111.92.43:7701/x": false,
-		"ftp://100.111.92.43":         false,
+		"http://100.64.0.10:7701/x": false,
+		"ftp://100.64.0.10":         false,
 	} {
 		if _, err := CheckUpstream(raw); (err == nil) != ok {
 			t.Errorf("CheckUpstream(%q) err = %v, want ok=%v", raw, err, ok)

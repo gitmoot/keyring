@@ -34,7 +34,10 @@ const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
   keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
-  keyring admin-password --config FILE       set the dashboard password (asked twice, not shown)
+  keyring enable-dashboard --config FILE [--admin-listen 127.0.0.1:7702]
+                                             turn the dashboard on (loopback only; kept if already on)
+  keyring admin-password --config FILE [--if-missing]
+                                             set the dashboard password (asked twice, not shown)
   keyring set --store FILE NAME              add or replace a key; the value is read from stdin
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
@@ -59,7 +62,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	storePath := fs.String("store", "", "key store file")
 	accessPath := fs.String("access", "", "migrate: absolute path of the access file to create")
 	listen := fs.String("listen", "127.0.0.1:7700", "relay: loopback address to listen on")
-	upstream := fs.String("upstream", "", "relay: keyring URL, e.g. http://100.111.92.43:7701")
+	upstream := fs.String("upstream", "", "relay: keyring URL, e.g. http://192.0.2.10:7701")
+	ifMissing := fs.Bool("if-missing", false, "admin-password: keep a password that is already set")
+	adminListen := fs.String("admin-listen", "127.0.0.1:7702", "enable-dashboard: loopback address of the dashboard")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -91,11 +96,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = migrate(*configPath, *accessPath, stdout)
+	case "enable-dashboard":
+		if !need("config") || fs.NArg() != 0 {
+			return 2
+		}
+		err = enableDashboard(*configPath, *adminListen, stdout)
 	case "admin-password":
 		if !need("config") || fs.NArg() != 0 {
 			return 2
 		}
-		err = setAdminPassword(*configPath, stdin, stdout, stderr)
+		err = setAdminPassword(*configPath, *ifMissing, stdin, stdout, stderr)
 	case "set":
 		if !need("store") || fs.NArg() != 1 {
 			fmt.Fprintln(stderr, "keyring set: pass --store FILE and one NAME")
@@ -157,6 +167,9 @@ func check(configPath, storePath string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "rules ok: %d services, %d roles\n", len(cfg.Services), len(cfg.Roles))
+	if cfg.AdminListen != "" {
+		fmt.Fprintf(stdout, "dashboard: http://%s\n", cfg.AdminListen)
+	}
 	if storePath == "" {
 		return nil
 	}
