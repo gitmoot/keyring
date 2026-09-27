@@ -76,7 +76,7 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "access"}}{{template "top" .}}
 {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
-<div class="bar"><span class="mute">Rows are agents, columns are services. Open a cell to change it.</span><a class="btn" href="/agents/new">+ Add agent</a></div>
+<div class="bar"><span class="mute">Rows are agents, columns are services. Open a cell to change it.</span><a class="btn" href="/new/agent">+ Add agent</a></div>
 <div class="grid"><table><tr><th>Agent</th>{{range .Services}}<th>{{.}}</th>{{end}}</tr>
 {{range .Rows}}<tr><td><a href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}} <span class="chip">ended</span>{{end}}</td>
 {{range .Cells}}<td><a class="cell {{if .Ended}}ended{{else if .On}}on{{else}}off{{end}}" href="/access/{{.Role}}/{{.Service}}">{{if .On}}{{.Label}}<small>{{.Detail}}</small>{{else}}off{{end}}</a></td>{{end}}</tr>

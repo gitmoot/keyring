@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // The access grid: rows are roles (agents), columns are services. A token is
@@ -29,7 +30,7 @@ func registerAccess(b *Backend) {
 	a.Handle("GET /access", b.accessPage)
 	a.Handle("GET /access/{role}/{service}", b.cellPage)
 	a.Handle("POST /access/{role}/{service}", b.saveCell)
-	a.Handle("GET /agents/new", b.newAgentPage)
+	a.Handle("GET /new/agent", b.newAgentPage) // not under /agents/: a role may be named "new"
 	a.Handle("POST /agents", b.addAgent)
 	a.Handle("GET /agents/{role}", b.agentPage)
 	a.Handle("POST /agents/{role}/token", b.newAgentToken)
@@ -300,13 +301,21 @@ func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
 	http.Redirect(w, r, "/access?done=saved", http.StatusSeeOther)
 }
 
-// saveAndApply writes the access file and swaps it into the proxy. Callers
-// hold b.Mu and have validated next.
+// saveAndApply writes the access file and swaps it into the proxy. The keys
+// are read first: once the file is written nothing can fail, so the file and
+// the running config never disagree, and a token shown after a rotation is
+// the one in force. Callers hold b.Mu.
 func (b *Backend) saveAndApply(next policy.AccessList) error {
-	if _, err := policy.SaveAccess(b.rules(), next); err != nil {
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
 		return err
 	}
-	return b.apply()
+	cfg, err := policy.SaveAccess(b.rules(), next)
+	if err != nil {
+		return err
+	}
+	b.Proxy.Swap(cfg, keys)
+	return nil
 }
 
 func (b *Backend) newAgentPage(w http.ResponseWriter, r *http.Request, sid string) {

@@ -125,7 +125,7 @@ func TestAddAgentShowsItsTokenInOneResponseOnly(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(e.proxy.Config().AccessFile)
 	for where, text := range map[string]string{
-		"a page":      e.everyPage("/access", "/agents/deimos", "/access/deimos/api", "/agents/new"),
+		"a page":      e.everyPage("/access", "/agents/deimos", "/access/deimos/api", "/new/agent"),
 		"the audit":   e.audit.String(),
 		"access file": string(raw),
 	} {
@@ -263,5 +263,34 @@ func TestChangesKeepHandEditsNotYetReloaded(t *testing.T) {
 	}
 	if !strings.Contains(e.request("GET", "/access", nil).Body.String(), `href="/agents/manual"`) {
 		t.Fatal("the hand edit was not applied with the change")
+	}
+}
+
+func TestFailedChangeLeavesFileAndRunningConfigAlike(t *testing.T) {
+	e := newEnv(t)
+	cur := currentFrom(t, e, "phobos")
+	before, _ := os.ReadFile(e.proxy.Config().AccessFile)
+	// The store cannot be read: a change must fail before it writes anything.
+	if err := os.WriteFile(e.backend.StorePath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := e.request("POST", "/agents/phobos/token", url.Values{"current": {cur}, "password": {password}})
+	if tokenInPage.MatchString(w.Body.String()) {
+		t.Fatal("a token was shown although the change failed")
+	}
+	e.saveCell("phobos", "api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}})
+	if after, _ := os.ReadFile(e.proxy.Config().AccessFile); !bytes.Equal(before, after) {
+		t.Fatal("the access file changed although the change failed")
+	}
+	if code := e.call("GET", "/api/v1/x", token); code != 200 {
+		t.Fatalf("the old token stopped working: %d", code)
+	}
+}
+
+func TestAgentNamedNewHasAPage(t *testing.T) {
+	e := newEnv(t)
+	tokenFrom(t, e.request("POST", "/agents", url.Values{"name": {"new"}, "password": {password}}))
+	if body := e.request("GET", "/agents/new", nil).Body.String(); !strings.Contains(body, `action="/agents/new/revoke"`) {
+		t.Fatalf("/agents/new is not the agent's page:\n%s", body)
 	}
 }
