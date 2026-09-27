@@ -30,10 +30,11 @@ type Backend struct {
 	Mu        *sync.Mutex
 	StorePath string
 	MetaPath  string // key status and leaked flags; never values
-	Rules     policy.Rules
-	Proxy     *server.Handler
-	Admin     *admin.Server
-	Now       func() time.Time
+	// Proxy holds the running config; its rules (which only root and SIGHUP
+	// change) are the ones every change is checked against.
+	Proxy *server.Handler
+	Admin *admin.Server
+	Now   func() time.Time
 }
 
 // KeyMeta is what the dashboard remembers about a key besides its value.
@@ -44,6 +45,10 @@ type KeyMeta struct {
 	LeakedAt  *time.Time `json:"leaked_at,omitempty"`
 }
 
+// rules are the running rules: a SIGHUP may have changed allow_sources since
+// the start, and a dashboard change must not roll that back.
+func (b *Backend) rules() policy.Rules { return b.Proxy.Config().Rules }
+
 // Register adds the pages to the admin server.
 func Register(b *Backend) {
 	if b.Now == nil {
@@ -52,7 +57,7 @@ func Register(b *Backend) {
 	a := b.Admin
 	a.SetHome("/keys")
 	a.Handle("GET /keys", b.keysPage)
-	a.Handle("GET /keys/new", b.newKeyPage)
+	a.Handle("GET /new/key", b.newKeyPage) // not under /keys/: a key may be named "new"
 	a.Handle("POST /keys", b.addKey)
 	a.Handle("GET /keys/{name}", b.keyPage)
 	a.Handle("POST /keys/{name}/test", b.testKey)
@@ -304,7 +309,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	// Validate the service change before storing the value, so a refused
 	// form leaves nothing behind.
 	if f.Mode != "none" {
-		if err := (&policy.Config{Rules: b.Rules, AccessList: cloneAccess(next)}).Validate(); err != nil {
+		if err := (&policy.Config{Rules: b.rules(), AccessList: cloneAccess(next)}).Validate(); err != nil {
 			b.renderNewKey(w, sid, http.StatusBadRequest, f, err.Error())
 			return
 		}
@@ -314,7 +319,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	if f.Mode != "none" {
-		if _, err := policy.SaveAccess(b.Rules, next); err != nil {
+		if _, err := policy.SaveAccess(b.rules(), next); err != nil {
 			b.fail(w, sid, err)
 			return
 		}
@@ -331,15 +336,14 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	http.Redirect(w, r, "/keys/"+f.Name+"?done=added", http.StatusSeeOther)
 }
 
-// apply loads the saved access file and keys and swaps them into the proxy.
-// The rules are the ones the service started with; they never change while
-// it runs. Callers hold b.Mu.
+// apply loads the saved access file and keys and swaps them into the proxy,
+// with the running rules. Callers hold b.Mu.
 func (b *Backend) apply() error {
-	access, err := policy.LoadAccess(b.Rules.AccessFile)
+	access, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
 		return err
 	}
-	cfg := &policy.Config{Rules: b.Rules, AccessList: access}
+	cfg := &policy.Config{Rules: b.rules(), AccessList: access}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -369,6 +373,22 @@ func (b *Backend) keyPage(w http.ResponseWriter, r *http.Request, sid string) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// known reports whether the keys page lists name: it is stored or an
+// access-file service names it. Changes to any other name are refused, so
+// they cannot leave entries for keys that exist nowhere.
+func (b *Backend) known(name string) (bool, error) {
+	rows, err := b.rows()
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // testService is the first service (by name) that uses the key and has a
@@ -418,13 +438,24 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		m.Status, m.Reason = "failing", fmt.Sprintf("%d %s", status, http.StatusText(status))
 	}
 	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	// The result belongs to the value that was sent: if a replace or delete
+	// happened meanwhile, it says nothing about the key now stored.
+	now, err := store.Load(b.StorePath)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	if cur, ok := now[name]; !ok || cur != value {
+		http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+		return
+	}
 	meta, err := b.loadMeta()
 	if err == nil {
 		m.LeakedAt = meta[name].LeakedAt
 		meta[name] = m
 		err = b.saveMeta(meta)
 	}
-	b.Mu.Unlock()
 	if err != nil {
 		b.fail(w, sid, err)
 		return
@@ -450,6 +481,10 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
+	if ok, err := b.known(name); err != nil || !ok {
+		b.unknownKey(w, r, sid, err)
+		return
+	}
 	if err := store.Set(b.StorePath, name, value); err != nil {
 		b.fail(w, sid, err)
 		return
@@ -472,8 +507,16 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 
 func (b *Backend) markLeaked(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
+	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
+		http.Redirect(w, r, "/keys/"+name+"?error=password", http.StatusSeeOther)
+		return
+	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
+	if ok, err := b.known(name); err != nil || !ok {
+		b.unknownKey(w, r, sid, err)
+		return
+	}
 	meta, err := b.loadMeta()
 	if err != nil {
 		b.fail(w, sid, err)
@@ -510,8 +553,17 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	if err := store.Delete(b.StorePath, name); err != nil {
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	if _, ok := keys[name]; !ok {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+		return
+	}
+	if err := store.Delete(b.StorePath, name); err != nil {
+		b.fail(w, sid, err)
 		return
 	}
 	meta, err := b.loadMeta()
@@ -558,4 +610,12 @@ func (b *Backend) render(w http.ResponseWriter, status int, page, sid string, da
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = pages.ExecuteTemplate(w, page, data)
+}
+
+func (b *Backend) unknownKey(w http.ResponseWriter, r *http.Request, sid string, err error) {
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	http.NotFound(w, r)
 }

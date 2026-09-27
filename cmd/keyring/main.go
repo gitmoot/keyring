@@ -227,7 +227,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr, func(a *admin.Server) {
 		dashboardpkg.Register(&dashboardpkg.Backend{
 			Mu: changes, StorePath: storePath, MetaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"),
-			Rules: cfg.Rules, Proxy: handler, Admin: a,
+			Proxy: handler, Admin: a,
 		})
 	})
 	if err != nil {

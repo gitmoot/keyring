@@ -89,7 +89,7 @@ There are two settings files.
 
 A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
 
-`SIGHUP` re-reads the access file and keys. An invalid access file, or a changed `listen` or `audit_log`, is refused, and the previous settings stay in use. Daily counts carry over.
+`SIGHUP` re-reads the rules file, the access file and the keys. A change to `allow_sources` applies at once; a changed `listen`, `audit_log` or `access_file`, or an invalid file, is refused, and the previous settings stay in use. Daily counts carry over.
 
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
 - accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;
@@ -128,11 +128,11 @@ Safety:
 
 The **Keys** page (`/keys`) lists every key the access file names or the store holds: its service, which roles use it, status, last use and calls today. A value is never shown, not even in part.
 - **Add key**: name, value and how it is used (an existing service, a new service, or none yet). A new service is checked like the access file before anything is stored, so a refused form leaves nothing behind.
-- **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply.
+- **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
 - **Replace** takes effect at once; it clears the leaked flag and the test result.
 - **Mark as leaked** flags the key until it is replaced.
 - **Delete** asks for a tick when a role still uses the key; its calls then answer 503.
-- Add, replace and delete ask for the password every time.
+- Add, replace, mark as leaked and delete ask for the password every time. They work only on keys the page lists.
 
 Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
 

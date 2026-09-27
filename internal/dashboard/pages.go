@@ -15,7 +15,7 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "keys"}}{{template "top" .}}
 {{if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
-<div class="bar"><form method="get" action="/keys"><input type="search" name="q" value="{{.Query}}" placeholder="Search keys or services"><button class="ghost">Search</button></form><a class="btn" href="/keys/new">+ Add key</a></div>
+<div class="bar"><form method="get" action="/keys"><input type="search" name="q" value="{{.Query}}" placeholder="Search keys or services"><button class="ghost">Search</button></form><a class="btn" href="/new/key">+ Add key</a></div>
 <table><tr><th>Key</th><th>Service</th><th>Value</th><th>Status</th><th>Used by</th><th>Last used</th><th>Calls today</th></tr>
 {{range .Rows}}<tr><td><a href="/keys/{{.Name}}"><code>{{.Name}}</code></a></td>
 <td>{{range .Services}}<span class="chip">{{.}}</span>{{else}}<span class="mute">—</span>{{end}}</td>
@@ -55,7 +55,7 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "key"}}{{template "top" .}}
 {{if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
-{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{end}}
+{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
 <div class="card"><h2><code>{{.Row.Name}}</code></h2><dl>
 <dt>Status</dt><dd><span class="dot {{.Row.StatusClass}}"></span>{{.Row.Status}}{{if not .Meta.CheckedAt.IsZero}} <span class="mute">(tested {{.Meta.CheckedAt.Format "2006-01-02 15:04"}} UTC)</span>{{end}}</dd>
 <dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none{{end}}</dd>
@@ -66,7 +66,7 @@ var pages = template.Must(template.New("pages").Parse(`
 <div class="card"><h2>Test</h2>{{if .Testable}}<form method="post" action="/keys/{{.Row.Name}}/test"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Send the test request</button></form>{{else}}<p class="mute">No service using this key has a test request.</p>{{end}}</div>
 <div class="card"><h2>Replace</h2><form method="post" action="/keys/{{.Row.Name}}/replace"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>New value<input type="password" name="value" autocomplete="off" required></label>{{template "password" .}}<button>Replace</button></form></div>
-<div class="card"><h2>Leaked?</h2><form method="post" action="/keys/{{.Row.Name}}/leaked"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Mark as leaked</button> <span class="mute">Cleared when you replace it.</span></form></div>
+<div class="card"><h2>Leaked?</h2><form method="post" action="/keys/{{.Row.Name}}/leaked"><input type="hidden" name="csrf" value="{{.CSRF}}"><p class="mute">Cleared when you replace it.</p>{{template "password" .}}<button class="ghost">Mark as leaked</button></form></div>
 <div class="card"><h2>Delete</h2><form method="post" action="/keys/{{.Row.Name}}/delete"><input type="hidden" name="csrf" value="{{.CSRF}}">
 {{if .Row.UsedBy}}<label class="check"><input type="checkbox" name="confirm_in_use" value="yes"> Delete even though {{range $i, $r := .Row.UsedBy}}{{if $i}}, {{end}}{{$r}}{{end}} {{if eq (len .Row.UsedBy) 1}}uses{{else}}use{{end}} it</label>{{end}}
 {{template "password" .}}<button class="danger">Delete key</button></form></div>

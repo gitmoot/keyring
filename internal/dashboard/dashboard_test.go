@@ -80,7 +80,7 @@ func newEnv(t *testing.T) *env {
 	e.now = &now
 	clock := func() time.Time { return *e.now }
 	e.admin.SetClock(clock)
-	e.backend = &Backend{Mu: &sync.Mutex{}, StorePath: storePath, MetaPath: filepath.Join(dir, "keymeta.json"), Rules: rules, Proxy: e.proxy, Admin: e.admin, Now: clock}
+	e.backend = &Backend{Mu: &sync.Mutex{}, StorePath: storePath, MetaPath: filepath.Join(dir, "keymeta.json"), Proxy: e.proxy, Admin: e.admin, Now: clock}
 	Register(e.backend)
 	e.login()
 	return e
@@ -124,7 +124,7 @@ func (e *env) login() {
 // everyPage fetches every page a user can see and returns the combined HTML.
 func (e *env) everyPage(names ...string) string {
 	var all strings.Builder
-	for _, p := range append([]string{"/keys", "/keys?q=api", "/keys/new"}, names...) {
+	for _, p := range append([]string{"/keys", "/keys?q=api", "/new/key"}, names...) {
 		w := e.request("GET", p, nil)
 		all.WriteString(w.Body.String())
 	}
@@ -181,7 +181,7 @@ func TestAddKeyWithNewServiceNeverEchoesTheValue(t *testing.T) {
 
 func TestRefusedAddLeavesNothingBehind(t *testing.T) {
 	e := newEnv(t)
-	before, _ := os.ReadFile(e.backend.Rules.AccessFile)
+	before, _ := os.ReadFile(e.proxy.Config().AccessFile)
 	w := e.request("POST", "/keys", url.Values{"name": {"BAD_KEY"}, "value": {"sk-bad-VALUE-0123456789"}, "mode": {"new"}, "password": {password},
 		"svc_name": {"bad"}, "base": {"http://example.com"}, "auth": {"bearer"}})
 	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "sk-bad-VALUE") {
@@ -190,7 +190,7 @@ func TestRefusedAddLeavesNothingBehind(t *testing.T) {
 	if keys, _ := store.Load(e.backend.StorePath); keys["BAD_KEY"] != "" {
 		t.Fatal("value stored although the service was refused")
 	}
-	if after, _ := os.ReadFile(e.backend.Rules.AccessFile); !bytes.Equal(before, after) {
+	if after, _ := os.ReadFile(e.proxy.Config().AccessFile); !bytes.Equal(before, after) {
 		t.Fatal("access file changed")
 	}
 	if w := e.request("POST", "/keys", url.Values{"name": {"API_KEY"}, "value": {"x"}, "mode": {"none"}, "password": {password}}); w.Code != http.StatusConflict {
@@ -229,7 +229,10 @@ func TestReplaceTakesEffectAndClearsLeaked(t *testing.T) {
 	if code := e.proxyCall(); code != 200 || e.seenAuth.Load() != "Bearer "+oldValue {
 		t.Fatalf("before: %d %v", code, e.seenAuth.Load())
 	}
-	e.request("POST", "/keys/API_KEY/leaked", url.Values{})
+	if w := e.request("POST", "/keys/API_KEY/leaked", url.Values{}); !strings.Contains(w.Header().Get("Location"), "error=password") {
+		t.Fatalf("marked leaked without the password: %s", w.Header().Get("Location"))
+	}
+	e.request("POST", "/keys/API_KEY/leaked", url.Values{"password": {password}})
 	if !strings.Contains(e.request("GET", "/keys", nil).Body.String(), "Leaked") {
 		t.Fatal("leaked flag not shown")
 	}
@@ -297,5 +300,90 @@ func TestPagesNeedALoggedInSession(t *testing.T) {
 	}
 	if keys, _ := store.Load(e.backend.StorePath); keys["API_KEY"] != oldValue {
 		t.Fatal("changed without a session")
+	}
+}
+
+func TestChangesKeepRulesReloadedSinceStart(t *testing.T) {
+	e := newEnv(t)
+	// A SIGHUP reload narrowed allow_sources after the dashboard started.
+	cfg := e.proxy.Config()
+	narrowed := *cfg
+	narrowed.AllowSources = []string{"127.0.0.9"}
+	if err := narrowed.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(&narrowed, keys)
+	if code := e.proxyCall(); code != http.StatusForbidden {
+		t.Fatalf("after the reload: %d, want 403", code)
+	}
+	e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {newValue}, "password": {password}})
+	if code := e.proxyCall(); code != http.StatusForbidden {
+		t.Fatalf("a dashboard change reopened the reloaded source list: %d", code)
+	}
+}
+
+func TestTestResultOfAReplacedValueIsDropped(t *testing.T) {
+	e := newEnv(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+	defer slow.Close()
+	access, _ := policy.LoadAccess(e.proxy.Config().AccessFile)
+	svc := access.Services["api"]
+	svc.Base = slow.URL
+	access.Services["api"] = svc
+	if _, err := policy.SaveAccess(e.proxy.Config().Rules, access); err != nil {
+		t.Fatal(err)
+	}
+	e.backend.Mu.Lock()
+	if err := e.backend.apply(); err != nil {
+		t.Fatal(err)
+	}
+	e.backend.Mu.Unlock()
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- e.request("POST", "/keys/API_KEY/test", url.Values{}) }()
+	<-started
+	e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {newValue}, "password": {password}})
+	close(release)
+	if w := <-done; !strings.Contains(w.Header().Get("Location"), "error=changed") {
+		t.Fatalf("test finishing after a replace: %s", w.Header().Get("Location"))
+	}
+	if !strings.Contains(e.request("GET", "/keys", nil).Body.String(), "Not tested") {
+		t.Fatal("the replaced value shows a result it never had")
+	}
+}
+
+func TestChangesToUnknownKeysAreRefused(t *testing.T) {
+	e := newEnv(t)
+	before, _ := os.ReadFile(e.backend.StorePath)
+	for _, action := range []string{"leaked", "replace", "delete"} {
+		w := e.request("POST", "/keys/GHOST_KEY/"+action, url.Values{"value": {newValue}, "password": {password}, "confirm_in_use": {"yes"}})
+		if w.Code != http.StatusNotFound && !strings.Contains(w.Header().Get("Location"), "error=no-value") {
+			t.Errorf("%s on an unknown key: %d %s", action, w.Code, w.Header().Get("Location"))
+		}
+	}
+	if after, _ := os.ReadFile(e.backend.StorePath); !bytes.Equal(before, after) {
+		t.Fatal("the store changed")
+	}
+	if _, err := os.Stat(e.backend.MetaPath); err == nil {
+		if raw, _ := os.ReadFile(e.backend.MetaPath); strings.Contains(string(raw), "GHOST_KEY") {
+			t.Fatal("keymeta.json holds an unknown key")
+		}
+	}
+}
+
+func TestKeyNamedNewHasADetailPage(t *testing.T) {
+	e := newEnv(t)
+	if err := store.Set(e.backend.StorePath, "new", "sk-named-new-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if body := e.request("GET", "/keys/new", nil).Body.String(); !strings.Contains(body, "<h2>new") && !strings.Contains(body, ">new<") {
+		t.Fatalf("/keys/new is not the key's page:\n%s", body)
+	}
+	if w := e.request("GET", "/new/key", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "Add a key") {
+		t.Fatalf("add form: %d", w.Code)
 	}
 }
