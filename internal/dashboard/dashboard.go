@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -327,7 +328,13 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		var a agentSettings
 		dec := json.NewDecoder(strings.NewReader(f.Pasted))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&a); err != nil {
+		err := dec.Decode(&a)
+		if err == nil {
+			if _, extra := dec.Token(); extra != io.EOF {
+				err = errors.New("text after the settings")
+			}
+		}
+		if err != nil {
 			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
 			return
 		}
