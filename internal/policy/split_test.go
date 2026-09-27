@@ -92,3 +92,32 @@ func TestSaveAccessNeverWritesAnInvalidList(t *testing.T) {
 		t.Fatalf("access file mode %04o", info.Mode().Perm())
 	}
 }
+
+func TestAdminListenMustBeLoopbackWithAPasswordFile(t *testing.T) {
+	base := func() *Config {
+		c := validConfig()
+		c.AdminListen, c.AdminPasswordFile = "127.0.0.1:7702", "/etc/keyring/admin.pw"
+		return c
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("valid admin settings refused: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"tailnet address": func(c *Config) { c.AdminListen = "100.111.92.43:7702" },
+		"wildcard":        func(c *Config) { c.AdminListen = "0.0.0.0:7702" },
+		"no port":         func(c *Config) { c.AdminListen = "127.0.0.1" },
+		"same as listen": func(c *Config) {
+			c.Listen = "127.0.0.1:7701"
+			c.AllowSources = []string{"127.0.0.1"}
+			c.AdminListen = "127.0.0.1:7701"
+		},
+		"no password file":       func(c *Config) { c.AdminPasswordFile = "" },
+		"relative password file": func(c *Config) { c.AdminPasswordFile = "admin.pw" },
+	} {
+		c := base()
+		mutate(c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

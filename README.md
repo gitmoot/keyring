@@ -104,6 +104,25 @@ A service that echoes a key in some other encoding (for example base64 inside a 
 
 Allowed methods default to GET, HEAD and POST.
 
+## Dashboard (in progress, #15)
+
+Add two lines to `rules.json` to serve a dashboard on a **loopback** address of the keyring machine:
+
+```json
+"admin_listen": "127.0.0.1:7702",
+"admin_password_file": "/Library/Application Support/keyring/admin.pw"
+```
+
+Set the password as root with `keyring admin-password --config rules.json`. It asks twice, needs at least 12 characters, and stores only a PBKDF2-SHA256 hash, root-owned and mode 640. Reload with SIGHUP to apply it; that ends every session. Then open `http://127.0.0.1:7702` in a browser on that machine.
+
+Safety:
+- The dashboard listener only accepts a loopback address, and never serves the proxy. The proxy listener never serves the dashboard.
+- Requests with a `Host` other than the listener's address are refused, against DNS rebinding.
+- Every change needs a same-origin `Origin` header and the session's CSRF token.
+- Sessions are in memory only: `HttpOnly`, `SameSite=Strict`, 30 minutes idle, 8 hours at most.
+- Failed logins are slowed after 5 and locked for an hour after 20.
+- Every login, logout and password change is written to the audit log without secrets.
+
 ## Relay on the agent server (step 2)
 
 The relay listens only on loopback, holds one token per role (never an API key), and forwards to the keyring over the tailnet:

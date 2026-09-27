@@ -39,6 +39,13 @@ type Rules struct {
 	AuditLog     string   `json:"audit_log"`
 	// AccessFile is the absolute path of the access file.
 	AccessFile string `json:"access_file"`
+	// AdminListen, when set, serves the dashboard on this loopback address
+	// only. The proxy never serves the dashboard, and this listener never
+	// serves the proxy.
+	AdminListen string `json:"admin_listen,omitempty"`
+	// AdminPasswordFile is the absolute path of the dashboard password hash,
+	// written by root with "keyring admin-password".
+	AdminPasswordFile string `json:"admin_password_file,omitempty"`
 }
 
 // AccessList is the access file: which services exist and what each role may
@@ -216,6 +223,18 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.AuditLog) == "" {
 		return errors.New("audit_log is empty")
+	}
+	if c.AdminListen != "" {
+		admin, err := netip.ParseAddrPort(c.AdminListen)
+		if err != nil || !admin.Addr().IsLoopback() {
+			return fmt.Errorf("admin_listen %q: must be a loopback IP:port", c.AdminListen)
+		}
+		if admin == listen {
+			return errors.New("admin_listen must differ from listen")
+		}
+		if !filepath.IsAbs(c.AdminPasswordFile) {
+			return errors.New("admin_listen needs an absolute admin_password_file")
+		}
 	}
 	if c.Services == nil {
 		c.Services = map[string]Service{}

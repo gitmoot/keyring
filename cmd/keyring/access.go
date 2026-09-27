@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/gitmoot/keyring/internal/admin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
@@ -154,13 +156,15 @@ func strictJSON(raw []byte, v any) error {
 	return decoder.Decode(v)
 }
 
-// reloader re-reads the rules, access file and keys and swaps them into the
-// running proxy. listen and audit_log are fixed at start: a change to them
-// needs a restart, and the reload is refused so nothing half-applies.
+// reloader re-reads the rules, access file, keys and dashboard password and
+// swaps them in. The listeners, audit log and file paths are fixed at start:
+// a change to them needs a restart, and the reload is refused so nothing
+// half-applies.
 type reloader struct {
 	configPath, storePath string
-	listen, auditLog      string
+	fixed                 policy.Rules
 	handler               *server.Handler
+	dashboard             *admin.Server // nil when the dashboard is off
 }
 
 func (rl reloader) reload() (*policy.Config, map[string]string, error) {
@@ -168,14 +172,25 @@ func (rl reloader) reload() (*policy.Config, map[string]string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if cfg.Listen != rl.listen || cfg.AuditLog != rl.auditLog {
-		return nil, nil, errors.New("listen or audit_log changed; restart the service to apply")
+	f := rl.fixed
+	if cfg.Listen != f.Listen || cfg.AuditLog != f.AuditLog || cfg.AccessFile != f.AccessFile ||
+		cfg.AdminListen != f.AdminListen || cfg.AdminPasswordFile != f.AdminPasswordFile {
+		return nil, nil, errors.New("listen, audit_log, access_file or admin settings changed; restart the service to apply")
 	}
 	keys, err := store.Load(rl.storePath)
 	if err != nil {
 		return nil, nil, err
 	}
+	var password admin.PasswordHash
+	if rl.dashboard != nil {
+		if password, err = admin.LoadPasswordFile(cfg.AdminPasswordFile); err != nil {
+			return nil, nil, err
+		}
+	}
 	rl.handler.Swap(cfg, keys)
+	if rl.dashboard != nil && rl.dashboard.SetPassword(password) {
+		rl.dashboard.WriteAudit(map[string]any{"time": time.Now().UTC().Format(time.RFC3339), "admin": "password_changed_sessions_ended"})
+	}
 	return cfg, keys, nil
 }
 
