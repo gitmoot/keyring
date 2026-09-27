@@ -39,10 +39,11 @@ type session struct {
 
 // Server is the dashboard handler.
 type Server struct {
-	hosts map[string]bool // accepted Host values, e.g. 127.0.0.1:7702, localhost:7702
-	audit io.Writer
-	now   func() time.Time
-	mux   *http.ServeMux
+	hosts    map[string]bool // accepted Host values, e.g. 127.0.0.1:7702, localhost:7702
+	audit    io.Writer
+	now      func() time.Time
+	mux      *http.ServeMux
+	homePath string // where "/" sends a logged-in user; "" shows the plain home page
 
 	mu       sync.Mutex
 	password PasswordHash
@@ -110,6 +111,24 @@ func (s *Server) Confirm(sid, password string) bool {
 	}
 	s.attemptSucceeded()
 	return true
+}
+
+// SetClock replaces the clock (tests).
+func (s *Server) SetClock(now func() time.Time) { s.now = now }
+
+// SetHome makes "/" redirect logged-in users to path.
+func (s *Server) SetHome(path string) { s.homePath = path }
+
+// Audit writes one admin event with the session reference and extra fields.
+func (s *Server) Audit(event, sid string, fields map[string]any) {
+	rec := map[string]any{"time": s.now().UTC().Format(time.RFC3339), "admin": event}
+	if sid != "" {
+		rec["session"] = SessionRef(sid)
+	}
+	for k, v := range fields {
+		rec[k] = v
+	}
+	s.WriteAudit(rec)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +291,10 @@ func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request, sid string)
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request, sid string) {
+	if s.homePath != "" {
+		http.Redirect(w, r, s.homePath, http.StatusSeeOther)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pages.ExecuteTemplate(w, "home", map[string]string{"CSRF": s.CSRF(sid)})
 }
@@ -345,7 +368,21 @@ main{padding:24px;max-width:1180px}main.narrow{max-width:360px;margin:12vh auto}
 h1{font-size:22px;margin:0 0 16px}header.top{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid #e5e7eb;background:#fff}header.top h1{margin:0}
 label{display:block;font-size:13px;color:#6b7280}input{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;color:#15181d}
 button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}button.ghost{background:#fff;color:#15181d;border:1px solid #e5e7eb}
-.error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px}`
+.error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px}
+.notice{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 10px}
+nav.tabs{display:flex;gap:6px}nav.tabs a{padding:6px 12px;border-radius:999px;color:#15181d;text-decoration:none;border:1px solid #e5e7eb;background:#fff}nav.tabs a.on{background:#15181d;color:#fff;border-color:#15181d}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}.bar form{display:flex;gap:8px}.bar input{margin:0;width:240px}
+a.btn{display:inline-block;background:#4f46e5;color:#fff;border-radius:8px;padding:9px 16px;font-weight:600;text-decoration:none}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;font-size:14px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #e5e7eb;vertical-align:middle}th{color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.03em;background:#fafafa}
+td a{color:#15181d;font-weight:600}code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.masked{letter-spacing:2px;color:#9ca3af}.mute{color:#6b7280}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#cbd5e1}.dot.ok{background:#16a34a}.dot.bad{background:#dc2626}.dot.warn{background:#d97706}
+.chip{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#f1f5f9;margin:1px 2px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px 18px;margin-bottom:14px;max-width:720px}.card h2{font-size:16px;margin:0 0 10px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.row label{flex:1;min-width:160px}
+select{display:block;width:100%;margin:6px 0 14px;padding:9px 10px;border:1px solid #e5e7eb;border-radius:8px;font:inherit;background:#fff}
+button.danger{background:#dc2626}.check{display:flex;gap:8px;align-items:center;color:#15181d;font-size:14px;margin-bottom:12px}.check input{width:auto;margin:0}
+dl{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;margin:0}dt{color:#6b7280}dd{margin:0}`
 
 // CSRF returns the session's CSRF token, for forms ("" once the session has
 // ended, for instance by a logout in another tab).

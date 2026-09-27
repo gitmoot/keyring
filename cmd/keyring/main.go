@@ -19,11 +19,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/admin"
+	dashboardpkg "github.com/gitmoot/keyring/internal/dashboard"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/relay"
 	"github.com/gitmoot/keyring/internal/server"
@@ -218,7 +222,14 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "usage not saved: %v\n", err)
 		}
 	}()
-	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr)
+	// changes serializes the dashboard's writes and the SIGHUP reload.
+	changes := &sync.Mutex{}
+	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr, func(a *admin.Server) {
+		dashboardpkg.Register(&dashboardpkg.Backend{
+			Mu: changes, StorePath: storePath, MetaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"),
+			Proxy: handler, Admin: a,
+		})
+	})
 	if err != nil {
 		return err
 	}
@@ -239,7 +250,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
-	rl := reloader{configPath: configPath, storePath: storePath, fixed: cfg.Rules, handler: handler, dashboard: dashboard}
+	rl := reloader{configPath: configPath, storePath: storePath, fixed: cfg.Rules, handler: handler, dashboard: dashboard, mu: changes}
 	saveTick := time.NewTicker(time.Minute)
 	defer saveTick.Stop()
 	// The final usage save (deferred above) must come after both the loop
