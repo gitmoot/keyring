@@ -126,6 +126,29 @@ fi
 
 # 1. The service user and group. Nobody can log in as it: no shell, no
 # password, hidden.
+# restart_daemon LABEL PLIST: (re)load a LaunchDaemon. bootout returns before
+# launchd has removed the service, and a bootstrap in that window fails with
+# "5: Input/output error", leaving the service stopped. So wait until it is
+# gone, and retry the bootstrap a few times.
+restart_daemon() {
+	launchctl bootout "system/$1" 2>/dev/null || true
+	n=0
+	while launchctl print "system/$1" >/dev/null 2>&1 && [ $n -lt 30 ]; do
+		sleep 1; n=$((n + 1))
+	done
+	launchctl enable "system/$1"
+	n=0
+	until launchctl bootstrap system "$2"; do
+		n=$((n + 1))
+		if [ $n -ge 5 ]; then
+			echo "FAILED: launchd would not load $1; run: sudo launchctl bootstrap system $2" >&2
+			exit 1
+		fi
+		echo "retrying in 3 seconds"
+		sleep 3
+	done
+}
+
 free_id() {
 	uids=$(dscl . -list /Users UniqueID | awk '{print $2}')
 	gids=$(dscl . -list /Groups PrimaryGroupID | awk '{print $2}')
@@ -289,9 +312,7 @@ EOF
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"
 plutil -lint "$PLIST" >/dev/null
-launchctl bootout "system/$LABEL" 2>/dev/null || true
-launchctl enable "system/$LABEL"
-launchctl bootstrap system "$PLIST"
+restart_daemon "$LABEL" "$PLIST"
 sleep 2
 
 # 4b. The HTTPS front: Caddy as _keyringweb, in front of the loopback
@@ -374,9 +395,7 @@ EOF
 EOF
 	chown root:wheel "$WEB_PLIST"; chmod 644 "$WEB_PLIST"
 	plutil -lint "$WEB_PLIST" >/dev/null
-	launchctl bootout "system/$WEB_LABEL" 2>/dev/null || true
-	launchctl enable "system/$WEB_LABEL"
-	launchctl bootstrap system "$WEB_PLIST"
+	restart_daemon "$WEB_LABEL" "$WEB_PLIST"
 fi
 
 # 5. Check.
