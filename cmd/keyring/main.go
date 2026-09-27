@@ -242,7 +242,13 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	rl := reloader{configPath: configPath, storePath: storePath, fixed: cfg.Rules, handler: handler, dashboard: dashboard}
 	saveTick := time.NewTicker(time.Minute)
 	defer saveTick.Stop()
+	// The final usage save (deferred above) must come after both the loop
+	// below and in-flight requests are done: a tick save still running could
+	// rename older counts over it, and a request still running would record
+	// its call after it.
+	loopDone := make(chan struct{})
 	go func() {
+		defer close(loopDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -261,15 +267,24 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 			}
 		}
 	}()
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
 	fmt.Fprintf(stderr, "keyring listening on %s: %d services, %d roles\n", cfg.Listen, len(cfg.Services), len(cfg.Roles))
-	if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	// Serve returns as soon as Shutdown closes the listener, before the
+	// requests in flight finish; Shutdown returns when they have (or after
+	// 10 seconds).
+	serveErr := srv.Serve(listener)
+	stop() // also ends the goroutines when Serve failed on its own
+	<-drained
+	<-loopDone
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
 	}
 	return nil
 }
