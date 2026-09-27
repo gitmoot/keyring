@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -165,9 +166,14 @@ type reloader struct {
 	fixed                 policy.Rules
 	handler               *server.Handler
 	dashboard             *admin.Server // nil when the dashboard is off
+	mu                    *sync.Mutex   // shared with the dashboard's changes; may be nil
 }
 
 func (rl reloader) reload() (*policy.Config, map[string]string, error) {
+	if rl.mu != nil {
+		rl.mu.Lock()
+		defer rl.mu.Unlock()
+	}
 	cfg, err := policy.Load(rl.configPath)
 	if err != nil {
 		return nil, nil, err

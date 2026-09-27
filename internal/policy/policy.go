@@ -70,6 +70,10 @@ type Service struct {
 	Auth   string `json:"auth"`
 	Header string `json:"header,omitempty"`
 	Param  string `json:"param,omitempty"`
+	// TestMethod and TestPath make a harmless request that shows whether the
+	// key works (the dashboard's Test button). TestPath may carry a query.
+	TestMethod string `json:"test_method,omitempty"`
+	TestPath   string `json:"test_path,omitempty"`
 
 	base *url.URL
 }
@@ -293,6 +297,17 @@ func (s *Service) validate() error {
 		}
 	default:
 		return fmt.Errorf("base %q: use https", s.Base)
+	}
+	switch s.TestMethod {
+	case "", "GET", "HEAD", "POST":
+	default:
+		return fmt.Errorf("test_method %q: want GET, HEAD or POST", s.TestMethod)
+	}
+	if s.TestPath != "" {
+		path, _, _ := strings.Cut(s.TestPath, "?")
+		if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") || strings.ContainsAny(path, "%\\;") {
+			return fmt.Errorf("test_path %q must start with / and contain no .., %%, ; or \\", s.TestPath)
+		}
 	}
 	if !store.ValidName(s.Key) {
 		return fmt.Errorf("key %q is not a valid key name", s.Key)

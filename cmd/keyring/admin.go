@@ -64,7 +64,7 @@ func setAdminPassword(configPath string, stdin io.Reader, stdout, stderr io.Writ
 
 // startDashboard serves the dashboard when admin_listen is set. Without a
 // password file the proxy still runs and the dashboard stays off.
-func startDashboard(cfg *policy.Config, audit io.Writer, stderr io.Writer) (*admin.Server, *http.Server, error) {
+func startDashboard(cfg *policy.Config, audit io.Writer, stderr io.Writer, register func(*admin.Server)) (*admin.Server, *http.Server, error) {
 	if cfg.AdminListen == "" {
 		return nil, nil, nil
 	}
@@ -78,6 +78,7 @@ func startDashboard(cfg *policy.Config, audit io.Writer, stderr io.Writer) (*adm
 		return nil, nil, fmt.Errorf("dashboard: %w", err)
 	}
 	dashboard := admin.New(cfg.AdminListen, password, audit)
+	register(dashboard)
 	srv := &http.Server{
 		Handler:           dashboard,
 		ReadHeaderTimeout: 10 * time.Second,

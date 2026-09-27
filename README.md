@@ -104,6 +104,8 @@ A service that echoes a key in some other encoding (for example base64 inside a 
 
 Allowed methods default to GET, HEAD and POST.
 
+A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
+
 ## Dashboard (in progress, #15)
 
 Add two lines to `rules.json` to serve a dashboard on a **loopback** address of the keyring machine:
@@ -123,6 +125,16 @@ Safety:
 - Every change to keys or access asks for the password, however recently you logged in. Browsers send the session cookie to every port of `127.0.0.1`, so any other local web page you open could get it; with the cookie alone it can only look at names and usage.
 - Failed passwords (at login or on a change) are slowed after 5 and locked for an hour after 20. Attempts sent at once count too.
 - Every login, logout, password change and failed password is written to the audit log without secrets.
+
+The **Keys** page (`/keys`) lists every key the access file names or the store holds: its service, which roles use it, status, last use and calls today. A value is never shown, not even in part.
+- **Add key**: name, value and how it is used (an existing service, a new service, or none yet). A new service is checked like the access file before anything is stored, so a refused form leaves nothing behind.
+- **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply.
+- **Replace** takes effect at once; it clears the leaked flag and the test result.
+- **Mark as leaked** flags the key until it is replaced.
+- **Delete** asks for a tick when a role still uses the key; its calls then answer 503.
+- Add, replace and delete ask for the password every time.
+
+Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
 
 ## Relay on the agent server (step 2)
 

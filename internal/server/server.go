@@ -4,7 +4,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -67,6 +69,9 @@ func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handle
 	h.Swap(config, keys)
 	return h
 }
+
+// Config returns the settings in use.
+func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 
 // Swap replaces the settings and keys for every later request. config must be
 // validated. Requests already running keep what they started with; daily
@@ -154,40 +159,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward exactly the path the rules checked: the decoded path,
-	// escaped again by net/url, never the caller's raw escaping.
-	target := svc.BaseURL()
-	target.Path = strings.TrimSuffix(target.Path, "/") + rest
-	target.RawPath = ""
-	target.RawQuery = r.URL.RawQuery
-	header := outboundHeader(r.Header, svc)
-	switch svc.Auth {
-	case policy.AuthBearer:
-		header.Set("Authorization", "Bearer "+key)
-	case policy.AuthHeader:
-		header.Set(svc.Header, key)
-	case policy.AuthQuery:
-		q, err := url.ParseQuery(r.URL.RawQuery)
-		if err != nil {
-			h.refund(roleName, service, access.DailyRequests, start)
-			fail(http.StatusBadRequest, "malformed query string")
-			return
-		}
-		for name := range q {
-			if strings.EqualFold(name, svc.Param) {
-				delete(q, name)
-			}
-		}
-		q.Set(svc.Param, key)
-		target.RawQuery = q.Encode()
+	out, err := buildOutbound(r.Context(), svc, key, r.Method, rest, r.URL.RawQuery, outboundHeader(r.Header, svc), r.Body, r.ContentLength)
+	if errors.Is(err, errBadQuery) {
+		h.refund(roleName, service, access.DailyRequests, start)
+		fail(http.StatusBadRequest, "malformed query string")
+		return
 	}
-	out, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
 	if err != nil {
 		fail(http.StatusBadGateway, "could not build upstream request")
 		return
 	}
-	out.Header = header
-	out.ContentLength = r.ContentLength
 	resp, err := h.client.Do(out)
 	if err != nil {
 		// The call never reached the service: do not charge the limit. The
@@ -242,6 +223,70 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	rec.Bytes = sink.n
+}
+
+var errBadQuery = errors.New("malformed query string")
+
+// buildOutbound makes the request sent to the service: the checked path below
+// the service base (escaped again by net/url, never the caller's raw text),
+// the query, and the key placed the way the service expects. The proxy and
+// the key test both use it.
+func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, rawQuery string, header http.Header, body io.Reader, length int64) (*http.Request, error) {
+	target := svc.BaseURL()
+	target.Path = strings.TrimSuffix(target.Path, "/") + rest
+	target.RawPath = ""
+	target.RawQuery = rawQuery
+	switch svc.Auth {
+	case policy.AuthBearer:
+		header.Set("Authorization", "Bearer "+key)
+	case policy.AuthHeader:
+		header.Set(svc.Header, key)
+	case policy.AuthQuery:
+		q, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			return nil, errBadQuery
+		}
+		for name := range q {
+			if strings.EqualFold(name, svc.Param) {
+				delete(q, name)
+			}
+		}
+		q.Set(svc.Param, key)
+		target.RawQuery = q.Encode()
+	}
+	out, err := http.NewRequestWithContext(ctx, method, target.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	out.Header = header
+	out.ContentLength = length
+	return out, nil
+}
+
+// TestKey sends the service's test request with key and returns the status
+// code. It never returns the reply body, which could echo the key.
+func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
+	if svc.TestPath == "" {
+		return 0, errors.New("the service has no test request")
+	}
+	method := svc.TestMethod
+	if method == "" {
+		method = http.MethodGet
+	}
+	path, query, _ := strings.Cut(svc.TestPath, "?")
+	header := http.Header{"User-Agent": {"keyring-test"}}
+	out, err := buildOutbound(ctx, svc, key, method, path, query, header, http.NoBody, 0)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := h.client.Do(out)
+	if err != nil {
+		// The error text can include the URL, and so a query-string key.
+		return 0, errors.New("service unreachable")
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 // splitPath takes "/<service>/<rest>" and returns the service and the
