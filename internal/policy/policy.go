@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -48,6 +49,26 @@ type Rules struct {
 	// AdminPasswordFile is the absolute path of the dashboard password hash,
 	// written by root with "keyring admin-password".
 	AdminPasswordFile string `json:"admin_password_file,omitempty"`
+	// AdminHTTPS, when set, also serves the dashboard under a DNS name through
+	// an HTTPS proxy on this machine, to the listed devices only.
+	AdminHTTPS *AdminHTTPS `json:"admin_https,omitempty"`
+}
+
+// AdminHTTPS is the dashboard's name behind a local HTTPS proxy. The proxy
+// connects to admin_listen and puts the client's IP in the X-Keyring-Client
+// header (replacing any the client sent); requests for Host are refused unless
+// that IP is one of Devices.
+type AdminHTTPS struct {
+	Host    string   `json:"host"`
+	Devices []string `json:"devices"`
+}
+
+// Equal reports whether a and b are the same settings (nil is off).
+func (a *AdminHTTPS) Equal(b *AdminHTTPS) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Host == b.Host && slices.Equal(a.Devices, b.Devices)
 }
 
 // AccessList is the access file: which services exist and what each role may
@@ -99,6 +120,7 @@ type Access struct {
 }
 
 var (
+	dnsName     = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 	serviceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	roleName    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	headerName  = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
@@ -249,6 +271,22 @@ func (c *Config) Validate() error {
 		}
 		if !filepath.IsAbs(c.AdminPasswordFile) {
 			return errors.New("admin_listen needs an absolute admin_password_file")
+		}
+	}
+	if h := c.AdminHTTPS; h != nil {
+		if c.AdminListen == "" {
+			return errors.New("admin_https needs admin_listen")
+		}
+		if !dnsName.MatchString(h.Host) {
+			return fmt.Errorf("admin_https host %q: want a lowercase DNS name like keyring.example.com", h.Host)
+		}
+		if len(h.Devices) == 0 {
+			return errors.New("admin_https needs at least one device IP")
+		}
+		for _, d := range h.Devices {
+			if _, err := netip.ParseAddr(d); err != nil {
+				return fmt.Errorf("admin_https device %q: want an IP address", d)
+			}
 		}
 	}
 	if c.Services == nil {

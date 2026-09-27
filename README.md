@@ -108,6 +108,8 @@ A service may name a harmless request for the dashboard's Test button: `"test_me
 
 ## Dashboard (#15)
 
+`admin_https` in `rules.json` (set by `keyring enable-dashboard --https-host NAME --device IP ...`) also serves the dashboard as `https://NAME` through a local HTTPS proxy, to the listed device IPs only. The proxy must put the client's IP in `X-Keyring-Client`; any other client, or a request without it, gets 403 before the login page. Over HTTPS the session cookie is `Secure` and the page sends HSTS. The Mac installer sets this up with Caddy (`deploy/mac/README.md`, built from `deploy/caddy`, versions pinned in its `go.sum`). A reload refuses a change to `admin_https`; restart the keyring.
+
 The Mac installer turns it on and asks for its password (`deploy/mac/README.md`). By hand: `keyring enable-dashboard --config rules.json` adds two lines to `rules.json`, serving the dashboard on a **loopback** address of the keyring machine:
 
 ```json

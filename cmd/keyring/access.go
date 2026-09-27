@@ -188,7 +188,7 @@ func (rl reloader) reload() (*policy.Config, map[string]string, error) {
 	}
 	f := rl.fixed
 	if cfg.Listen != f.Listen || cfg.AuditLog != f.AuditLog || cfg.AccessFile != f.AccessFile ||
-		cfg.AdminListen != f.AdminListen || cfg.AdminPasswordFile != f.AdminPasswordFile {
+		cfg.AdminListen != f.AdminListen || cfg.AdminPasswordFile != f.AdminPasswordFile || !cfg.AdminHTTPS.Equal(f.AdminHTTPS) {
 		return nil, nil, errors.New("listen, audit_log, access_file or admin settings changed; restart the service to apply")
 	}
 	keys, err := store.Load(rl.storePath)

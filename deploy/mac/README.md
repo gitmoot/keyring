@@ -63,7 +63,38 @@ It stops, changing nothing further, if `--listen` or `--allow` is invalid, if th
 ## The dashboard
 
 Open `http://127.0.0.1:7702` in a browser **on the Mac** and log in with the
-dashboard password. It is not reachable from other machines.
+dashboard password.
+
+### From your other devices (HTTPS, tailnet only)
+
+The installer can also serve it at `https://keyring.example.com` to a list of
+your devices, through Caddy running as its own user `_keyringweb`:
+
+1. In Cloudflare, create an API token with **Zone → DNS → Edit** for the
+   domain's zone only. Caddy uses it to prove the name to Let's Encrypt (a DNS
+   record, removed afterwards) and renews the certificate by itself.
+2. Point the name at the Mac's **tailnet** address: an `A` record, DNS only
+   (not proxied). Outside the tailnet the address leads nowhere.
+3. Run the installer with the name and each device's tailnet IP (Tailscale
+   shows them):
+
+   ```sh
+   sudo sh /var/root/keyring-install/install.sh /var/root/keyring-install/keyring \
+       --https-host keyring.example.com --device 100.64.0.5 --device 100.64.0.6
+   ```
+
+   It asks once for the Cloudflare token (not shown) and keeps it in
+   `/Library/Application Support/keyring-web/cloudflare.token`, readable only
+   by root and `_keyringweb`. `--new-cloudflare-token` replaces it. Running it
+   again with other `--device` values replaces the list; an upgrade without
+   them keeps it.
+
+Any other client, including every server on the tailnet, is refused before
+the login page (403). The keyring decides this from the client address Caddy
+passes on, which a client cannot set itself. Leave out devices other people's
+code runs on. On macOS a normal user may use port 443 only on all addresses,
+so Caddy listens on all of them; the name resolves to the tailnet address, and
+anything else reaching the port is refused the same way.
 
 - **Keys:** add, test, replace, mark as leaked or delete keys. A value is typed once and never shown again, not even in part.
 - **Access:** which agent may use which service, with methods, paths, a daily limit and an end date; add an agent (its token is shown once), make a new token, or revoke an agent.

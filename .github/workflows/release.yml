@@ -26,9 +26,12 @@ jobs:
           tag=${GITHUB_REF_NAME}
           mkdir -p out mac
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o mac/keyring ./cmd/keyring
+          # The dashboard's HTTPS front: Caddy with the Cloudflare DNS module,
+          # versions pinned in deploy/caddy/go.sum.
+          (cd deploy/caddy && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o ../../mac/keyring-caddy .)
           cp deploy/mac/install.sh deploy/mac/README.md mac/
-          chmod 755 mac/keyring mac/install.sh; chmod 644 mac/README.md
-          tar --owner=0 --group=0 --numeric-owner -czf "out/keyring-$tag-darwin-arm64.tar.gz" -C mac keyring install.sh README.md
+          chmod 755 mac/keyring mac/keyring-caddy mac/install.sh; chmod 644 mac/README.md
+          tar --owner=0 --group=0 --numeric-owner -czf "out/keyring-$tag-darwin-arm64.tar.gz" -C mac keyring keyring-caddy install.sh README.md
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "out/keyring-$tag-linux-amd64" ./cmd/keyring
           (cd out && sha256sum * > SHA256SUMS)
           cat out/SHA256SUMS
