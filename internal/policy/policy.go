@@ -458,6 +458,9 @@ func NewToken() (token, sha string, err error) {
 	return token, hex.EncodeToString(sum[:]), nil
 }
 
+// ValidRoleName reports whether name may name a role (an agent).
+func ValidRoleName(name string) bool { return roleName.MatchString(name) }
+
 // AllowsMethod reports whether method is allowed.
 func (a Access) AllowsMethod(method string) bool {
 	if len(a.Methods) == 0 {

@@ -371,8 +371,18 @@ func (b *Backend) addAgent(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	next.Roles[name] = policy.Role{TokenSHA256: sha, Access: map[string]policy.Access{}}
-	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+	if !policy.ValidRoleName(name) {
 		again(http.StatusBadRequest, "The name must be letters, digits, dot, dash or underscore, starting with a letter or digit.")
+		return
+	}
+	for other, rl := range next.Roles {
+		if other != name && rl.TokenSHA256 == sha {
+			again(http.StatusConflict, "Agent "+other+" already uses this token. Make a new token with keyring new-token.")
+			return
+		}
+	}
+	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+		again(http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := b.saveAndApply(next); err != nil {

@@ -329,6 +329,10 @@ func TestAddAgentWithItsOwnTokenShowsNoToken(t *testing.T) {
 	if code := e.call("GET", "/api/v1/x", tok); code != 200 {
 		t.Fatalf("the agent's own token: %d", code)
 	}
+	w = e.request("POST", "/agents", url.Values{"name": {"mars"}, "fingerprint": {sha}, "password": {password}})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "deimos already uses this token") {
+		t.Fatalf("same fingerprint for a second agent: %d", w.Code)
+	}
 	if !strings.Contains(e.request("GET", "/agents/deimos?done=added", nil).Body.String(), "own token") {
 		t.Fatal("no notice after adding")
 	}
