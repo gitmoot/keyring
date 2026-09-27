@@ -102,11 +102,27 @@ func TestAdminListenMustBeLoopbackWithAPasswordFile(t *testing.T) {
 	if err := base().Validate(); err != nil {
 		t.Fatalf("valid admin settings refused: %v", err)
 	}
+	withHTTPS := base()
+	withHTTPS.AdminHTTPS = &AdminHTTPS{Host: "keyring.example.com", Devices: []string{"100.64.0.5", "fd7a:115c:a1e0::5"}}
+	if err := withHTTPS.Validate(); err != nil {
+		t.Fatalf("valid admin_https refused: %v", err)
+	}
 	for name, mutate := range map[string]func(*Config){
 		"tailnet address": func(c *Config) { c.AdminListen = "100.64.0.10:7702" },
 		"wildcard":        func(c *Config) { c.AdminListen = "0.0.0.0:7702" },
 		"no port":         func(c *Config) { c.AdminListen = "127.0.0.1" },
 		"port 0":          func(c *Config) { c.AdminListen = "127.0.0.1:0" },
+		"https without listen": func(c *Config) {
+			c.AdminListen = ""
+			c.AdminHTTPS = &AdminHTTPS{Host: "keyring.example.com", Devices: []string{"100.64.0.5"}}
+		},
+		"https bad host": func(c *Config) {
+			c.AdminHTTPS = &AdminHTTPS{Host: "Keyring.example.com:443", Devices: []string{"100.64.0.5"}}
+		},
+		"https no devices": func(c *Config) { c.AdminHTTPS = &AdminHTTPS{Host: "keyring.example.com"} },
+		"https bad device": func(c *Config) {
+			c.AdminHTTPS = &AdminHTTPS{Host: "keyring.example.com", Devices: []string{"100.64.0.0/10"}}
+		},
 		"same as listen": func(c *Config) {
 			c.Listen = "127.0.0.1:7701"
 			c.AllowSources = []string{"127.0.0.1"}

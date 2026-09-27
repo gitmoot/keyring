@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,8 +39,8 @@ func newTestServer(t *testing.T) (*Server, *bytes.Buffer, *time.Time) {
 }
 
 type req struct {
-	method, path, host, origin, cookie, csrf string
-	form                                     url.Values
+	method, path, host, origin, cookie, csrf, client string
+	form                                             url.Values
 }
 
 func (s *Server) do(r req) *httptest.ResponseRecorder {
@@ -59,6 +60,9 @@ func (s *Server) do(r req) *httptest.ResponseRecorder {
 	}
 	if r.origin != "" {
 		h.Header.Set("Origin", r.origin)
+	}
+	if r.client != "" {
+		h.Header.Set(ClientHeader, r.client)
 	}
 	if r.cookie != "" {
 		h.AddCookie(&http.Cookie{Name: cookieName, Value: r.cookie})
@@ -341,5 +345,49 @@ func TestPasswordHashAndFile(t *testing.T) {
 		if _, err := LoadPasswordFile(path); err == nil {
 			t.Fatalf("mode %04o accepted", mode)
 		}
+	}
+}
+
+func TestHTTPSNameServesListedDevicesOnly(t *testing.T) {
+	s, audit, _ := newTestServer(t)
+	const host = "keyring.example.com"
+	s.AllowHTTPS(host, []netip.Addr{netip.MustParseAddr("100.64.0.5")})
+	for name, r := range map[string]req{
+		"no client header": {method: "GET", path: "/login", host: host},
+		"other device":     {method: "GET", path: "/login", host: host, client: "100.64.0.6"},
+		"not an IP":        {method: "GET", path: "/login", host: host, client: "100.64.0.5, 1.2.3.4"},
+		"login other":      {method: "POST", path: "/login", host: host, client: "100.64.0.9", origin: "https://" + host, form: url.Values{"password": {testPassword}}},
+	} {
+		if w := s.do(r); w.Code != http.StatusForbidden {
+			t.Errorf("%s: %d, want 403", name, w.Code)
+		}
+	}
+	if !strings.Contains(audit.String(), `"admin":"device_refused"`) || strings.Contains(audit.String(), `"admin":"login"`) {
+		t.Fatalf("audit: %s", audit.String())
+	}
+	if w := s.do(req{method: "GET", path: "/login", host: host, client: "100.64.0.5"}); w.Code != 200 || w.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatalf("listed device: %d, HSTS %q", w.Code, w.Header().Get("Strict-Transport-Security"))
+	}
+	// The page is served over https: a plain-http origin is another origin.
+	if w := s.do(req{method: "POST", path: "/login", host: host, client: "100.64.0.5", origin: "http://" + host, form: url.Values{"password": {testPassword}}}); w.Code != http.StatusForbidden {
+		t.Fatalf("http origin on the https name: %d", w.Code)
+	}
+	w := s.do(req{method: "POST", path: "/login", host: host, client: "::ffff:100.64.0.5", origin: "https://" + host, form: url.Values{"password": {testPassword}}})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("login from the device: %d %s", w.Code, w.Body.String())
+	}
+	var secure bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieName {
+			secure = c.Secure
+		}
+	}
+	if !secure {
+		t.Fatal("session cookie over https is not Secure")
+	}
+	// Loopback use on the machine itself is unchanged, and without Secure.
+	_, _ = login(t, s)
+	if w := s.do(req{method: "GET", path: "/login", host: "evil.example.com", client: "100.64.0.5"}); w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("another name: %d, want 421", w.Code)
 	}
 }

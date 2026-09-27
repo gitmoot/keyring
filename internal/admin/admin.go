@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,11 +40,14 @@ type session struct {
 
 // Server is the dashboard handler.
 type Server struct {
-	hosts    map[string]bool // accepted Host values, e.g. 127.0.0.1:7702, localhost:7702
-	audit    io.Writer
-	now      func() time.Time
-	mux      *http.ServeMux
-	homePath string // where "/" sends a logged-in user; "" shows the plain home page
+	hosts map[string]bool // accepted Host values, e.g. 127.0.0.1:7702, localhost:7702
+	// httpsHost is served through a local HTTPS proxy, to devices only.
+	httpsHost string
+	devices   map[netip.Addr]bool
+	audit     io.Writer
+	now       func() time.Time
+	mux       *http.ServeMux
+	homePath  string // where "/" sends a logged-in user; "" shows the plain home page
 
 	mu       sync.Mutex
 	password PasswordHash
@@ -132,6 +136,24 @@ func (s *Server) Audit(event, sid string, fields map[string]any) {
 	s.WriteAudit(rec)
 }
 
+// ClientHeader carries the client's IP from the local HTTPS proxy.
+const ClientHeader = "X-Keyring-Client"
+
+// AllowHTTPS also serves the dashboard as https://host through a proxy on
+// this machine, to the given device IPs only. Call it before serving.
+func (s *Server) AllowHTTPS(host string, devices []netip.Addr) {
+	s.httpsHost = host
+	s.devices = map[netip.Addr]bool{}
+	for _, d := range devices {
+		s.devices[d.Unmap()] = true
+	}
+}
+
+// viaHTTPS reports whether r came through the HTTPS proxy's name.
+func (s *Server) viaHTTPS(r *http.Request) bool {
+	return s.httpsHost != "" && r.Host == s.httpsHost
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
@@ -142,12 +164,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// below must refuse, so nobody could log in.
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
-	if !s.hosts[r.Host] {
+	scheme := "http://"
+	switch {
+	case s.viaHTTPS(r):
+		// Only the proxy reaches this name from outside the machine, and it
+		// sets the header; a local process could forge it, but could as well
+		// use the loopback address directly.
+		ip, err := netip.ParseAddr(r.Header.Get(ClientHeader))
+		if err != nil || !s.devices[ip.Unmap()] {
+			s.Audit("device_refused", "", map[string]any{"client": r.Header.Get(ClientHeader)})
+			http.Error(w, "this device may not use the dashboard", http.StatusForbidden)
+			return
+		}
+		scheme = "https://"
+		h.Set("Strict-Transport-Security", "max-age=31536000")
+	case !s.hosts[r.Host]:
 		http.Error(w, "unknown host", http.StatusMisdirectedRequest)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		if r.Header.Get("Origin") != "http://"+r.Host {
+		if r.Header.Get("Origin") != scheme+r.Host {
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
@@ -272,7 +308,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.sessions[sid] = &session{csrf: csrf, created: now, lastSeen: now}
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", HttpOnly: true, Secure: s.viaHTTPS(r), SameSite: http.SameSiteStrictMode})
 	s.writeAudit("login", sid)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -281,7 +317,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, sid string) {
 	s.mu.Lock()
 	delete(s.sessions, sid)
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.viaHTTPS(r), SameSite: http.SameSiteStrictMode})
 	s.writeAudit("logout", sid)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }

@@ -34,7 +34,7 @@ const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
   keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
-  keyring enable-dashboard --config FILE [--admin-listen 127.0.0.1:7702]
+  keyring enable-dashboard --config FILE [--admin-listen 127.0.0.1:7702] [--https-host NAME --device IP ...]
                                              turn the dashboard on (loopback only; kept if already on)
   keyring admin-password --config FILE [--if-missing]
                                              set the dashboard password (asked twice, not shown)
@@ -65,6 +65,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	upstream := fs.String("upstream", "", "relay: keyring URL, e.g. http://192.0.2.10:7701")
 	ifMissing := fs.Bool("if-missing", false, "admin-password: keep a password that is already set")
 	adminListen := fs.String("admin-listen", "127.0.0.1:7702", "enable-dashboard: loopback address of the dashboard")
+	httpsHost := fs.String("https-host", "", "enable-dashboard: DNS name served by the local HTTPS proxy")
+	var devices stringList
+	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -100,7 +103,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if !need("config") || fs.NArg() != 0 {
 			return 2
 		}
-		err = enableDashboard(*configPath, *adminListen, stdout)
+		var https *policy.AdminHTTPS
+		if *httpsHost != "" || len(devices) > 0 {
+			https = &policy.AdminHTTPS{Host: *httpsHost, Devices: devices}
+		}
+		err = enableDashboard(*configPath, *adminListen, https, stdout)
 	case "admin-password":
 		if !need("config") || fs.NArg() != 0 {
 			return 2
@@ -169,6 +176,9 @@ func check(configPath, storePath string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "rules ok: %d services, %d roles\n", len(cfg.Services), len(cfg.Roles))
 	if cfg.AdminListen != "" {
 		fmt.Fprintf(stdout, "dashboard: http://%s\n", cfg.AdminListen)
+		if h := cfg.AdminHTTPS; h != nil {
+			fmt.Fprintf(stdout, "dashboard https: %s %d devices\n", h.Host, len(h.Devices))
+		}
 	}
 	if storePath == "" {
 		return nil
@@ -403,3 +413,9 @@ func readHidden(in *bufio.Reader, stdin io.Reader, stderr io.Writer, prompt stri
 	}
 	return value, nil
 }
+
+// stringList is a flag that may be given more than once.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }

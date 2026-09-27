@@ -211,3 +211,42 @@ func TestEnableDashboardCompletesAHalfSetDashboard(t *testing.T) {
 		t.Fatalf("after enable: listen %q, password file %q", cfg.AdminListen, cfg.AdminPasswordFile)
 	}
 }
+
+func TestEnableDashboardSetsTheHTTPSNameAndDevices(t *testing.T) {
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.json")
+	access := filepath.Join(dir, "access.json")
+	raw := `{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"` + filepath.Join(dir, "a.log") +
+		`","access_file":"` + access + `","admin_listen":"127.0.0.1:7702","admin_password_file":"` + filepath.Join(dir, "admin.pw") + `"}`
+	if err := os.WriteFile(rules, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(access, []byte(`{"services":{},"roles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"enable-dashboard", "--config", rules, "--https-host", "keyring.example.com", "--device", "not-an-ip"}, nil, &out, &errOut); code == 0 {
+		t.Fatal("an invalid device was accepted")
+	}
+	if mustRead(t, rules) != raw {
+		t.Fatal("rules changed by a refused run")
+	}
+	args := []string{"enable-dashboard", "--config", rules, "--https-host", "keyring.example.com", "--device", "100.64.0.5", "--device", "100.64.0.6"}
+	if code := run(args, nil, &out, &errOut); code != 0 {
+		t.Fatalf("enable https: %d %s", code, errOut.String())
+	}
+	cfg, err := policy.Load(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := cfg.AdminHTTPS; h == nil || h.Host != "keyring.example.com" || strings.Join(h.Devices, ",") != "100.64.0.5,100.64.0.6" || cfg.AdminListen != "127.0.0.1:7702" {
+		t.Fatalf("after enable: %+v %+v", cfg.Rules, cfg.AdminHTTPS)
+	}
+	// Running it again with other devices replaces the list.
+	if code := run([]string{"enable-dashboard", "--config", rules, "--https-host", "keyring.example.com", "--device", "100.64.0.7"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("second run: %d %s", code, errOut.String())
+	}
+	if cfg, _ := policy.Load(rules); strings.Join(cfg.AdminHTTPS.Devices, ",") != "100.64.0.7" {
+		t.Fatalf("devices after second run: %v", cfg.AdminHTTPS.Devices)
+	}
+}

@@ -10,6 +10,14 @@
 # server's address) are needed on the first install only; an upgrade keeps the
 # existing rules.
 #
+# --https-host NAME --device IP [--device IP ...] also serves the dashboard at
+# https://NAME to those devices only, through Caddy (keyring-caddy, next to
+# the keyring binary) running as _keyringweb. Its certificate comes from Let's
+# Encrypt by a DNS challenge; the first time, the script asks for a Cloudflare
+# API token that may edit DNS of NAME's zone (--new-cloudflare-token replaces
+# it). NAME's DNS record must point at this Mac's tailnet address. An upgrade
+# keeps an HTTPS name set earlier.
+#
 # Layout:
 #   /Library/Application Support/keyring/            root:_keyring 750
 #     rules.json                                     root:_keyring 640  (the service cannot change its rules)
@@ -25,18 +33,25 @@
 set -eu
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
-usage() { echo "usage: sudo sh install.sh KEYRING_BINARY [--listen IP:PORT --allow IP]" >&2; exit 2; }
+usage() { echo "usage: sudo sh install.sh KEYRING_BINARY [--listen IP:PORT --allow IP] [--https-host NAME --device IP ... [--new-cloudflare-token]]" >&2; exit 2; }
 BIN_SRC=${1:-}
 [ -n "$BIN_SRC" ] && [ -f "$BIN_SRC" ] || usage
 shift
-LISTEN= SOURCE=
+LISTEN= SOURCE= HTTPS_HOST= DEVICE_ARGS= NEW_TOKEN=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--listen) [ $# -ge 2 ] || usage; LISTEN=$2; shift 2 ;;
 	--allow) [ $# -ge 2 ] || usage; SOURCE=$2; shift 2 ;;
+	--https-host) [ $# -ge 2 ] || usage; HTTPS_HOST=$2; shift 2 ;;
+	# Device IPs contain no spaces or quotes (keyring checks them), so a
+	# plain word list is safe.
+	--device) [ $# -ge 2 ] || usage; case "$2" in *[!0-9a-fA-F.:]*) usage ;; esac; DEVICE_ARGS="$DEVICE_ARGS --device $2"; shift 2 ;;
+	--new-cloudflare-token) NEW_TOKEN=1; shift ;;
 	*) usage ;;
 	esac
 done
+[ -z "$DEVICE_ARGS" ] || [ -n "$HTTPS_HOST" ] || usage
+[ -n "$DEVICE_ARGS" ] || [ -z "$HTTPS_HOST" ] || usage
 
 NAME=_keyring
 LABEL=org.gitmoot.keyring
@@ -44,6 +59,11 @@ DIR="/Library/Application Support/keyring"
 DATA="$DIR/data"
 BIN=/usr/local/libexec/keyring
 PLIST=/Library/LaunchDaemons/$LABEL.plist
+WEB_NAME=_keyringweb
+WEB_LABEL=org.gitmoot.keyring-web
+WEB="/Library/Application Support/keyring-web"
+WEB_BIN=/usr/local/libexec/keyring-caddy
+WEB_PLIST=/Library/LaunchDaemons/$WEB_LABEL.plist
 if [ -f "$DIR/rules.json" ]; then
 	[ -z "$LISTEN$SOURCE" ] || echo "rules.json exists: --listen and --allow ignored (edit rules.json to change them)"
 elif [ -z "$LISTEN" ] || [ -z "$SOURCE" ]; then
@@ -91,6 +111,18 @@ for f in "$SCRIPT_REAL" "$BIN_REAL"; do
 done
 BIN_SRC=$BIN_REAL
 echo "keyring binary sha256: $(shasum -a 256 "$BIN_SRC" | cut -d' ' -f1)"
+# The HTTPS front ships next to the keyring binary; it is installed when an
+# HTTPS name is asked for or was set earlier.
+WEB_SRC=$(dirname "$BIN_SRC")/keyring-caddy
+WANT_WEB=
+if [ -n "$HTTPS_HOST" ] || { [ -f "$DIR/rules.json" ] && grep -q '"admin_https"' "$DIR/rules.json"; }; then
+	WANT_WEB=1
+	if [ -L "$WEB_SRC" ] || ! [ -f "$WEB_SRC" ] || ! trusted "$WEB_SRC"; then
+		echo "refusing: $WEB_SRC must be a regular root-owned file next to the keyring binary." >&2
+		exit 1
+	fi
+	echo "keyring-caddy sha256: $(shasum -a 256 "$WEB_SRC" | cut -d' ' -f1)"
+fi
 
 # 1. The service user and group. Nobody can log in as it: no shell, no
 # password, hidden.
@@ -145,6 +177,37 @@ if [ "$ugid" != "$gid" ]; then
 	exit 1
 fi
 
+# 1b. The HTTPS front's user: separate from _keyring, so the web server can
+# read neither keys nor rules.
+make_user() { # $1: name, $2: real name
+	if ! dscl . -read "/Groups/$1" >/dev/null 2>&1; then
+		id=$(free_id)
+		dscl . -create "/Groups/$1"
+		dscl . -create "/Groups/$1" PrimaryGroupID "$id"
+		dscl . -create "/Groups/$1" RealName "$2"
+		echo "created group $1 ($id)"
+	fi
+	g=$(dscl . -read "/Groups/$1" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+	case "$g" in 3[0-9][0-9]) ;; *) echo "group $1 has PrimaryGroupID '$g', not 300-399; delete it and rerun" >&2; exit 1 ;; esac
+	if ! dscl . -read "/Users/$1" >/dev/null 2>&1; then
+		id=$(free_id)
+		dscl . -create "/Users/$1"
+		dscl . -create "/Users/$1" UniqueID "$id"
+		dscl . -create "/Users/$1" PrimaryGroupID "$g"
+		dscl . -create "/Users/$1" UserShell /usr/bin/false
+		dscl . -create "/Users/$1" NFSHomeDirectory /var/empty
+		dscl . -create "/Users/$1" RealName "$2"
+		dscl . -create "/Users/$1" Password '*'
+		dscl . -create "/Users/$1" IsHidden 1
+		echo "created user $1 ($id)"
+	fi
+	u=$(dscl . -read "/Users/$1" UniqueID 2>/dev/null | awk '{print $2}')
+	case "$u" in 3[0-9][0-9]) ;; *) echo "user $1 has UniqueID '$u', not 300-399; delete it and rerun" >&2; exit 1 ;; esac
+	[ "$(dscl . -read "/Users/$1" PrimaryGroupID 2>/dev/null | awk '{print $2}')" = "$g" ] ||
+		{ echo "user $1 is not in group $1; fix it and rerun" >&2; exit 1; }
+}
+[ -z "$WANT_WEB" ] || make_user "$WEB_NAME" "Keyring dashboard HTTPS"
+
 # 2. The binary: owned by root, so the service cannot rewrite itself.
 install -d -m 755 -o root -g wheel /usr/local/libexec
 install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
@@ -182,7 +245,12 @@ chmod 640 "$DIR/rules.json"
 "$BIN" migrate --config "$DIR/rules.json" --access "$DATA/access.json"
 # The dashboard: loopback only, with a password stored as a root-owned hash.
 # An upgrade keeps the dashboard settings and password that are already there.
-"$BIN" enable-dashboard --config "$DIR/rules.json"
+# shellcheck disable=SC2086 # DEVICE_ARGS is a checked word list
+if [ -n "$HTTPS_HOST" ]; then
+	"$BIN" enable-dashboard --config "$DIR/rules.json" --https-host "$HTTPS_HOST" $DEVICE_ARGS
+else
+	"$BIN" enable-dashboard --config "$DIR/rules.json"
+fi
 "$BIN" admin-password --config "$DIR/rules.json" --if-missing
 sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json"
 # The service log is in root's directory, not in data/: launchd opens it at
@@ -226,6 +294,91 @@ launchctl enable "system/$LABEL"
 launchctl bootstrap system "$PLIST"
 sleep 2
 
+# 4b. The HTTPS front: Caddy as _keyringweb, in front of the loopback
+# dashboard. It passes the client's address in X-Keyring-Client (replacing any
+# the client sent); the keyring serves the listed devices only. A normal user
+# may bind port 443 on macOS only on all addresses, so it listens on all; the
+# name resolves to the tailnet address only, and other clients get 403.
+if [ -n "$WANT_WEB" ]; then
+	WEB_HOST=$(sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json" | sed -n 's/^dashboard https: \([^ ]*\) .*/\1/p')
+	ADMIN_LISTEN=$(sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json" | sed -n 's|^dashboard: http://||p')
+	[ -n "$WEB_HOST" ] && [ -n "$ADMIN_LISTEN" ] || { echo "rules.json has no admin_https" >&2; exit 1; }
+	install -o root -g wheel -m 755 "$WEB_SRC" "$WEB_BIN"
+	install -d -o root -g "$WEB_NAME" -m 750 "$WEB"
+	install -d -o "$WEB_NAME" -g "$WEB_NAME" -m 700 "$WEB/data"
+	TOKEN_FILE=$WEB/cloudflare.token
+	if [ -n "$NEW_TOKEN" ] || ! [ -s "$TOKEN_FILE" ]; then
+		printf 'Cloudflare API token that may edit DNS of %s (not shown): ' "$WEB_HOST"
+		stty -echo; IFS= read -r token; stty echo; echo
+		[ -n "$token" ] || { echo "no token given" >&2; exit 1; }
+		( umask 077; printf '%s' "$token" >"$TOKEN_FILE.new" )
+		unset token
+		chown "root:$WEB_NAME" "$TOKEN_FILE.new"; chmod 640 "$TOKEN_FILE.new"
+		mv "$TOKEN_FILE.new" "$TOKEN_FILE"
+	fi
+	chown "root:$WEB_NAME" "$TOKEN_FILE"; chmod 640 "$TOKEN_FILE"
+	cat >"$WEB/Caddyfile" <<EOF
+{
+	admin off
+	persist_config off
+	skip_install_trust
+	auto_https disable_redirects
+	storage file_system "$WEB/data"
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://$WEB_HOST {
+	tls {
+		dns cloudflare "{file.$TOKEN_FILE}"
+		resolvers 1.1.1.1
+	}
+	reverse_proxy $ADMIN_LISTEN {
+		header_up Host {host}
+		header_up X-Keyring-Client {remote_host}
+	}
+}
+EOF
+	chown "root:$WEB_NAME" "$WEB/Caddyfile"; chmod 640 "$WEB/Caddyfile"
+	WEB_LOG=$WEB/caddy.log
+	touch "$WEB_LOG"; chown "$WEB_NAME:$WEB_NAME" "$WEB_LOG"; chmod 600 "$WEB_LOG"
+	sudo -u "$WEB_NAME" env HOME="$WEB/data" "$WEB_BIN" validate --config "$WEB/Caddyfile" --adapter caddyfile >/dev/null
+	cat >"$WEB_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$WEB_LABEL</string>
+  <key>UserName</key><string>$WEB_NAME</string>
+  <key>GroupName</key><string>$WEB_NAME</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$WEB_BIN</string><string>run</string>
+    <string>--config</string><string>$WEB/Caddyfile</string>
+    <string>--adapter</string><string>caddyfile</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$WEB/data</string>
+    <key>XDG_DATA_HOME</key><string>$WEB/data</string>
+    <key>XDG_CONFIG_HOME</key><string>$WEB/data</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardErrorPath</key><string>$WEB_LOG</string>
+</dict>
+</plist>
+EOF
+	chown root:wheel "$WEB_PLIST"; chmod 644 "$WEB_PLIST"
+	plutil -lint "$WEB_PLIST" >/dev/null
+	launchctl bootout "system/$WEB_LABEL" 2>/dev/null || true
+	launchctl enable "system/$WEB_LABEL"
+	launchctl bootstrap system "$WEB_PLIST"
+fi
+
 # 5. Check.
 launchctl print "system/$LABEL" | grep -E '^[[:space:]]*(state|pid) =' || true
 ls -la "$DIR" "$DATA"
@@ -233,7 +386,7 @@ ls -la "$DIR" "$DATA"
 U=${SUDO_USER:-}
 if [ -n "$U" ] && [ "$U" != root ]; then
 	if sudo -u "$U" test -r "$DIR/rules.json" || sudo -u "$U" test -r "$DATA" || sudo -u "$U" test -w "$BIN" ||
-		sudo -u "$U" test -r "$DIR/admin.pw"; then
+		sudo -u "$U" test -r "$DIR/admin.pw" || sudo -u "$U" test -r "$WEB/cloudflare.token"; then
 		echo "FAILED: $U can read the keyring's files or change its binary" >&2
 		exit 1
 	fi
@@ -250,5 +403,24 @@ if [ -n "$ADMIN" ]; then
 		exit 1
 	fi
 	echo "dashboard $ADMIN/login answers 200: ok"
+fi
+if [ -n "$WANT_WEB" ]; then
+	# The first certificate takes up to a minute or two. From this Mac the
+	# answer is 200 if this Mac is a listed device, else 403: either proves
+	# TLS with a real certificate, the proxy and the device check.
+	i=0 code=000
+	while [ $i -lt 24 ]; do
+		code=$(curl -s --max-time 10 --resolve "$WEB_HOST:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$WEB_HOST/login" || true)
+		case "$code" in 200|403) break ;; esac
+		i=$((i + 1)); sleep 5
+	done
+	case "$code" in
+	200|403) echo "https://$WEB_HOST/login answers $code from this Mac with a valid certificate: ok" ;;
+	*)
+		echo "FAILED: https://$WEB_HOST/login answers $code; see $WEB/caddy.log" >&2
+		tail -n 5 "$WEB/caddy.log" >&2 || true
+		exit 1
+		;;
+	esac
 fi
 tail -n 3 "$LOG" 2>/dev/null || true

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"time"
@@ -94,6 +95,14 @@ func startDashboard(cfg *policy.Config, audit io.Writer, stderr io.Writer, regis
 		return nil, nil, fmt.Errorf("dashboard: %w", err)
 	}
 	dashboard := admin.New(cfg.AdminListen, password, audit)
+	if h := cfg.AdminHTTPS; h != nil {
+		devices := make([]netip.Addr, 0, len(h.Devices))
+		for _, d := range h.Devices {
+			devices = append(devices, netip.MustParseAddr(d)) // validated with the rules
+		}
+		dashboard.AllowHTTPS(h.Host, devices)
+		fmt.Fprintf(stderr, "dashboard also on https://%s for %d devices\n", h.Host, len(devices))
+	}
 	register(dashboard)
 	srv := &http.Server{
 		Handler:           dashboard,
@@ -130,12 +139,15 @@ func rootOnlyDir(dir string) error {
 // enableDashboard adds admin_listen and admin_password_file (admin.pw next to
 // the rules file) to a rules file that has neither. A rules file that already
 // names a dashboard is left as it is, so upgrades keep the owner's settings.
-func enableDashboard(configPath, listen string, stdout io.Writer) error {
+//
+// With https set, admin_https is set to it (replacing any earlier one): the
+// dashboard's name behind the local HTTPS proxy and the devices allowed there.
+func enableDashboard(configPath, listen string, https *policy.AdminHTTPS, stdout io.Writer) error {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
 		return err
 	}
-	if rules.AdminListen != "" && rules.AdminPasswordFile != "" {
+	if rules.AdminListen != "" && rules.AdminPasswordFile != "" && (https == nil || https.Equal(rules.AdminHTTPS)) {
 		fmt.Fprintf(stdout, "dashboard already on: http://%s\n", rules.AdminListen)
 		return nil
 	}
@@ -156,6 +168,9 @@ func enableDashboard(configPath, listen string, stdout io.Writer) error {
 	if rules.AdminPasswordFile == "" {
 		fields["admin_password_file"], _ = json.Marshal(filepath.Join(filepath.Dir(configPath), "admin.pw"))
 	}
+	if https != nil {
+		fields["admin_https"], _ = json.Marshal(https)
+	}
 	out, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {
 		return err
@@ -175,5 +190,8 @@ func enableDashboard(configPath, listen string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "dashboard enabled on http://%s; set its password with keyring admin-password\n", listen)
+	if https != nil {
+		fmt.Fprintf(stdout, "and on https://%s for %d devices (restart the keyring to apply)\n", https.Host, len(https.Devices))
+	}
 	return nil
 }
