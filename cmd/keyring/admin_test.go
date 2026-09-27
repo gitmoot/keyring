@@ -142,3 +142,47 @@ func mustRead(t *testing.T, path string) string {
 	}
 	return string(raw)
 }
+
+func TestEnableDashboardKeepsAPasswordFileTheOwnerNamed(t *testing.T) {
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.json")
+	access := filepath.Join(dir, "access.json")
+	own := filepath.Join(dir, "owner-chosen.pw")
+	raw := `{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"` + filepath.Join(dir, "a.log") +
+		`","access_file":"` + access + `","admin_password_file":"` + own + `"}`
+	if err := os.WriteFile(rules, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(access, []byte(`{"services":{},"roles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"enable-dashboard", "--config", rules}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("enable: %d %s", code, errOut.String())
+	}
+	cfg, err := policy.Load(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminPasswordFile != own || cfg.AdminListen != "127.0.0.1:7702" {
+		t.Fatalf("after enable: password file %q, listen %q", cfg.AdminPasswordFile, cfg.AdminListen)
+	}
+}
+
+func TestAdminPasswordIfMissingRefusesADamagedFile(t *testing.T) {
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.json")
+	pw := filepath.Join(dir, "admin.pw")
+	raw := `{"listen":"127.0.0.1:7701","allow_sources":["127.0.0.1"],"audit_log":"` + filepath.Join(dir, "a.log") +
+		`","access_file":"` + filepath.Join(dir, "access.json") + `","admin_listen":"127.0.0.1:7702","admin_password_file":"` + pw + `"}`
+	if err := os.WriteFile(rules, []byte(raw), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pw, []byte("not a hash\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"admin-password", "--config", rules, "--if-missing"}, strings.NewReader(""), &out, &errOut); code == 0 {
+		t.Fatalf("a damaged password file was kept: %s", out.String())
+	}
+}

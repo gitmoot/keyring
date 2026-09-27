@@ -152,17 +152,25 @@ install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
 install -d -m 750 -o root -g "$NAME" "$DIR"
 install -d -m 700 -o "$NAME" -g "$NAME" "$DATA"
 if [ ! -f "$DIR/rules.json" ]; then
-	cat >"$DIR/rules.json" <<EOF
+	# First install: write the rules aside with no services yet, and let
+	# migrate check them and create the access file (it writes by rename and
+	# never through a link the service could plant). They are put in place
+	# only if valid, so a mistyped --listen or --allow leaves nothing behind.
+	cat >"$DIR/rules.json.new" <<EOF
 {
   "listen": "$LISTEN",
   "allow_sources": ["$SOURCE"],
   "audit_log": "$DATA/audit.log",
-  "access_file": "$DATA/access.json"
+  "services": {},
+  "roles": {}
 }
 EOF
-	if [ ! -e "$DATA/access.json" ]; then
-		printf '{\n  "services": {},\n  "roles": {}\n}\n' >"$DATA/access.json"
+	if ! "$BIN" migrate --config "$DIR/rules.json.new" --access "$DATA/access.json"; then
+		rm -f "$DIR/rules.json.new"
+		echo "check --listen (IP:PORT) and --allow (IP), then run this again" >&2
+		exit 1
 	fi
+	mv "$DIR/rules.json.new" "$DIR/rules.json"
 	echo "wrote first rules and access files (no services yet)"
 fi
 chown "root:$NAME" "$DIR/rules.json"
@@ -176,10 +184,10 @@ chmod 640 "$DIR/rules.json"
 "$BIN" enable-dashboard --config "$DIR/rules.json"
 "$BIN" admin-password --config "$DIR/rules.json" --if-missing
 sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json"
-# launchd creates the service log with mode 644 whatever the Umask says.
-[ -f "$DATA/service.log" ] || : >"$DATA/service.log"
-chown "$NAME:$NAME" "$DATA/service.log"
-chmod 600 "$DATA/service.log"
+# launchd creates the service log with mode 644 whatever the Umask says. The
+# data directory is the service's, so this is done by the binary, which never
+# follows a link the service could have put there.
+"$BIN" service-file "$DATA/service.log"
 
 # 4. Start at boot as _keyring. KeepAlive restarts it until the tailnet
 # address is up after boot.
@@ -231,6 +239,11 @@ fi
 ADMIN=$(sudo -u "$NAME" "$BIN" check --config "$DIR/rules.json" | sed -n 's/^dashboard: //p')
 if [ -n "$ADMIN" ]; then
 	code=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN/login" || true)
-	echo "dashboard $ADMIN/login answers $code (want 200)"
+	if [ "$code" != 200 ]; then
+		echo "FAILED: the dashboard $ADMIN/login answers $code, not 200; see $DATA/service.log" >&2
+		tail -n 5 "$DATA/service.log" >&2 || true
+		exit 1
+	fi
+	echo "dashboard $ADMIN/login answers 200: ok"
 fi
 tail -n 3 "$DATA/service.log" 2>/dev/null || true

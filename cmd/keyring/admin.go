@@ -32,6 +32,11 @@ func setAdminPassword(configPath string, ifMissing bool, stdin io.Reader, stdout
 	}
 	if ifMissing {
 		if _, err := os.Lstat(rules.AdminPasswordFile); err == nil {
+			// Keep it only if the service can use it: a damaged file would
+			// leave the dashboard off without anyone asked for a password.
+			if _, err := admin.LoadPasswordFile(rules.AdminPasswordFile); err != nil {
+				return fmt.Errorf("%w; run admin-password without --if-missing to set a new password", err)
+			}
 			fmt.Fprintln(stdout, "dashboard password already set: kept")
 			return nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
@@ -143,7 +148,9 @@ func enableDashboard(configPath, listen string, stdout io.Writer) error {
 		return fmt.Errorf("%s: %w", configPath, err)
 	}
 	fields["admin_listen"], _ = json.Marshal(listen)
-	fields["admin_password_file"], _ = json.Marshal(filepath.Join(filepath.Dir(configPath), "admin.pw"))
+	if rules.AdminPasswordFile == "" { // keep a password file the owner already named
+		fields["admin_password_file"], _ = json.Marshal(filepath.Join(filepath.Dir(configPath), "admin.pw"))
+	}
 	out, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {
 		return err

@@ -34,6 +34,8 @@ const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
   keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
+  keyring service-file FILE                  (installer, as root) create FILE if missing and give it to
+                                             the owner of its directory, mode 600, never through a link
   keyring enable-dashboard --config FILE [--admin-listen 127.0.0.1:7702]
                                              turn the dashboard on (loopback only; kept if already on)
   keyring admin-password --config FILE [--if-missing]
@@ -96,6 +98,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = migrate(*configPath, *accessPath, stdout)
+	case "service-file":
+		if fs.NArg() != 1 {
+			return 2
+		}
+		if os.Geteuid() != 0 {
+			err = errors.New("service-file must run as root")
+		} else {
+			err = ownServiceFile(fs.Arg(0), true)
+		}
 	case "enable-dashboard":
 		if !need("config") || fs.NArg() != 0 {
 			return 2

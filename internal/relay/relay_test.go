@@ -123,10 +123,10 @@ func TestUnreachableKeyringGivesAClearError(t *testing.T) {
 func TestCheckUpstream(t *testing.T) {
 	for raw, ok := range map[string]bool{
 		"http://100.64.0.10:7701":   true,
-		"http://127.0.0.1:7701":       true,
-		"https://keyring.example":     true,
-		"http://192.168.1.5:7701":     false, // LAN in clear
-		"http://keyring.example":      false, // hostname in clear
+		"http://127.0.0.1:7701":     true,
+		"https://keyring.example":   true,
+		"http://192.168.1.5:7701":   false, // LAN in clear
+		"http://keyring.example":    false, // hostname in clear
 		"http://100.64.0.10:7701/x": false,
 		"ftp://100.64.0.10":         false,
 	} {
