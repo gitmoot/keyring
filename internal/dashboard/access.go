@@ -50,13 +50,11 @@ type gridCell struct {
 	Label, Detail string
 }
 
-// gridRow is one agent's card: the services it may use (Cells) and the ones
-// it may not (Off), for "Add a service".
+// gridRow is one agent's line in the agents table.
 type gridRow struct {
 	Role       string
 	Ended      bool
 	Cells      []gridCell
-	Off        []string
 	CallsToday int
 	// For the agents table: full access first, at most maxChips, then a
 	// count of the rest.
@@ -191,8 +189,6 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 			if c.On {
 				c.Full = isFull(rl.Access[svc]) && !c.Ended
 				row.Cells = append(row.Cells, c)
-			} else {
-				row.Off = append(row.Off, svc)
 			}
 		}
 		row.Chips = slices.Clone(row.Cells)

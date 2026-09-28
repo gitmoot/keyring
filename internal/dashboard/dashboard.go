@@ -371,9 +371,9 @@ func columns(base string, q url.Values, by string, desc bool, cols [][3]string) 
 		col := column{ID: c[0], Label: c[1], Class: c[2]}
 		if col.ID != "" {
 			v := url.Values{}
-			for k, vs := range q {
-				if k != "sort" && k != "desc" {
-					v[k] = vs
+			for _, k := range []string{"q", "show"} { // not done= or error=: a notice shows once
+				if q.Get(k) != "" {
+					v.Set(k, q.Get(k))
 				}
 			}
 			v.Set("sort", col.ID)

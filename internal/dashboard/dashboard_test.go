@@ -504,6 +504,10 @@ func TestKeysTableFiltersSortsAndShowsDetails(t *testing.T) {
 	if got := rowOrder(e.request("GET", "/keys?sort=name&desc=1", nil).Body.String()); strings.Join(got, ",") != "ZZZ_UNUSED_KEY,API_KEY,AAA_UNUSED_KEY" {
 		t.Fatalf("by name, reversed: %v", got)
 	}
+	// Sort links keep the filter and search, not a one-time notice.
+	if page := e.request("GET", "/keys?show=unused&q=unused&done=deleted", nil).Body.String(); !strings.Contains(page, `href="/keys?desc=1&amp;q=unused&amp;show=unused&amp;sort=today"`) || strings.Contains(page, "sort=today&amp;done") || strings.Contains(page, "done=deleted&amp;") {
+		t.Fatalf("sort link:\n%s", page)
+	}
 	unused := e.request("GET", "/keys?show=unused", nil).Body.String()
 	if got := rowOrder(unused); strings.Join(got, ",") != "AAA_UNUSED_KEY,ZZZ_UNUSED_KEY" || !strings.Contains(unused, `Unused <b>2</b>`) {
 		t.Fatalf("unused filter: %v", got)
