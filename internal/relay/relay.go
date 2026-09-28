@@ -105,7 +105,7 @@ func LoadTokens(dir string) (map[string]string, error) {
 		if !roleName.MatchString(role) {
 			return nil, fmt.Errorf("token file %s: invalid role name", e.Name())
 		}
-		token, err := readToken(filepath.Join(dir, e.Name()))
+		token, err := ReadToken(filepath.Join(dir, e.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +117,9 @@ func LoadTokens(dir string) (map[string]string, error) {
 	return tokens, nil
 }
 
-func readToken(path string) (string, error) {
+// ReadToken reads a role token file: a regular file, not through a symlink,
+// private to its owner.
+func ReadToken(path string) (string, error) {
 	// O_NONBLOCK: opening a FIFO must not wait for a writer; the regular-file
 	// check below then refuses it.
 	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)

@@ -138,6 +138,9 @@ func (s *Store) File(r Request, access policy.AccessList, from string, now time.
 		if p.Role == r.Role && p.Fingerprint == r.Fingerprint && fmt.Sprint(p.Services) == fmt.Sprint(r.Services) {
 			return p, nil
 		}
+		if r.Fingerprint != "" && p.Role == r.Role && p.Fingerprint != r.Fingerprint {
+			return Request{}, fmt.Errorf("a request for new agent %s with another token is already waiting; the owner answers it first", r.Role)
+		}
 	}
 	if len(list) >= MaxPending {
 		return Request{}, fmt.Errorf("%d requests are already waiting for the owner", MaxPending)

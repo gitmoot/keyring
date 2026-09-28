@@ -480,7 +480,7 @@ details>summary{cursor:pointer;font-weight:600;list-style:none;padding:4px 0;mar
 .token{display:flex;gap:8px}.token input{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px}
 .empty{color:var(--mute)}
 .badge{display:inline-block;min-width:20px;padding:0 6px;border-radius:999px;background:var(--bad);color:#fff;font-size:12px;font-weight:700;line-height:20px;text-align:center}
-h2.section{margin:6px 0 10px}.request{border-color:var(--brand)}.reqtitle{font-size:17px;margin:0 0 6px}.request p{margin:0 0 10px}
+h2.section{margin:6px 0 10px}code.fp{font-size:12px;word-break:break-all}.request{border-color:var(--brand)}.reqtitle{font-size:17px;margin:0 0 6px}.request p{margin:0 0 10px}
 main.narrow{max-width:400px;margin:0 auto;padding:18vh 16px 40px}main.narrow h1{margin-bottom:20px}main.narrow button{width:100%}`
 
 // CSRF returns the session's CSRF token, for forms ("" once the session has

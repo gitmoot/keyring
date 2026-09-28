@@ -19,13 +19,13 @@ func fullAccess() policy.Access {
 	return policy.Access{Methods: slices.Clone(fullMethods), Paths: []string{"/"}}
 }
 
-// pendingRequests is shown on the Agents page; nil when requests are off.
-func (b *Backend) pendingRequests() []requests.Request {
+// pendingRequests is shown on the Agents page; nil when requests are off. A
+// requests file that cannot be read is reported, not shown as empty.
+func (b *Backend) pendingRequests() ([]requests.Request, error) {
 	if b.Requests == nil {
-		return nil
+		return nil, nil
 	}
-	list, _ := b.Requests.Pending()
-	return list
+	return b.Requests.Pending()
 }
 
 var requestNotices = map[string]string{

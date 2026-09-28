@@ -634,7 +634,8 @@ func (b *Backend) fail(w http.ResponseWriter, sid string, err error) {
 func (b *Backend) render(w http.ResponseWriter, status int, page, sid string, data map[string]any) {
 	data["CSRF"] = b.Admin.CSRF(sid)
 	data["Page"] = page
-	data["PendingCount"] = len(b.pendingRequests())
+	pending, _ := b.pendingRequests()
+	data["PendingCount"] = len(pending)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = pages.ExecuteTemplate(w, page, data)

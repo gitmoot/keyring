@@ -42,6 +42,7 @@ func fileRequest(upstream, role string, services []string, note, tokensDir strin
 			return err
 		}
 		body["fingerprint"] = sha
+		fmt.Fprintf(stdout, "token fingerprint (the dashboard shows it on the request): %s\n", sha)
 		if created {
 			fmt.Fprintf(stdout, "made %s; restart the relay so it uses it\n", filepath.Join(tokensDir, role+".token"))
 		}
@@ -67,7 +68,7 @@ func fileRequest(upstream, role string, services []string, note, tokensDir strin
 // (mode 600) when the file does not exist.
 func roleToken(dir, role string) (sha string, created bool, err error) {
 	path := filepath.Join(dir, role+".token")
-	raw, err := os.ReadFile(path)
+	token, err := relay.ReadToken(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		token, sha, err := policy.NewToken()
 		if err != nil {
@@ -86,6 +87,6 @@ func roleToken(dir, role string) (sha string, created bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(string(raw))))
+	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:]), false, nil
 }

@@ -67,6 +67,18 @@ func TestFileDedupesBoundsAndTakes(t *testing.T) {
 	if _, err := s.File(Request{Role: "phobos", Services: []string{"nope"}}, access(), "x", now); err == nil {
 		t.Fatal("an invalid request was filed")
 	}
+	// A new agent's name is held by the first pending request: a request for
+	// the same name with another token is refused until that one is answered.
+	first, err := s.File(Request{Role: "adstudio", Fingerprint: fpA, Services: []string{"api"}}, access(), "x", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.File(Request{Role: "adstudio", Fingerprint: strings.Repeat("d", 64), Services: []string{"api"}}, access(), "x", now); err == nil {
+		t.Fatal("a second token for the same new agent was filed")
+	}
+	if _, ok, _ := s.Take(first.ID); !ok {
+		t.Fatal("take the name-holding request")
+	}
 	for i := 1; i < MaxPending; i++ {
 		if _, err := s.File(Request{Role: "agent" + string(rune('a'+i)), Fingerprint: strings.Repeat(string("0123456789abcdef"[i%16]), 63) + string("0123456789abcdef"[i/16]), Services: []string{"api"}}, access(), "x", now); err != nil {
 			t.Fatalf("request %d: %v", i, err)

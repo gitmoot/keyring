@@ -350,7 +350,7 @@ func TestApprovingARequestGivesFullAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := e.request("GET", "/access", nil).Body.String()
-	if !strings.Contains(page, "New agent <b>adstudio</b>") || !strings.Contains(page, `class="badge">1<`) {
+	if !strings.Contains(page, "New agent <b>adstudio</b>") || !strings.Contains(page, `class="badge">1<`) || !strings.Contains(page, sha) {
 		t.Fatalf("request not shown:\n%s", page)
 	}
 	// Without the password nothing happens and the request stays.
@@ -407,5 +407,17 @@ func TestOpeningAnUngrantedServiceDefaultsToFullAccess(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Fatalf("editor for a new grant lacks %q", want)
 		}
+	}
+}
+
+func TestAnUnreadableRequestsFileIsShownNotHidden(t *testing.T) {
+	e := newEnv(t)
+	path := filepath.Join(t.TempDir(), "requests.json")
+	e.backend.Requests = requests.Open(path)
+	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if page := e.request("GET", "/access", nil).Body.String(); !strings.Contains(page, "Access requests cannot be read") {
+		t.Fatal("a broken requests file looks like no requests")
 	}
 }

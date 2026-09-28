@@ -107,7 +107,8 @@ var pages = template.Must(template.New("pages").Parse(`
 <p class="reqtitle">{{if .Fingerprint}}New agent <b>{{.Role}}</b>{{else}}More access for <b>{{.Role}}</b>{{end}}</p>
 <p>Full access to {{range $i, $s := .Services}}{{if $i}}, {{end}}<span class="chip">{{$s}}</span>{{end}}</p>
 {{with .Note}}<p class="mute">“{{.}}”</p>{{end}}
-<p class="hint">Asked from {{.From}}, {{.Filed.Format "2 Jan 15:04"}} UTC{{if .Fingerprint}} · token {{printf "%.12s" .Fingerprint}}…{{end}}</p>
+<p class="hint">Asked from {{.From}}, {{.Filed.Format "2 Jan 15:04"}} UTC</p>
+{{if .Fingerprint}}<p class="hint">Token fingerprint <code class="fp">{{.Fingerprint}}</code></p>{{end}}
 {{template "password" $}}
 <div class="actions"><button name="answer" value="approve">Approve</button><button class="ghost" name="answer" value="decline">Decline</button></div>
 </form>{{end}}{{end}}

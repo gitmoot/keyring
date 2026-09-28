@@ -160,9 +160,13 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	if notice == "" {
 		notice = requestNotices[r.URL.Query().Get("done")]
 	}
+	pending, err := b.pendingRequests()
+	errMsg := accessErrors[r.URL.Query().Get("error")]
+	if err != nil {
+		errMsg = "Access requests cannot be read: " + err.Error()
+	}
 	b.render(w, http.StatusOK, "access", sid, map[string]any{
-		"Services": services, "Rows": rows, "Notice": notice, "Requests": b.pendingRequests(),
-		"Error": accessErrors[r.URL.Query().Get("error")],
+		"Services": services, "Rows": rows, "Notice": notice, "Requests": pending, "Error": errMsg,
 	})
 }
 

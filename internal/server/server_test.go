@@ -507,6 +507,7 @@ func TestAccessRequestsAreFiledNotGranted(t *testing.T) {
 		"unknown field":   `{"role":"x","fingerprint":"` + fp + `","services":["api"],"grant":"all"}`,
 		"unknown service": `{"role":"x","fingerprint":"` + fp + `","services":["nope"]}`,
 		"not json":        `role=x`,
+		"trailing data":   `{"role":"x","fingerprint":"` + fp + `","services":["api"]} {}`,
 	} {
 		if w := post(caller, bad); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d, want 400", name, w.Code)

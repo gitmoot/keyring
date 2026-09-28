@@ -121,7 +121,13 @@ func (h *Handler) fileRequest(w http.ResponseWriter, r *http.Request, snap *snap
 	var req requests.Request
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	err := dec.Decode(&req)
+	if err == nil {
+		if _, extra := dec.Token(); extra != io.EOF {
+			err = errors.New("data after the request")
+		}
+	}
+	if err != nil {
 		fail(http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
