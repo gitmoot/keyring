@@ -9,7 +9,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body>
 <header class="top"><div class="wrap">
 <a class="brand" href="/keys">Keyring</a>
-<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents</a></nav>
+<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a></nav>
 <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form>
 </div></header><main class="wrap">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
@@ -101,6 +101,17 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "access"}}{{template "top" .}}
 {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
+{{with .Error}}<p class="error">{{.}}</p>{{end}}
+{{if .Requests}}<h2 class="section">Waiting for you</h2>
+{{range .Requests}}<form method="post" action="/requests/{{.ID}}" class="card request"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+<p class="reqtitle">{{if .Fingerprint}}New agent <b>{{.Role}}</b>{{else}}More access for <b>{{.Role}}</b>{{end}}</p>
+<p>Full access to {{range $i, $s := .Services}}{{if $i}}, {{end}}<span class="chip">{{$s}}</span>{{end}}</p>
+{{with .Note}}<p class="mute">“{{.}}”</p>{{end}}
+<p class="hint">Asked from {{.From}}, {{.Filed.Format "2 Jan 15:04"}} UTC</p>
+{{if .Fingerprint}}<p class="hint">Token fingerprint <code class="fp">{{.Fingerprint}}</code></p>{{end}}
+{{template "password" $}}
+<div class="actions"><button name="answer" value="approve">Approve</button><button class="ghost" name="answer" value="decline">Decline</button></div>
+</form>{{end}}{{end}}
 <div class="head"><h1>Agents</h1><a class="btn" href="/new/agent">Add agent</a></div>
 {{range .Rows}}<div class="card agent">
 <div class="agenthead"><a class="name" href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}}<span class="pill warn">ended</span>{{end}}<span class="mute">{{.CallsToday}} call{{if ne .CallsToday 1}}s{{end}} today</span></div>
@@ -117,6 +128,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/access/{{.Form.Role}}/{{.Form.Service}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="switch"><input type="checkbox" name="on" value="yes"{{if .Form.On}} checked{{end}}> <span>{{.Form.Role}} may use {{.Form.Service}}</span></label>
+<details{{if or (ne .Form.Mode "full") (ne .Form.Paths "/") .Form.Daily .Form.Expires}} open{{end}}><summary>{{if and (eq .Form.Mode "full") (eq .Form.Paths "/") (not .Form.Daily) (not .Form.Expires)}}Full access · Limit access{{else}}Limited access{{end}}</summary>
 <p class="lbl">Allowed</p>
 <div class="seg" role="radiogroup" aria-label="Allowed methods">
 <label><input type="radio" name="mode" value="read"{{if eq .Form.Mode "read"}} checked{{end}}><span>Read only</span></label>
@@ -129,6 +141,7 @@ var pages = template.Must(template.New("pages").Parse(`
 <p class="hint">/ allows everything; /v1 allows /v1 and below.</p>
 <div class="two"><label>Daily limit<input name="daily" inputmode="numeric" value="{{.Form.Daily}}" placeholder="none"></label>
 <label>Ends on (UTC)<input type="date" name="expires" value="{{.Form.Expires}}"></label></div>
+</details>
 {{template "password" .}}<div class="actions"><button>Save</button><a class="btn ghost" href="/agents/{{.Form.Role}}">Cancel</a></div></form></div>
 {{template "bottom"}}{{end}}
 

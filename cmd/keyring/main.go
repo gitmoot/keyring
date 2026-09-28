@@ -26,6 +26,7 @@ import (
 	dashboardpkg "github.com/gitmoot/keyring/internal/dashboard"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/relay"
+	"github.com/gitmoot/keyring/internal/requests"
 	"github.com/gitmoot/keyring/internal/server"
 	"github.com/gitmoot/keyring/internal/store"
 )
@@ -42,6 +43,8 @@ const usage = `Usage:
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
   keyring new-token                          make a role token and its hash for the rules file
+  keyring request --upstream URL --role NAME --service S [--service S ...] [--note TEXT] [--new TOKENS_DIR]
+                                             ask the owner for full access to services (approved in the dashboard)
   keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
                                              on the agent machine: forward /<role>/<service>/... to the keyring
 `
@@ -66,7 +69,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ifMissing := fs.Bool("if-missing", false, "admin-password: keep a password that is already set")
 	adminListen := fs.String("admin-listen", "127.0.0.1:7702", "enable-dashboard: loopback address of the dashboard")
 	httpsHost := fs.String("https-host", "", "enable-dashboard: DNS name served by the local HTTPS proxy")
-	var devices stringList
+	var devices, services stringList
+	role := fs.String("role", "", "request: the agent (role) asking")
+	fs.Var(&services, "service", "request: a service to get full access to (repeat)")
+	note := fs.String("note", "", "request: why, shown to the owner")
+	newTokens := fs.String("new", "", "request: a new agent; make or reuse <dir>/<role>.token and send its sha256")
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	if err := fs.Parse(rest); err != nil {
@@ -151,6 +158,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "token:  %s\nsha256: %s\n", token, sha)
 			fmt.Fprintln(stderr, "Put the token only on the machine that calls the keyring; put the sha256 in the rules file.")
 		}
+	case "request":
+		if *upstream == "" || fs.NArg() != 0 {
+			fmt.Fprintln(stderr, "keyring request: --upstream, --role and --service are required")
+			return 2
+		}
+		err = fileRequest(*upstream, *role, services, *note, *newTokens, stdout)
 	case "relay":
 		if *upstream == "" || *tokensDir == "" || fs.NArg() != 0 {
 			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")
@@ -242,8 +255,10 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	// changes serializes the dashboard's writes and the SIGHUP reload.
 	changes := &sync.Mutex{}
 	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr, func(a *admin.Server) {
+		reqs := requests.Open(filepath.Join(filepath.Dir(storePath), "requests.json"))
+		handler.SetRequests(reqs)
 		dashboardpkg.Register(&dashboardpkg.Backend{
-			Mu: changes, StorePath: storePath, MetaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"),
+			Mu: changes, StorePath: storePath, MetaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"), Requests: reqs,
 			Proxy: handler, Admin: a,
 		})
 	})

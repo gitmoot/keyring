@@ -18,22 +18,29 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/requests"
 )
 
 const (
 	// TokenHeader carries the caller's role token. It is never forwarded.
 	TokenHeader = "X-Keyring-Token"
 	HealthPath  = "/_keyring/health"
+	// RequestsPath takes access requests from the allowed sources (POST, JSON
+	// {"role","fingerprint","services","note"}). The owner approves them in
+	// the dashboard; filing one grants nothing.
+	RequestsPath = "/_keyring/requests"
 )
 
 // Handler serves proxied API calls.
 type Handler struct {
 	// snap holds the rules, access list and keys in use. Each request reads
 	// it once, so a reload never mixes old and new settings in one request.
-	snap   atomic.Pointer[snapshot]
-	audit  io.Writer
-	client *http.Client
-	now    func() time.Time
+	snap atomic.Pointer[snapshot]
+	// requests, when set, takes access requests at RequestsPath.
+	requests *requests.Store
+	audit    io.Writer
+	client   *http.Client
+	now      func() time.Time
 
 	mu     sync.Mutex
 	day    string
@@ -93,6 +100,49 @@ type auditRecord struct {
 	Note    string `json:"note,omitempty"`
 }
 
+// SetRequests turns on RequestsPath, filing into store. Call before serving.
+func (h *Handler) SetRequests(store *requests.Store) { h.requests = store }
+
+func (h *Handler) fileRequest(w http.ResponseWriter, r *http.Request, snap *snapshot, from string, now time.Time) {
+	rec := auditRecord{Time: now.UTC().Format(time.RFC3339), Source: from, Method: r.Method, Path: RequestsPath}
+	defer func() { h.writeAudit(rec) }()
+	fail := func(status int, msg string) {
+		rec.Status, rec.Note = status, msg
+		http.Error(w, http.StatusText(status)+": "+msg, status)
+	}
+	if h.requests == nil {
+		fail(http.StatusNotFound, "access requests are off")
+		return
+	}
+	if r.Method != http.MethodPost {
+		fail(http.StatusMethodNotAllowed, "POST a JSON request")
+		return
+	}
+	var req requests.Request
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(&req)
+	if err == nil {
+		if _, extra := dec.Token(); extra != io.EOF {
+			err = errors.New("data after the request")
+		}
+	}
+	if err != nil {
+		fail(http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	req.Fingerprint = strings.ToLower(req.Fingerprint)
+	filed, err := h.requests.File(req, snap.config.AccessList, from, now)
+	if err != nil {
+		fail(http.StatusBadRequest, err.Error())
+		return
+	}
+	rec.Status, rec.Role, rec.Note = http.StatusAccepted, filed.Role, "request "+filed.ID+" filed: "+strings.Join(filed.Services, ",")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": filed.ID, "status": "waiting for the owner to approve it in the dashboard"})
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := h.now()
 	snap := h.snap.Load()
@@ -104,6 +154,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == HealthPath {
 		_, _ = io.WriteString(w, "ok\n")
+		return
+	}
+	if r.URL.Path == RequestsPath {
+		h.fileRequest(w, r, snap, addr.String(), start)
 		return
 	}
 	rec := auditRecord{Time: start.UTC().Format(time.RFC3339), Source: addr.String(), Method: r.Method}

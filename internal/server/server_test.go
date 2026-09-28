@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/requests"
 )
 
 const (
@@ -476,4 +478,54 @@ func TestSwapDuringRequestsIsRaceFree(t *testing.T) {
 		h.Swap(next, map[string]string{"API_KEY": testKey})
 	}
 	wg.Wait()
+}
+
+func TestAccessRequestsAreFiledNotGranted(t *testing.T) {
+	up, got := upstream(t)
+	h, audit := newHandler(t, up.URL, bearer, allowAll)
+	post := func(from, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", RequestsPath, strings.NewReader(body))
+		r.RemoteAddr = from + ":51000"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	tok, fp, err := policy.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"role":"adstudio","fingerprint":"` + strings.ToUpper(fp) + `","services":["api"],"note":"voiceovers"}`
+	if w := post(caller, body); w.Code != http.StatusNotFound {
+		t.Fatalf("requests off: %d, want 404", w.Code)
+	}
+	store := requests.Open(filepath.Join(t.TempDir(), "requests.json"))
+	h.SetRequests(store)
+	if w := post("192.0.2.99", body); w.Code != http.StatusForbidden {
+		t.Fatalf("from a source not allowed: %d, want 403", w.Code)
+	}
+	for name, bad := range map[string]string{
+		"unknown field":   `{"role":"x","fingerprint":"` + fp + `","services":["api"],"grant":"all"}`,
+		"unknown service": `{"role":"x","fingerprint":"` + fp + `","services":["nope"]}`,
+		"not json":        `role=x`,
+		"trailing data":   `{"role":"x","fingerprint":"` + fp + `","services":["api"]} {}`,
+	} {
+		if w := post(caller, bad); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, w.Code)
+		}
+	}
+	w := post(caller, body)
+	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"id"`) {
+		t.Fatalf("file: %d %s", w.Code, w.Body.String())
+	}
+	list, _ := store.Pending()
+	if len(list) != 1 || list[0].Fingerprint != fp || list[0].From != caller {
+		t.Fatalf("stored: %+v", list)
+	}
+	// Filing grants nothing: the new agent's token is still unknown.
+	if w := call(h, "GET", "/api/v1/x", tok, nil); w.Code != http.StatusUnauthorized || got.count() != 0 {
+		t.Fatalf("after filing, a call: %d (upstream %d)", w.Code, got.count())
+	}
+	if !strings.Contains(audit.String(), "request "+list[0].ID+" filed") {
+		t.Fatalf("audit: %s", audit.String())
+	}
 }
