@@ -74,8 +74,11 @@ func TestGridChangesApplyToTheNextCall(t *testing.T) {
 	if code := e.call("GET", "/api/v2/x", token); code != http.StatusForbidden {
 		t.Fatalf("after switching off: %d, want 403", code)
 	}
-	if page := e.request("GET", "/access", nil).Body.String(); strings.Contains(page, `href="/access/phobos/api"`) || !strings.Contains(page, "<option>api</option>") {
-		t.Fatal("the agents page still shows api as granted, or does not offer to add it")
+	if page := e.request("GET", "/access", nil).Body.String(); strings.Contains(page, `href="/access/phobos/api"`) {
+		t.Fatal("the agents table still shows api as granted")
+	}
+	if page := e.request("GET", "/agents/phobos", nil).Body.String(); !strings.Contains(page, "<option>api</option>") {
+		t.Fatal("the agent's page does not offer to add api back")
 	}
 }
 
@@ -419,5 +422,34 @@ func TestAnUnreadableRequestsFileIsShownNotHidden(t *testing.T) {
 	}
 	if page := e.request("GET", "/access", nil).Body.String(); !strings.Contains(page, "Access requests cannot be read") {
 		t.Fatal("a broken requests file looks like no requests")
+	}
+}
+
+func TestAgentsTableShowsFullAndLimitedAccess(t *testing.T) {
+	e := newEnv(t)
+	e.request("POST", "/new/agent", nil)
+	_, sha, _ := policy.NewToken()
+	e.request("POST", "/agents", url.Values{"name": {"adstudio"}, "fingerprint": {sha}, "password": {password}})
+	e.saveCell("adstudio", "api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}})
+	e.proxyCall()
+	page := e.request("GET", "/access", nil).Body.String()
+	if !strings.Contains(page, `class="chip full" href="/access/adstudio/api"`) || !strings.Contains(page, `class="chip lim" href="/access/phobos/api"`) {
+		t.Fatalf("chips:\n%s", page)
+	}
+	order := func(p string) string {
+		var out []string
+		for _, part := range strings.Split(p, `<a class="kname" href="/agents/`)[1:] {
+			out = append(out, part[:strings.Index(part, `"`)])
+		}
+		return strings.Join(out, ",")
+	}
+	if got := order(page); got != "adstudio,phobos" {
+		t.Fatalf("default order %s", got)
+	}
+	if got := order(e.request("GET", "/access?sort=today&desc=1", nil).Body.String()); got != "phobos,adstudio" {
+		t.Fatalf("by calls today %s", got)
+	}
+	if got := order(e.request("GET", "/access?sort=name&desc=1", nil).Body.String()); got != "phobos,adstudio" {
+		t.Fatalf("by name reversed %s", got)
 	}
 }
