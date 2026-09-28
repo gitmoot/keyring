@@ -21,6 +21,7 @@ import (
 	"github.com/gitmoot/keyring/internal/admin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/requests"
 	"github.com/gitmoot/keyring/internal/server"
 	"github.com/gitmoot/keyring/internal/store"
 )
@@ -31,6 +32,8 @@ type Backend struct {
 	Mu        *sync.Mutex
 	StorePath string
 	MetaPath  string // key status and leaked flags; never values
+	// Requests holds agents' access requests; nil turns them off.
+	Requests *requests.Store
 	// Proxy holds the running config; its rules (which only root and SIGHUP
 	// change) are the ones every change is checked against.
 	Proxy *server.Handler
@@ -631,6 +634,7 @@ func (b *Backend) fail(w http.ResponseWriter, sid string, err error) {
 func (b *Backend) render(w http.ResponseWriter, status int, page, sid string, data map[string]any) {
 	data["CSRF"] = b.Admin.CSRF(sid)
 	data["Page"] = page
+	data["PendingCount"] = len(b.pendingRequests())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = pages.ExecuteTemplate(w, page, data)

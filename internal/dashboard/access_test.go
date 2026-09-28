@@ -6,12 +6,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/requests"
 	"github.com/gitmoot/keyring/internal/server"
 )
 
@@ -335,5 +337,75 @@ func TestAddAgentWithItsOwnTokenShowsNoToken(t *testing.T) {
 	}
 	if !strings.Contains(e.request("GET", "/agents/deimos?done=added", nil).Body.String(), "own token") {
 		t.Fatal("no notice after adding")
+	}
+}
+
+func TestApprovingARequestGivesFullAccess(t *testing.T) {
+	e := newEnv(t)
+	e.backend.Requests = requests.Open(filepath.Join(t.TempDir(), "requests.json"))
+	tok, sha, _ := policy.NewToken()
+	req, err := e.backend.Requests.File(requests.Request{Role: "adstudio", Fingerprint: sha, Services: []string{"api"}, Note: "voiceovers"},
+		e.proxy.Config().AccessList, "100.64.0.20", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := e.request("GET", "/access", nil).Body.String()
+	if !strings.Contains(page, "New agent <b>adstudio</b>") || !strings.Contains(page, `class="badge">1<`) {
+		t.Fatalf("request not shown:\n%s", page)
+	}
+	// Without the password nothing happens and the request stays.
+	if w := e.request("POST", "/requests/"+req.ID, url.Values{"answer": {"approve"}}); !strings.Contains(w.Header().Get("Location"), "error=password") {
+		t.Fatalf("approve without password: %s", w.Header().Get("Location"))
+	}
+	if code := e.call("DELETE", "/api/anything", tok); code != http.StatusUnauthorized {
+		t.Fatalf("before approval: %d, want 401", code)
+	}
+	if w := e.request("POST", "/requests/"+req.ID, url.Values{"answer": {"approve"}, "password": {password}}); w.Header().Get("Location") != "/access?done=approved" {
+		t.Fatalf("approve: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	// Full access: any method, any path, no limit.
+	for _, m := range []string{"GET", "POST", "DELETE"} {
+		if code := e.call(m, "/api/any/path/at/all", tok); code != 200 {
+			t.Fatalf("%s after approval: %d", m, code)
+		}
+	}
+	if list, _ := e.backend.Requests.Pending(); len(list) != 0 {
+		t.Fatalf("request still pending: %+v", list)
+	}
+	if w := e.request("POST", "/requests/"+req.ID, url.Values{"answer": {"approve"}, "password": {password}}); !strings.Contains(w.Header().Get("Location"), "error=gone") {
+		t.Fatalf("second answer: %s", w.Header().Get("Location"))
+	}
+	if !strings.Contains(e.audit.String(), `"admin":"request_approved"`) {
+		t.Fatal("approval not audited")
+	}
+}
+
+func TestDecliningARequestGrantsNothing(t *testing.T) {
+	e := newEnv(t)
+	e.backend.Requests = requests.Open(filepath.Join(t.TempDir(), "requests.json"))
+	before, _ := os.ReadFile(e.proxy.Config().AccessFile)
+	req, err := e.backend.Requests.File(requests.Request{Role: "phobos", Services: []string{"api"}}, e.proxy.Config().AccessList, "x", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := e.request("POST", "/requests/"+req.ID, url.Values{"answer": {"decline"}, "password": {password}}); w.Header().Get("Location") != "/access?done=declined" {
+		t.Fatalf("decline: %s", w.Header().Get("Location"))
+	}
+	if after, _ := os.ReadFile(e.proxy.Config().AccessFile); !bytes.Equal(before, after) {
+		t.Fatal("declining changed the access file")
+	}
+	if code := e.call("DELETE", "/api/v1/x", token); code != http.StatusForbidden {
+		t.Fatalf("phobos DELETE after a declined request for full access: %d, want 403", code)
+	}
+}
+
+func TestOpeningAnUngrantedServiceDefaultsToFullAccess(t *testing.T) {
+	e := newEnv(t)
+	tokenFrom(t, e.request("POST", "/agents", url.Values{"name": {"deimos"}, "password": {password}}))
+	page := e.request("GET", "/access/deimos/api", nil).Body.String()
+	for _, want := range []string{`name="on" value="yes" checked`, `value="full" checked`, "Full access"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("editor for a new grant lacks %q", want)
+		}
 	}
 }

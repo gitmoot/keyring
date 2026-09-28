@@ -30,6 +30,7 @@ var (
 func registerAccess(b *Backend) {
 	a := b.Admin
 	a.Handle("GET /access", b.accessPage)
+	a.Handle("POST /requests/{id}", b.answerRequest)
 	a.Handle("GET /access/{role}/{service}", b.cellPage)
 	a.Handle("POST /access/{role}/{service}", b.saveCell)
 	a.Handle("GET /new/agent", b.newAgentPage) // not under /agents/: a role may be named "new"
@@ -107,6 +108,11 @@ func sortedNames[V any](m map[string]V) []string {
 	return out
 }
 
+var accessErrors = map[string]string{
+	"password": "Enter your dashboard password to answer a request.",
+	"gone":     "That request was already answered.",
+}
+
 var accessNotices = map[string]string{
 	"saved":   "Access saved. It applies to the next call.",
 	"revoked": "Agent revoked. Its token no longer works.",
@@ -150,8 +156,13 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 		}
 		rows = append(rows, row)
 	}
+	notice := accessNotices[r.URL.Query().Get("done")]
+	if notice == "" {
+		notice = requestNotices[r.URL.Query().Get("done")]
+	}
 	b.render(w, http.StatusOK, "access", sid, map[string]any{
-		"Services": services, "Rows": rows, "Notice": accessNotices[r.URL.Query().Get("done")],
+		"Services": services, "Rows": rows, "Notice": notice, "Requests": b.pendingRequests(),
+		"Error": accessErrors[r.URL.Query().Get("error")],
 	})
 }
 
@@ -169,7 +180,9 @@ type cellForm struct {
 func (f cellForm) Has(method string) bool { return slices.Contains(f.Methods, method) }
 
 func formFromAccess(role, service string, acc policy.Access, on bool) cellForm {
-	f := cellForm{Role: role, Service: service, On: on, Mode: "read", Paths: "/"}
+	// A service not granted yet opens ready for full access: switched on,
+	// every method, every path, no limit. Saving is all it takes.
+	f := cellForm{Role: role, Service: service, On: true, Mode: "full", Paths: "/"}
 	if !on {
 		return f
 	}
