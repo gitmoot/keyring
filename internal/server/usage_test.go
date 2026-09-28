@@ -56,3 +56,32 @@ func TestUsageResetsDailyAndRestores(t *testing.T) {
 		t.Fatalf("restored: %+v", got)
 	}
 }
+
+func TestUsageKeepsSevenDaysAcrossRestarts(t *testing.T) {
+	up, _ := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, allowAll)
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	// Day 20: 1 call, day 21: 2 calls, ... day 28: 9 calls.
+	for d := 0; d < 9; d++ {
+		for i := 0; i <= d; i++ {
+			call(h, "GET", "/api/v1/a", testToken, nil)
+		}
+		if d == 4 { // a restart mid-way keeps the history
+			saved := h.Usage()
+			h, _ = newHandler(t, up.URL, bearer, allowAll)
+			h.now = func() time.Time { return now }
+			h.RestoreUsage(saved)
+		}
+		now = now.AddDate(0, 0, 1)
+	}
+	now = now.AddDate(0, 0, -1) // back to day 28, the last day called
+	if got := h.Usage()[0].Week(); got != [7]int{3, 4, 5, 6, 7, 8, 9} {
+		t.Fatalf("week on day 28 = %v, want 3..9", got)
+	}
+	now = now.AddDate(0, 0, 2) // two quiet days later
+	got := h.Usage()[0]
+	if got.Week() != [7]int{5, 6, 7, 8, 9, 0, 0} || len(got.Past) != 5 {
+		t.Fatalf("week two days later = %v (past %v)", got.Week(), got.Past)
+	}
+}

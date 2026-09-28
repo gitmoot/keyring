@@ -40,20 +40,54 @@ func registerAccess(b *Backend) {
 	a.Handle("POST /agents/{role}/revoke", b.revokeAgent)
 }
 
+// maxChips is how many APIs an agent's row lists before "+N more".
+const maxChips = 6
+
 type gridCell struct {
+	Full          bool // every method and path, no limit, no end
 	Role, Service string
 	On, Ended     bool
 	Label, Detail string
 }
 
-// gridRow is one agent's card: the services it may use (Cells) and the ones
-// it may not (Off), for "Add a service".
+// gridRow is one agent's line in the agents table.
 type gridRow struct {
 	Role       string
 	Ended      bool
 	Cells      []gridCell
-	Off        []string
 	CallsToday int
+	// For the agents table: full access first, at most maxChips, then a
+	// count of the rest.
+	Chips      []gridCell
+	More       int
+	LastCall   string
+	lastCallAt time.Time
+	Ends       string
+}
+
+// sortAgents orders the agents table by a column; the default is by name.
+func sortAgents(rows []gridRow, by string, desc bool) {
+	less := func(a, b gridRow) int {
+		switch by {
+		case "apis":
+			return len(a.Cells) - len(b.Cells)
+		case "today":
+			return a.CallsToday - b.CallsToday
+		case "last":
+			return a.lastCallAt.Compare(b.lastCallAt)
+		}
+		return 0
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		c := less(rows[i], rows[j])
+		if c == 0 {
+			c = strings.Compare(rows[i].Role, rows[j].Role)
+		}
+		if desc {
+			return c > 0
+		}
+		return c < 0
+	})
 }
 
 // methodsLabel names a method list the way the cell form offers it.
@@ -122,8 +156,12 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	cfg := b.Proxy.Config()
 	now := b.Now()
 	count := map[[2]string]int{}
+	lastCall := map[string]time.Time{}
 	for _, u := range b.Proxy.Usage() {
 		count[[2]string{u.Role, u.Service}] += u.Calls
+		if u.LastUsed.After(lastCall[u.Role]) {
+			lastCall[u.Role] = u.LastUsed
+		}
 	}
 	services := sortedNames(cfg.Services)
 	var rows []gridRow
@@ -149,10 +187,23 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 				}
 			}
 			if c.On {
+				c.Full = isFull(rl.Access[svc]) && !c.Ended
 				row.Cells = append(row.Cells, c)
-			} else {
-				row.Off = append(row.Off, svc)
 			}
+		}
+		row.Chips = slices.Clone(row.Cells)
+		sort.SliceStable(row.Chips, func(i, j int) bool { return row.Chips[i].Full && !row.Chips[j].Full })
+		if len(row.Chips) > maxChips {
+			row.More, row.Chips = len(row.Chips)-maxChips, row.Chips[:maxChips]
+		}
+		if at, ok := lastCall[role]; ok {
+			row.lastCallAt, row.LastCall = at, ago(now, at)
+		}
+		switch {
+		case row.Ended:
+			row.Ends = "ended"
+		case rl.Expires != nil:
+			row.Ends = rl.Expires.UTC().Format("2 Jan 2006")
 		}
 		rows = append(rows, row)
 	}
@@ -165,8 +216,13 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	if err != nil {
 		errMsg = "Access requests cannot be read: " + err.Error()
 	}
+	query := r.URL.Query()
+	by, desc := query.Get("sort"), query.Get("desc") == "1"
+	sortAgents(rows, by, desc)
+	cols := columns("/access", query, by, desc, [][3]string{{"name", "Agent", ""}, {"", "Can use", ""}, {"apis", "APIs", "num"},
+		{"today", "Calls today", "num"}, {"last", "Last call", ""}, {"", "Ends", ""}, {"", "", ""}})
 	b.render(w, http.StatusOK, "access", sid, map[string]any{
-		"Services": services, "Rows": rows, "Notice": notice, "Requests": pending, "Error": errMsg,
+		"Services": services, "Rows": rows, "Notice": notice, "Requests": pending, "Error": errMsg, "Columns": cols,
 	})
 }
 

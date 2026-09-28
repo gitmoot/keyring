@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -47,6 +48,9 @@ type KeyMeta struct {
 	Reason    string     `json:"reason,omitempty"`
 	CheckedAt time.Time  `json:"checked_at,omitzero"`
 	LeakedAt  *time.Time `json:"leaked_at,omitempty"`
+	// UpdatedAt is when the value was last added or replaced here (nil for
+	// keys stored before the dashboard kept this).
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
 // rules are the running rules: a SIGHUP may have changed allow_sources since
@@ -75,10 +79,70 @@ func Register(b *Backend) {
 // keyRow is one line of the keys table.
 type keyRow struct {
 	Name, Status, StatusClass string
-	Services, UsedBy          []string
-	LastUsed                  string
-	CallsToday                int
-	HasValue                  bool
+	// State is the status filter: working, failing, untested, leaked or
+	// novalue.
+	State      string
+	Services   []string
+	Provider   string // e.g. "Apify", from the service's base URL
+	UsedBy     []string
+	Grants     []grant // UsedBy with each agent's kind of access
+	LastUsed   string
+	lastUsedAt time.Time
+	CallsToday int
+	Week       [7]int
+	Updated    string
+	HasValue   bool
+}
+
+// grant is an agent's access to a key, for the chips in the keys table.
+type grant struct {
+	Role string
+	Full bool
+}
+
+// Spark returns the 7-day bar heights in pixels (2 to 18).
+func (r keyRow) Spark() []int { return spark(r.Week) }
+
+// WeekTotal is the calls of the last 7 days, for the chart's tooltip.
+func (r keyRow) WeekTotal() int {
+	n := 0
+	for _, c := range r.Week {
+		n += c
+	}
+	return n
+}
+
+func spark(week [7]int) []int {
+	top := 0
+	for _, c := range week {
+		top = max(top, c)
+	}
+	out := make([]int, len(week))
+	for i, c := range week {
+		out[i] = 2
+		if top > 0 && c > 0 {
+			out[i] = max(3, c*18/top)
+		}
+	}
+	return out
+}
+
+// isFull reports whether an access is what "give this agent this API"
+// gives: every method and path, no limit, no end.
+func isFull(a policy.Access) bool {
+	return sameSet(a.Methods, fullMethods) && len(a.Paths) == 1 && a.Paths[0] == "/" && a.DailyRequests == 0 && a.Expires == nil
+}
+
+// providerOf names the API a service calls, from the built-in presets.
+func providerOf(svc policy.Service) string {
+	for _, p := range presets {
+		if strings.TrimSuffix(svc.Base, "/") == strings.TrimSuffix(p.Base, "/") {
+			return p.Label
+		}
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(svc.Base, "https://"), "http://")
+	host, _, _ = strings.Cut(host, "/")
+	return strings.TrimPrefix(host, "api.")
 }
 
 func (b *Backend) loadMeta() (map[string]KeyMeta, error) {
@@ -141,31 +205,48 @@ func (b *Backend) rows() ([]keyRow, error) {
 			}
 		}
 		sort.Strings(row.Services)
-		users := map[string]bool{}
+		for _, sname := range row.Services {
+			if row.Provider == "" {
+				row.Provider = providerOf(cfg.Services[sname])
+			}
+		}
+		full := map[string]bool{}
 		for role, r := range cfg.Roles {
-			for sname := range r.Access {
+			for sname, acc := range r.Access {
 				if services[sname] {
-					users[role] = true
+					if _, seen := full[role]; !seen {
+						full[role] = true
+					}
+					full[role] = full[role] && isFull(acc)
 				}
 			}
 		}
-		for role := range users {
+		for role := range full {
 			row.UsedBy = append(row.UsedBy, role)
 		}
 		sort.Strings(row.UsedBy)
-		var last time.Time
+		for _, role := range row.UsedBy {
+			row.Grants = append(row.Grants, grant{Role: role, Full: full[role]})
+		}
 		for _, u := range usage {
 			if services[u.Service] {
 				row.CallsToday += u.Calls
-				if u.LastUsed.After(last) {
-					last = u.LastUsed
+				for i, c := range u.Week() {
+					row.Week[i] += c
+				}
+				if u.LastUsed.After(row.lastUsedAt) {
+					row.lastUsedAt = u.LastUsed
 				}
 			}
 		}
-		if !last.IsZero() {
-			row.LastUsed = ago(b.Now(), last)
+		if !row.lastUsedAt.IsZero() {
+			row.LastUsed = ago(b.Now(), row.lastUsedAt)
+		}
+		if at := meta[name].UpdatedAt; at != nil {
+			row.Updated = at.UTC().Format("2 Jan 2006")
 		}
 		row.Status, row.StatusClass = describe(has[name], meta[name])
+		row.State = state(has[name], meta[name])
 		rows = append(rows, row)
 	}
 	return rows, nil
@@ -195,6 +276,126 @@ func describe(hasValue bool, m KeyMeta) (string, string) {
 	return "Not tested", ""
 }
 
+// state is the filter group of a key; it follows describe.
+func state(hasValue bool, m KeyMeta) string {
+	switch {
+	case !hasValue:
+		return "novalue"
+	case m.LeakedAt != nil:
+		return "leaked"
+	case m.Status == "working":
+		return "working"
+	case m.Status == "failing":
+		return "failing"
+	}
+	return "untested"
+}
+
+type keyFilter struct {
+	ID, Label, Class string
+	Count            int
+	On               bool
+}
+
+// keyFilters are the chips above the keys table, with counts. "unused" are
+// keys no agent may use.
+func keyFilters(rows []keyRow, on string) []keyFilter {
+	list := []keyFilter{{ID: "", Label: "All"}, {ID: "working", Label: "Working"}, {ID: "failing", Label: "Failing", Class: "bad"},
+		{ID: "untested", Label: "Not tested"}, {ID: "leaked", Label: "Leaked", Class: "warn"}, {ID: "novalue", Label: "No value", Class: "bad"},
+		{ID: "unused", Label: "Unused"}}
+	out := list[:0]
+	for _, f := range list {
+		for _, r := range rows {
+			if keyMatches(r, f.ID) {
+				f.Count++
+			}
+		}
+		f.On = f.ID == on
+		if f.ID == "" || f.Count > 0 || f.On {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func keyMatches(r keyRow, filter string) bool {
+	switch filter {
+	case "":
+		return true
+	case "unused":
+		return len(r.UsedBy) == 0
+	}
+	return r.State == filter
+}
+
+// sortKeys orders the table by a column; unknown columns sort by name.
+func sortKeys(rows []keyRow, by string, desc bool) {
+	rank := map[string]int{"novalue": 0, "failing": 1, "leaked": 2, "untested": 3, "working": 4}
+	less := func(a, b keyRow) int {
+		switch by {
+		case "api":
+			return strings.Compare(strings.ToLower(a.Provider), strings.ToLower(b.Provider))
+		case "status":
+			return rank[a.State] - rank[b.State]
+		case "agents":
+			return len(a.UsedBy) - len(b.UsedBy)
+		case "last":
+			return a.lastUsedAt.Compare(b.lastUsedAt)
+		case "today":
+			return a.CallsToday - b.CallsToday
+		}
+		return 0
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		c := less(rows[i], rows[j])
+		if c == 0 {
+			c = strings.Compare(strings.ToLower(rows[i].Name), strings.ToLower(rows[j].Name))
+		}
+		if desc {
+			return c > 0
+		}
+		return c < 0
+	})
+}
+
+// column is a sortable table header.
+type column struct {
+	ID, Label, Class, Href, Arrow string
+}
+
+// columns builds the header links: a click sorts by that column, a second
+// click reverses it. Number and time columns start with the largest.
+func columns(base string, q url.Values, by string, desc bool, cols [][3]string) []column {
+	out := make([]column, 0, len(cols))
+	for _, c := range cols {
+		col := column{ID: c[0], Label: c[1], Class: c[2]}
+		if col.ID != "" {
+			v := url.Values{}
+			for _, k := range []string{"q", "show"} { // not done= or error=: a notice shows once
+				if q.Get(k) != "" {
+					v.Set(k, q.Get(k))
+				}
+			}
+			v.Set("sort", col.ID)
+			numeric := col.Class == "num" || col.ID == "last" || col.ID == "agents" || col.ID == "apis"
+			nextDesc := numeric
+			if by == col.ID {
+				nextDesc = !desc
+				col.Arrow = "▲"
+				if desc {
+					col.Arrow = "▼"
+				}
+			}
+			if nextDesc {
+				v.Set("desc", "1")
+			}
+			col.Href = base + "?" + v.Encode()
+		}
+		out = append(out, col)
+	}
+	return out
+}
+
 func ago(now, t time.Time) string {
 	d := now.Sub(t)
 	switch {
@@ -214,17 +415,32 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	query := r.URL.Query()
+	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
 	if q != "" {
 		kept := rows[:0]
 		for _, row := range rows {
-			if strings.Contains(strings.ToLower(row.Name), q) || strings.Contains(strings.ToLower(strings.Join(row.Services, " ")), q) {
+			if strings.Contains(strings.ToLower(row.Name), q) || strings.Contains(strings.ToLower(row.Provider+" "+strings.Join(row.Services, " ")), q) {
 				kept = append(kept, row)
 			}
 		}
 		rows = kept
 	}
-	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Notice": r.URL.Query().Get("done")})
+	show := query.Get("show")
+	filters := keyFilters(rows, show)
+	kept := rows[:0]
+	for _, row := range rows {
+		if keyMatches(row, show) {
+			kept = append(kept, row)
+		}
+	}
+	rows = kept
+	by, desc := query.Get("sort"), query.Get("desc") == "1"
+	sortKeys(rows, by, desc)
+	cols := columns("/keys", query, by, desc, [][3]string{{"name", "Key", ""}, {"api", "API", ""}, {"status", "Status", ""},
+		{"agents", "Agents with access", ""}, {"last", "Last used", ""}, {"today", "Calls today", "num"}, {"", "7 days", ""}, {"", "Updated", ""}})
+	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Show": show, "Sort": by, "Desc": desc,
+		"Filters": filters, "Columns": cols, "Notice": query.Get("done")})
 }
 
 func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string) {
@@ -281,6 +497,12 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	keys[name] = value
 	b.Proxy.Swap(b.Proxy.Config(), keys)
+	// Only the date: a failure here leaves the key stored and working.
+	if meta, err := b.loadMeta(); err == nil {
+		now := b.Now().UTC()
+		meta[name] = KeyMeta{UpdatedAt: &now}
+		_ = b.saveMeta(meta)
+	}
 	b.Admin.Audit("key_added", sid, map[string]any{"key": name})
 	http.Redirect(w, r, "/keys/"+name+"?done=added", http.StatusSeeOther)
 }
@@ -497,7 +719,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	meta, err := b.loadMeta()
 	if err == nil {
-		m.LeakedAt = meta[name].LeakedAt
+		m.LeakedAt, m.UpdatedAt = meta[name].LeakedAt, meta[name].UpdatedAt
 		meta[name] = m
 		err = b.saveMeta(meta)
 	}
@@ -536,7 +758,8 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	meta, err := b.loadMeta()
 	if err == nil {
-		meta[name] = KeyMeta{} // new value: not tested, no longer leaked
+		now := b.Now().UTC()
+		meta[name] = KeyMeta{UpdatedAt: &now} // new value: not tested, no longer leaked
 		err = b.saveMeta(meta)
 	}
 	if err == nil {

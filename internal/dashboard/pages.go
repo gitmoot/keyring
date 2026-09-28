@@ -7,30 +7,39 @@ import "html/template"
 // value. Layout is one column that works from a phone up; see admin's CSS.
 var pages = template.Must(template.New("pages").Parse(`
 {{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body>
-<header class="top"><div class="wrap">
+<header class="top"><div class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">
 <a class="brand" href="/keys">Keyring</a>
 <nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a></nav>
 <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form>
-</div></header><main class="wrap">{{end}}
+</div></header><main class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
 
 {{define "password"}}<label class="pw">Dashboard password<input type="password" name="password" autocomplete="current-password" required placeholder="asked on every change"></label>{{end}}
+
+{{define "thead"}}<thead><tr>{{range .}}<th{{with .Class}} class="{{.}}"{{end}}>{{if .Href}}<a href="{{.Href}}">{{.Label}}{{with .Arrow}} <span class="arrow">{{.}}</span>{{end}}</a>{{else}}{{.Label}}{{end}}</th>{{end}}</tr></thead>{{end}}
 
 {{define "status"}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}
 
 {{define "keys"}}{{template "top" .}}
 {{if eq .Notice "deleted"}}<p class="notice">Key deleted.</p>{{end}}
-<div class="head"><h1>Keys</h1><a class="btn" href="/new/key">Add key</a></div>
-<form method="get" action="/keys" class="search"><input type="search" name="q" value="{{.Query}}" placeholder="Search keys or services" aria-label="Search"></form>
-<ul class="list">
-{{range .Rows}}<li><a class="item" href="/keys/{{.Name}}">
-<span class="name">{{.Name}}</span>{{template "status" .}}
-<span class="meta">{{if .Services}}{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}{{else}}not connected{{end}}
-{{if .UsedBy}} · {{len .UsedBy}} agent{{if ne (len .UsedBy) 1}}s{{end}}{{end}}
- · {{with .LastUsed}}used {{.}}{{else}}never used{{end}}{{if .CallsToday}} · {{.CallsToday}} today{{end}}</span>
-</a></li>
-{{else}}<li class="empty">No keys{{if .Query}} match “{{.Query}}”{{end}}.</li>{{end}}
-</ul>
+<div class="bar"><h1>Keys <span class="count">{{len .Rows}}</span></h1>
+<form method="get" action="/keys" class="tsearch">{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{if .Desc}}<input type="hidden" name="desc" value="1">{{end}}<input type="search" name="q" value="{{.Query}}" placeholder="Search keys or APIs" aria-label="Search"></form>
+<a class="btn" href="/new/key">Add key</a></div>
+<nav class="filters" aria-label="Show">{{$q := .Query}}{{range .Filters}}<a class="f{{with .Class}} {{.}}{{end}}{{if .On}} on{{end}}" href="/keys?{{if .ID}}show={{.ID}}{{end}}{{if $q}}{{if .ID}}&amp;{{end}}q={{$q}}{{end}}">{{.Label}} <b>{{.Count}}</b></a>{{end}}</nav>
+<div class="tablewrap"><table class="t">
+{{template "thead" .Columns}}
+<tbody>{{range .Rows}}<tr>
+<td class="first"><a class="kname" href="/keys/{{.Name}}">{{.Name}}</a></td>
+<td>{{if .Services}}{{.Provider}}<div class="sub">{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{else}}<a class="sub link" href="/keys/{{.Name}}">not connected · connect</a>{{end}}</td>
+<td>{{template "status" .}}</td>
+<td class="chips">{{range .Grants}}<a class="chip {{if .Full}}full{{else}}lim{{end}}" href="/agents/{{.Role}}" title="{{if .Full}}full access{{else}}limited access{{end}}">{{.Role}}</a>{{else}}<span class="mute">nobody</span>{{end}}</td>
+<td>{{with .LastUsed}}{{.}}{{else}}<span class="mute">never</span>{{end}}</td>
+<td class="num">{{.CallsToday}}</td>
+<td><span class="spark" title="{{.WeekTotal}} calls in 7 days">{{range .Spark}}<i class="h{{.}}"></i>{{end}}</span></td>
+<td class="mute">{{with .Updated}}{{.}}{{else}}—{{end}}</td>
+</tr>{{else}}<tr><td colspan="8" class="empty">No keys{{if .Query}} match “{{.Query}}”{{end}}{{if .Show}} in this group{{end}}.</td></tr>{{end}}</tbody>
+</table></div>
+<p class="hint">Click a key to test, replace or delete it. Click a column to sort. Calls today count every attempt, refused ones too. Key values are never shown.</p>
 {{template "bottom"}}{{end}}
 
 {{define "newkey"}}{{template "top" .}}
@@ -112,14 +121,20 @@ var pages = template.Must(template.New("pages").Parse(`
 {{template "password" $}}
 <div class="actions"><button name="answer" value="approve">Approve</button><button class="ghost" name="answer" value="decline">Decline</button></div>
 </form>{{end}}{{end}}
-<div class="head"><h1>Agents</h1><a class="btn" href="/new/agent">Add agent</a></div>
-{{range .Rows}}<div class="card agent">
-<div class="agenthead"><a class="name" href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}}<span class="pill warn">ended</span>{{end}}<span class="mute">{{.CallsToday}} call{{if ne .CallsToday 1}}s{{end}} today</span></div>
-<ul class="grants">{{range .Cells}}<li><a class="grant{{if .Ended}} ended{{end}}" href="/access/{{.Role}}/{{.Service}}"><span class="svc">{{.Service}}</span><span class="what">{{.Label}}</span><span class="mute">{{.Detail}}</span></a></li>
-{{else}}<li class="mute">No services yet.</li>{{end}}</ul>
-{{if .Off}}<form method="get" action="/access/{{.Role}}/-" class="add" data-pathpick><select name="service" aria-label="Add a service to {{.Role}}"><option value="">Add a service…</option>{{range .Off}}<option>{{.}}</option>{{end}}</select><noscript><button class="ghost">Open</button></noscript></form>{{end}}
-</div>
-{{else}}<p class="empty card">No agents yet. Add one, then give it services.</p>{{end}}
+<div class="bar"><h1>Agents <span class="count">{{len .Rows}}</span></h1><a class="btn" href="/new/agent">Add agent</a></div>
+<div class="tablewrap"><table class="t">
+{{template "thead" .Columns}}
+<tbody>{{range .Rows}}<tr>
+<td class="first"><a class="kname" href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}} <span class="pill warn">ended</span>{{end}}</td>
+<td class="chips">{{range .Chips}}<a class="chip {{if .Full}}full{{else if .Ended}}ended{{else}}lim{{end}}" href="/access/{{.Role}}/{{.Service}}" title="{{if .Full}}full access{{else}}{{.Label}}{{end}} · {{.Detail}}">{{.Service}}</a>{{end}}{{if .More}}<a class="chip more" href="/agents/{{.Role}}">+{{.More}} more</a>{{end}}{{if not .Cells}}<span class="mute">no APIs yet</span>{{end}}</td>
+<td class="num">{{len .Cells}}</td>
+<td class="num">{{.CallsToday}}</td>
+<td>{{with .LastCall}}{{.}}{{else}}<span class="mute">never</span>{{end}}</td>
+<td class="mute">{{with .Ends}}{{.}}{{else}}never{{end}}</td>
+<td class="act"><a href="/agents/{{.Role}}">Edit access</a></td>
+</tr>{{else}}<tr><td colspan="7" class="empty">No agents yet. Add one, then give it APIs.</td></tr>{{end}}</tbody>
+</table></div>
+<p class="hint"><span class="chip full">green</span> full access · <span class="chip lim">amber</span> limited (methods, paths, daily limit or end date) · click an API to change it.</p>
 {{template "bottom"}}{{end}}
 
 {{define "cell"}}{{template "top" .}}

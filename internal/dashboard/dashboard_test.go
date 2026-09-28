@@ -145,7 +145,7 @@ func TestKeysPageListsWithoutValues(t *testing.T) {
 	e.proxyCall()
 	w := e.request("GET", "/keys", nil)
 	body := w.Body.String()
-	if w.Code != 200 || !strings.Contains(body, "API_KEY") || !strings.Contains(body, "1 agent") || !strings.Contains(body, "used just now") {
+	if w.Code != 200 || !strings.Contains(body, "API_KEY") || !strings.Contains(body, `href="/agents/phobos"`) || !strings.Contains(body, "just now") {
 		t.Fatalf("keys page %d:\n%s", w.Code, body)
 	}
 	if strings.Contains(e.everyPage("/keys/API_KEY"), oldValue) {
@@ -467,5 +467,63 @@ func TestKeyNamedNewHasADetailPage(t *testing.T) {
 	}
 	if w := e.request("GET", "/new/key", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "Add a key") {
 		t.Fatalf("add form: %d", w.Code)
+	}
+}
+
+// rowOrder returns the key names in the order the keys table lists them.
+func rowOrder(page string) []string {
+	var out []string
+	for _, part := range strings.Split(page, `<a class="kname" href="/keys/`)[1:] {
+		out = append(out, part[:strings.Index(part, `"`)])
+	}
+	return out
+}
+
+func TestKeysTableFiltersSortsAndShowsDetails(t *testing.T) {
+	e := newEnv(t)
+	for _, k := range []string{"AAA_UNUSED_KEY", "ZZZ_UNUSED_KEY"} {
+		e.request("POST", "/keys", url.Values{"name": {k}, "value": {"sk-" + k + "-0123456789"}, "password": {password}})
+	}
+	e.proxyCall()
+	e.proxyCall()
+	page := e.request("GET", "/keys", nil).Body.String()
+	if got := rowOrder(page); strings.Join(got, ",") != "AAA_UNUSED_KEY,API_KEY,ZZZ_UNUSED_KEY" {
+		t.Fatalf("default order %v, want by name", got)
+	}
+	// API_KEY: limited access for phobos (amber chip), 2 calls in its 7-day chart.
+	if !strings.Contains(page, `class="chip lim" href="/agents/phobos"`) || !strings.Contains(page, `title="2 calls in 7 days"`) {
+		t.Fatalf("details missing:\n%s", page)
+	}
+	// Keys added here carry the date; the fixture's API_KEY does not.
+	if !strings.Contains(page, e.now.UTC().Format("2 Jan 2006")) || !strings.Contains(page, `<td class="mute">—</td>`) {
+		t.Fatalf("updated column wrong:\n%s", page)
+	}
+	if got := rowOrder(e.request("GET", "/keys?sort=today&desc=1", nil).Body.String()); got[0] != "API_KEY" {
+		t.Fatalf("by calls today, most first: %v", got)
+	}
+	if got := rowOrder(e.request("GET", "/keys?sort=name&desc=1", nil).Body.String()); strings.Join(got, ",") != "ZZZ_UNUSED_KEY,API_KEY,AAA_UNUSED_KEY" {
+		t.Fatalf("by name, reversed: %v", got)
+	}
+	// Sort links keep the filter and search, not a one-time notice.
+	if page := e.request("GET", "/keys?show=unused&q=unused&done=deleted", nil).Body.String(); !strings.Contains(page, `href="/keys?desc=1&amp;q=unused&amp;show=unused&amp;sort=today"`) || strings.Contains(page, "sort=today&amp;done") || strings.Contains(page, "done=deleted&amp;") {
+		t.Fatalf("sort link:\n%s", page)
+	}
+	unused := e.request("GET", "/keys?show=unused", nil).Body.String()
+	if got := rowOrder(unused); strings.Join(got, ",") != "AAA_UNUSED_KEY,ZZZ_UNUSED_KEY" || !strings.Contains(unused, `Unused <b>2</b>`) {
+		t.Fatalf("unused filter: %v", got)
+	}
+	// Replacing a value moves its date; a test result does not wipe it.
+	*e.now = e.now.Add(20 * time.Minute)
+	e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {newValue}, "password": {password}})
+	e.request("POST", "/keys/API_KEY/test", url.Values{})
+	meta, err := e.backend.loadMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := meta["API_KEY"]; m.UpdatedAt == nil || !m.UpdatedAt.Equal(e.now.UTC()) || m.Status != "working" {
+		t.Fatalf("after replace and test: %+v", m)
+	}
+	if got := rowOrder(e.request("GET", "/keys?show=working", nil).Body.String()); strings.Join(got, ",") != "API_KEY" {
+		t.Fatalf("working filter: %v", got)
 	}
 }
