@@ -246,3 +246,39 @@ func TestUpgradeNeedsRootOnTheMac(t *testing.T) {
 		t.Fatalf("non-root upgrade: exit %d: %s", code, out)
 	}
 }
+
+func TestUpgradeRefusesAssetURLsThatLeaveTheRelease(t *testing.T) {
+	for _, suffix := range []string{"../v0.6.0/", "%2e%2e/v0.6.0/", "x/../"} {
+		t.Run(suffix, func(t *testing.T) {
+			f := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries())}
+			f.start(t)
+			f.assetBase = downloadBase + "v0.7.0/" + suffix
+			if code, out := runUpgrade(t); code == 0 || f.downloads != 0 {
+				t.Fatalf("asset URL with %q was fetched (exit %d, downloads %d): %s", suffix, code, f.downloads, out)
+			}
+		})
+	}
+}
+
+// GitHub's "latest" is the most recently published release, so a patch to an
+// older line published after a newer release must not silently downgrade.
+func TestUpgradeDoesNotDowngradeToAnOlderLatestUnlessAsked(t *testing.T) {
+	f := &fakeGitHub{tag: "v0.5.9", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries())}
+	f.start(t)
+	version = "v0.10.0"
+	if code, out := runUpgrade(t); code == 0 || f.installed != nil || !strings.Contains(out, "--version v0.5.9") {
+		t.Fatalf("latest v0.5.9 over installed v0.10.0: exit %d, installed %v: %s", code, f.installed, out)
+	}
+	if code, out := runUpgrade(t, "--version", "v0.5.9"); code != 0 || f.installed == nil {
+		t.Fatalf("an explicit --version must go back: exit %d: %s", code, out)
+	}
+}
+
+func TestUpgradeFromADevBuildInstallsTheLatest(t *testing.T) {
+	f := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries())}
+	f.start(t)
+	version = "dev"
+	if code, out := runUpgrade(t); code != 0 || f.installed == nil {
+		t.Fatalf("dev build: exit %d: %s", code, out)
+	}
+}

@@ -236,10 +236,10 @@ install -d -m 755 -o root -g wheel /usr/local/libexec
 install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
 # The one-command upgrade: sudo keyring-upgrade. It checks the next release
 # against GitHub itself and runs that release's install.sh (see README.md).
-# Only in a /usr/local/bin that root alone can write (Homebrew owns it on
+# Only in a /usr/local/bin that root alone can write, up to / (Homebrew owns it on
 # some Macs); otherwise use: sudo /usr/local/libexec/keyring upgrade
 [ -d /usr/local/bin ] || install -d -m 755 -o root -g wheel /usr/local/bin
-if [ ! -L /usr/local/bin ] && trusted /usr/local/bin; then
+if [ ! -L /usr/local/bin ] && trusted_tree /usr/local/bin >/dev/null; then
 	UPGRADE_TMP=$(mktemp /usr/local/bin/.keyring-upgrade.XXXXXX)
 	printf '#!/bin/sh\nexec %s upgrade "$@"\n' "$BIN" >"$UPGRADE_TMP"
 	chown root:wheel "$UPGRADE_TMP"

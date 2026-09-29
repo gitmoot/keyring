@@ -21,7 +21,8 @@ sudo keyring-upgrade
 ```
 
 It asks GitHub itself (never the agents' server) for the latest release,
-refuses it unless the release workflow (`github-actions`) published it,
+refuses it unless a GitHub Actions workflow of this repo (`github-actions`)
+published it, refuses an older release than the one installed,
 downloads the archive and that release's `SHA256SUMS` from the release page,
 refuses the archive unless its SHA-256 matches, and then runs the release's own
 `install.sh` from a directory only root can write. It is the check in step 3
@@ -162,9 +163,9 @@ sudo dscl . -delete /Users/_keyring && sudo dscl . -delete /Groups/_keyring
 
 The keyring can only be as trustworthy as the `main` branch it is built from.
 Agents can open and merge pull requests, so a malicious change would have to
-get past review and be released. `keyring-upgrade` installs whatever the
-release workflow built from `main`, so read the release's changes before you
-run it.
+get past review and be released. `keyring-upgrade` installs a release any
+workflow on `main` published (normally `release.yml`, which builds only tags on
+`main`), so read the release's changes before you run it.
 
 Anyone who can run code as your own Mac user while you are logged in to the
 dashboard could use the browser session to look at key names and usage; every

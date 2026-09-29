@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,10 +26,13 @@ import (
 // (-ldflags "-X main.version=vX.Y.Z"). A local build says "dev".
 var version = "dev"
 
-// The upgrade trusts exactly what the owner used to check by hand: the
-// release page on github.com, published by the release workflow (which
-// builds only tags on main). It fetches the release and its SHA256SUMS from
-// GitHub itself, never from the agents' server.
+// The upgrade trusts what the owner used to check by hand: the release page
+// on github.com and its SHA256SUMS, fetched from GitHub itself, never from
+// the agents' server. The publisher check proves only that a GitHub Actions
+// token in this repo published the release, not that release.yml (which
+// builds only tags on main) did: a workflow merged into main could publish
+// one too. That is no wider than today, since such a merge could change
+// release.yml itself.
 var (
 	releasesAPI   = "https://api.github.com/repos/gitmoot/keyring/releases"
 	downloadBase  = "https://github.com/gitmoot/keyring/releases/download/"
@@ -93,9 +97,16 @@ func upgrade(want string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err := checkRelease(rel, want); err != nil {
 		return err
 	}
-	if want == "" && rel.TagName == version {
-		fmt.Fprintf(stdout, "already up to date: %s\n", version)
-		return nil
+	if want == "" && releaseTag.MatchString(version) {
+		switch c := compareTags(rel.TagName, version); {
+		case c == 0:
+			fmt.Fprintf(stdout, "already up to date: %s\n", version)
+			return nil
+		case c < 0:
+			// GitHub's "latest" is the most recently published release,
+			// not the highest version.
+			return fmt.Errorf("the latest release %s is older than the installed %s; nothing installed (to go back on purpose: --version %s)", rel.TagName, version, rel.TagName)
+		}
 	}
 	archiveName := "keyring-" + rel.TagName + "-darwin-arm64.tar.gz"
 	sumsURL, archiveURL, err := releaseAssets(rel, archiveName)
@@ -149,27 +160,42 @@ func checkRelease(rel githubRelease, want string) error {
 	return nil
 }
 
-// releaseAssets returns the download URLs of SHA256SUMS and the archive, both
-// required to live under this release's tag on github.com.
+// releaseAssets returns the download URLs of SHA256SUMS and the archive. Each
+// must be exactly <downloadBase><tag>/<name>, the address GitHub gives this
+// release's assets; anything else (another host, another release, a ../) is
+// refused.
 func releaseAssets(rel githubRelease, archiveName string) (sums, archive string, err error) {
 	base := downloadBase + rel.TagName + "/"
+	found := map[string]bool{}
 	for _, a := range rel.Assets {
-		switch a.Name {
-		case "SHA256SUMS":
-			sums = a.URL
-		case archiveName:
-			archive = a.URL
+		if a.Name != "SHA256SUMS" && a.Name != archiveName {
+			continue
 		}
+		if a.URL != base+a.Name {
+			return "", "", fmt.Errorf("asset %s is at %s, not %s", a.Name, a.URL, base+a.Name)
+		}
+		found[a.Name] = true
 	}
-	if sums == "" || archive == "" {
+	if !found["SHA256SUMS"] || !found[archiveName] {
 		return "", "", fmt.Errorf("release %s lacks SHA256SUMS or %s", rel.TagName, archiveName)
 	}
-	for _, u := range []string{sums, archive} {
-		if !strings.HasPrefix(u, base) {
-			return "", "", fmt.Errorf("asset %s is not under %s", u, base)
+	return base + "SHA256SUMS", base + archiveName, nil
+}
+
+// compareTags compares two vX.Y.Z tags numerically: -1, 0 or 1.
+func compareTags(a, b string) int {
+	pa, pb := strings.Split(a[1:], "."), strings.Split(b[1:], ".")
+	for i := range 3 {
+		x, _ := strconv.Atoi(pa[i])
+		y, _ := strconv.Atoi(pb[i])
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
 		}
 	}
-	return sums, archive, nil
+	return 0
 }
 
 // sumFor finds name's sha256 in a sha256sum listing.
