@@ -12,7 +12,28 @@ run from anywhere else.
 The examples use `192.0.2.10` for the Mac and `192.0.2.20` for the agents'
 server; use your own addresses (for example their tailnet IPs).
 
-## Install or upgrade
+## Upgrade (one command)
+
+From v0.7.0 on, at the Mac:
+
+```sh
+sudo keyring-upgrade
+```
+
+It asks GitHub itself (never the agents' server) for the latest release,
+refuses it unless a GitHub Actions workflow of this repo (`github-actions`)
+published it, refuses an older release than the one installed,
+downloads the archive and that release's `SHA256SUMS` from the release page,
+refuses the archive unless its SHA-256 matches, and then runs the release's own
+`install.sh` from a directory only root can write. It is the check in step 3
+below, done for you. To go back to an older release:
+`sudo keyring-upgrade --version v0.7.0`. To see what is installed:
+`/usr/local/libexec/keyring version`.
+
+If `/usr/local/bin` is not root-only (e.g. Homebrew owns it), `install.sh` does
+not add the `keyring-upgrade` shortcut; run `sudo /usr/local/libexec/keyring upgrade`.
+
+## First install (or upgrade by hand)
 
 1. **In your own browser** (not through an agent), open the release on
    <https://github.com/gitmoot/keyring/releases>. Check that:
@@ -142,8 +163,9 @@ sudo dscl . -delete /Users/_keyring && sudo dscl . -delete /Groups/_keyring
 
 The keyring can only be as trustworthy as the `main` branch it is built from.
 Agents can open and merge pull requests, so a malicious change would have to
-get past review and be released. Read the release's changes before an
-upgrade.
+get past review and be released. `keyring-upgrade` installs a release any
+workflow on `main` published (normally `release.yml`, which builds only tags on
+`main`), so read the release's changes before you run it.
 
 Anyone who can run code as your own Mac user while you are logged in to the
 dashboard could use the browser session to look at key names and usage; every

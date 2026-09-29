@@ -234,6 +234,20 @@ make_user() { # $1: name, $2: real name
 # 2. The binary: owned by root, so the service cannot rewrite itself.
 install -d -m 755 -o root -g wheel /usr/local/libexec
 install -m 755 -o root -g wheel "$BIN_SRC" "$BIN"
+# The one-command upgrade: sudo keyring-upgrade. It checks the next release
+# against GitHub itself and runs that release's install.sh (see README.md).
+# Only in a /usr/local/bin that root alone can write, up to / (Homebrew owns it on
+# some Macs); otherwise use: sudo /usr/local/libexec/keyring upgrade
+[ -d /usr/local/bin ] || install -d -m 755 -o root -g wheel /usr/local/bin
+if [ ! -L /usr/local/bin ] && trusted_tree /usr/local/bin >/dev/null; then
+	UPGRADE_TMP=$(mktemp /usr/local/bin/.keyring-upgrade.XXXXXX)
+	printf '#!/bin/sh\nexec %s upgrade "$@"\n' "$BIN" >"$UPGRADE_TMP"
+	chown root:wheel "$UPGRADE_TMP"
+	chmod 755 "$UPGRADE_TMP"
+	mv -f "$UPGRADE_TMP" /usr/local/bin/keyring-upgrade
+else
+	echo "note: /usr/local/bin is not root-only; upgrade with: sudo $BIN upgrade"
+fi
 
 # 3. Rules (root-owned, readable by the service) and data (the service's own).
 install -d -m 750 -o root -g "$NAME" "$DIR"

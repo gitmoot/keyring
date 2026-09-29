@@ -47,6 +47,9 @@ const usage = `Usage:
                                              ask the owner for full access to services (approved in the dashboard)
   keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
                                              on the agent machine: forward /<role>/<service>/... to the keyring
+  keyring upgrade [--version vX.Y.Z]        on the Mac, as root (sudo keyring-upgrade): install the latest
+                                             release from GitHub after checking its SHA-256 (or go to vX.Y.Z)
+  keyring version                            print this build's release tag
 `
 
 func main() {
@@ -76,6 +79,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	newTokens := fs.String("new", "", "request: a new agent; make or reuse <dir>/<role>.token and send its sha256")
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
+	upgradeTo := fs.String("version", "", "upgrade: install this release tag instead of the latest")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -170,6 +174,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = runRelay(*listen, *upstream, *tokensDir, stderr)
+	case "upgrade":
+		if fs.NArg() != 0 {
+			fmt.Fprintln(stderr, "keyring upgrade: takes only --version")
+			return 2
+		}
+		err = upgrade(*upgradeTo, stdin, stdout, stderr)
+	case "version":
+		fmt.Fprintln(stdout, version)
 	default:
 		fmt.Fprintf(stderr, "keyring: unknown command %q\n\n%s", cmd, usage)
 		return 2
