@@ -27,9 +27,10 @@ import (
 
 // Auth kinds: how a service expects its key.
 const (
-	AuthBearer = "bearer" // Authorization: Bearer <key>
-	AuthHeader = "header" // <Header>: <key>
-	AuthQuery  = "query"  // ?<Param>=<key>
+	AuthBearer       = "bearer"         // Authorization: Bearer <key>
+	AuthHeader       = "header"         // <Header>: <key>
+	AuthQuery        = "query"          // ?<Param>=<key>
+	AuthAppleAdsSign = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -88,17 +89,25 @@ type Config struct {
 
 type Service struct {
 	// Base is the API origin (and optional base path) requests are sent to.
-	Base   string `json:"base"`
+	Base   string `json:"base,omitempty"`
 	Key    string `json:"key"`
 	Auth   string `json:"auth"`
 	Header string `json:"header,omitempty"`
 	Param  string `json:"param,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
 	// key works (the dashboard's Test button). TestPath may carry a query.
-	TestMethod string `json:"test_method,omitempty"`
-	TestPath   string `json:"test_path,omitempty"`
+	TestMethod string    `json:"test_method,omitempty"`
+	TestPath   string    `json:"test_path,omitempty"`
+	AppleAds   *AppleAds `json:"apple_ads,omitempty"`
 
 	base *url.URL
+}
+
+// AppleAds fixes the public identity of the Apple Ads client secret.
+type AppleAds struct {
+	ClientID string `json:"client_id"`
+	TeamID   string `json:"team_id"`
+	KeyID    string `json:"key_id"`
 }
 
 type Role struct {
@@ -299,10 +308,20 @@ func (c *Config) Validate() error {
 		if !serviceName.MatchString(name) {
 			return fmt.Errorf("service %q: use lowercase letters, digits and -", name)
 		}
+		if svc.Auth == AuthAppleAdsSign && name != "apple-ads" {
+			return errors.New("apple-ads-sign requires service name apple-ads")
+		}
 		if err := svc.validate(); err != nil {
 			return fmt.Errorf("service %s: %w", name, err)
 		}
 		c.Services[name] = svc
+	}
+	if signer, ok := c.Services["apple-ads"]; ok && signer.Auth == AuthAppleAdsSign {
+		for name, svc := range c.Services {
+			if name != "apple-ads" && svc.Key == signer.Key {
+				return errors.New("an Apple Ads signing key cannot be used by a proxy service")
+			}
+		}
 	}
 	seen := map[string]string{}
 	for name, role := range c.Roles {
@@ -329,6 +348,27 @@ func (c *Config) Validate() error {
 }
 
 func (s *Service) validate() error {
+	if s.Auth == AuthAppleAdsSign {
+		if !store.ValidName(s.Key) {
+			return errors.New("apple-ads-sign needs a valid key name")
+		}
+		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" {
+			return errors.New("apple-ads-sign cannot have proxy or test settings")
+		}
+		if s.AppleAds == nil {
+			return errors.New("apple-ads-sign needs apple_ads identity")
+		}
+		for _, value := range []string{s.AppleAds.ClientID, s.AppleAds.TeamID, s.AppleAds.KeyID} {
+			if value == "" || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+				return errors.New("apple_ads identity fields must be nonempty printable ASCII without spaces, at most 256 bytes")
+			}
+		}
+		s.base = nil
+		return nil
+	}
+	if s.AppleAds != nil {
+		return errors.New("apple_ads identity requires apple-ads-sign")
+	}
 	u, err := url.Parse(s.Base)
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("base %q is not a URL", s.Base)

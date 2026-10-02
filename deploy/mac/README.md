@@ -149,6 +149,86 @@ sudo launchctl kickstart -k system/org.gitmoot.keyring  # restart after changing
 sudo tail -f "$D/data/audit.log"
 ```
 
+## Apple Ads signing upgrade and key import
+
+This requires a reviewed release containing `apple-ads-sign` and
+`keyring set --file`; v0.7.0 does not contain them. Do not enable the service
+before upgrading. No App Store Connect keys or services are migrated.
+
+1. On the Mac, install the approved tagged release (replace `REVIEWED_RELEASE`
+   with its actual tag):
+
+   ```sh
+   sudo keyring-upgrade --version REVIEWED_RELEASE
+   ```
+
+   If the wrapper is unavailable, use the root-owned binary directly:
+   `sudo /usr/local/libexec/keyring upgrade --version REVIEWED_RELEASE`.
+   The updater fetches and verifies the release against GitHub and runs its
+   installer from a root-only directory. Do not run a helper or installer
+   from an agent-writable checkout or `/tmp` as root.
+
+2. The owner imports the existing Apple Ads P-256 PEM directly into the Mac
+   key store. Do not paste it into the dashboard's single-line field or use
+   interactive `keyring set`, which reads only one line. Given an existing,
+   owner-controlled mode-600 source file in a private directory on the Mac:
+
+   ```sh
+   sudo cat /var/root/PRIVATE_DIRECTORY/EXISTING_APPLE_ADS_KEY.p8 |
+     sudo -u _keyring /usr/local/libexec/keyring set \
+       --store "/Library/Application Support/keyring/data/keys.json" \
+       --file /dev/stdin APPLE_ADS_PRIVATE_KEY
+   ```
+
+   Substitute the actual protected source path; this example is not a
+   direction to create or stage another private-key copy. The pipe is private;
+   no value is printed, passed in argv, staged in `/tmp`, or sent to an agent.
+   For an existing private file readable by `_keyring`, `--file /absolute/path`
+   may be used directly. The file must be regular, not a symlink, and have no
+   group/other permission bits. `/dev/stdin` accepts a private pipe or private
+   redirected file, not a terminal. Input is preserved verbatim, bounded to
+   1 MiB, and empty, unsafe or unreadable input leaves the store unchanged.
+   Do not use shell tracing, `tee`, debug logging or commands that echo the PEM.
+
+3. Merge the fixed identity and sign-only service from
+   [the API documentation](../../README.md#apple-ads-signing-not-an-api-proxy)
+   into `data/access.json`; grant only explicitly approved roles `POST` on
+   the service path `/`, with the approved limits/expiry. No `base` or test
+   request is permitted. Existing roles and services must remain unchanged.
+   Then validate and reload:
+
+   ```sh
+   sudo -u _keyring /usr/local/libexec/keyring check \
+     --config "/Library/Application Support/keyring/rules.json" \
+     --store "/Library/Application Support/keyring/data/keys.json"
+   sudo launchctl kill SIGHUP system/org.gitmoot.keyring
+   ```
+
+   Configuration checking alone does not prove the PEM can sign. The signer
+   parses keys on snapshot load and fails closed on missing or invalid keys.
+   Dashboard Test is intentionally unavailable for this service.
+
+4. Set each approved caller's role-specific `APPLE_ADS_SIGN_URL`, remove its
+   private-key fallback, and verify a real signing request, Apple OAuth
+   exchange and approved read-only API request without logging tokens.
+   A Docker caller needs the separately configured loopback relay sidecar.
+   Preserve all campaign holds. Only after the owner verifies the migrated
+   callers should their obsolete local private-key copies be retired; retain
+   the required Mac store entry. Do not change Apple's credentials or
+   permissions as part of this migration.
+
+**Rollback:** first stop migrated callers, remove their Apple Ads grants and
+the sign-only service from the access file, validate and reload while still
+running the new release. An older release rejects the new auth configuration.
+If a binary downgrade is needed, pin the previously approved release with
+`sudo keyring-upgrade --version PREVIOUS_RELEASE`. Keep the private key
+confined to the Mac and do not restore raw-key caller fallbacks. Removing a
+grant stops new signatures, not previously issued Apple OAuth tokens; their
+approximately one-hour lifetime is not bounded by the JWT's 20-minute expiry.
+Signing permission carries the underlying key's Apple privileges, not a
+keyring-enforced read-only Apple scope.
+
+
 ## Undo
 
 ```sh

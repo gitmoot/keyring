@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"io"
@@ -52,8 +53,9 @@ type Handler struct {
 }
 
 type snapshot struct {
-	config *policy.Config
-	keys   map[string]string
+	config     *policy.Config
+	keys       map[string]string
+	signingKey *ecdsa.PrivateKey
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -84,7 +86,11 @@ func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 // validated. Requests already running keep what they started with; daily
 // counts carry over.
 func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
-	h.snap.Store(&snapshot{config: config, keys: keys})
+	snap := &snapshot{config: config, keys: keys}
+	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
+		snap.signingKey = parseAppleAdsKey(keys[svc.Key])
+	}
+	h.snap.Store(snap)
 }
 
 type auditRecord struct {
@@ -184,6 +190,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service, rest, ok := splitPath(r.URL)
+	signing := r.URL.Path == appleAdsSignPath
+	if signing {
+		service, rest, ok = "apple-ads", "/", true
+	}
 	rec.Service, rec.Path = service, rest
 	if !ok {
 		fail(http.StatusBadRequest, "path must be /<service>/<path> in plain printable ASCII, without .., ;, % after decoding, or encoded / . \\")
@@ -197,6 +207,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if access.Expired(start) {
 		fail(http.StatusForbidden, "access to this service expired")
+		return
+	}
+	if signing {
+		if r.URL.EscapedPath() != appleAdsSignPath || r.URL.RawQuery != "" || r.URL.ForceQuery {
+			fail(http.StatusBadRequest, "signing requires the exact path without a query")
+			return
+		}
+		if r.Method != http.MethodPost {
+			fail(http.StatusMethodNotAllowed, "signing requires POST")
+			return
+		}
+		var probe [1]byte
+		if n, err := io.ReadFull(r.Body, probe[:]); n != 0 || err != io.EOF {
+			fail(http.StatusBadRequest, "signing requires an empty body")
+			return
+		}
+		if svc.Auth != policy.AuthAppleAdsSign {
+			fail(http.StatusForbidden, "service is not configured for signing")
+			return
+		}
+	} else if svc.Auth == policy.AuthAppleAdsSign {
+		fail(http.StatusForbidden, "sign-only service cannot proxy requests")
 		return
 	}
 	if !access.AllowsMethod(r.Method) {
@@ -214,6 +246,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.take(roleName, service, access.DailyRequests, start) {
 		fail(http.StatusTooManyRequests, "daily limit reached")
+		return
+	}
+	if signing {
+		token, expires, err := signAppleAds(snap.signingKey, svc.AppleAds, role, access, start)
+		if err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "Apple Ads signing unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		rec.Status = http.StatusOK
+		sink := &countingWriter{w: w}
+		_ = json.NewEncoder(sink).Encode(struct {
+			Token     string `json:"token"`
+			ExpiresAt string `json:"expires_at"`
+		}{token, expires.UTC().Format(time.RFC3339)})
+		rec.Bytes = sink.n
 		return
 	}
 
@@ -290,6 +340,9 @@ var errBadQuery = errors.New("malformed query string")
 // the query, and the key placed the way the service expects. The proxy and
 // the key test both use it.
 func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, rawQuery string, header http.Header, body io.Reader, length int64) (*http.Request, error) {
+	if svc.Auth == policy.AuthAppleAdsSign {
+		return nil, errors.New("sign-only service cannot proxy requests")
+	}
 	target := svc.BaseURL()
 	target.Path = strings.TrimSuffix(target.Path, "/") + rest
 	target.RawPath = ""
@@ -324,6 +377,9 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 // TestKey sends the service's test request with key and returns the status
 // code. It never returns the reply body, which could echo the key.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
+	if svc.Auth == policy.AuthAppleAdsSign {
+		return 0, errors.New("sign-only service has no upstream test")
+	}
 	if svc.TestPath == "" {
 		return 0, errors.New("the service has no test request")
 	}

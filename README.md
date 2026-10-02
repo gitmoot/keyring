@@ -3,6 +3,10 @@
 Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
 so a key never reaches the machine where agents run.
 
+Apple Ads can instead use **sign-only** access: the Mac signs a short-lived
+client-secret JWT, while its private key stays in the keyring. This does not
+migrate App Store Connect.
+
 Status: the service, the relay and the Mac installer are done and in use; the dashboard is #15. Plan and steps: #1.
 
 ## Why
@@ -90,6 +94,97 @@ There are two settings files.
 A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
 
 `SIGHUP` re-reads the rules file, the access file and the keys. A change to `allow_sources` applies at once; a changed `listen`, `audit_log` or `access_file`, or an invalid file, is refused, and the previous settings stay in use. Daily counts carry over.
+
+### Apple Ads signing (not an API proxy)
+
+Configure this service in the access file; these three identifiers are public,
+fixed configuration, never caller-supplied claims:
+
+```json
+{
+  "services": {
+    "apple-ads": {
+      "key": "APPLE_ADS_PRIVATE_KEY",
+      "auth": "apple-ads-sign",
+      "apple_ads": {
+        "client_id": "SEARCHADS.your-client-id",
+        "team_id": "YOUR_TEAM_ID",
+        "key_id": "YOUR_KEY_ID"
+      }
+    }
+  }
+}
+```
+
+Merge it into the existing access file; do not replace existing roles or services.
+Store the full unencrypted P-256 PEM under `APPLE_ADS_PRIVATE_KEY` with the
+bounded, non-echoing `keyring set --file` import described in
+[the Mac operator instructions](deploy/mac/README.md#apple-ads-signing-upgrade-and-key-import).
+PKCS#8 `PRIVATE KEY` and SEC1 `EC PRIVATE KEY` encodings are supported.
+`base`, `header`, `param`, `test_method`, and `test_path` must be absent.
+No other service may share this signing key, and no other service name may
+use `apple-ads-sign`. Dashboard access edits preserve its identity; dashboard
+**Test** is unavailable because this service has no upstream.
+
+A separately approved role needs `POST` permission on service `apple-ads` path
+`/`, for example `"apple-ads": {"methods":["POST"],"paths":["/"]}` inside that
+role's `access` map. Its token, allowed source, role/service expiry, daily
+request limit and audit checks apply as for proxy calls.
+
+Call `POST /_keyring/sign/apple-ads` on the keyring with `X-Keyring-Token`, or
+`POST /<role>/_keyring/sign/apple-ads` through the loopback relay. The request
+must have **zero body bytes** (not even `{}` or whitespace), no query string
+(not even a bare `?`), and the exact unencoded path. The caller config is
+`APPLE_ADS_SIGN_URL=http://127.0.0.1:7700/<role>/_keyring/sign/apple-ads`.
+The relay supplies the role token; never put it in that URL.
+
+The JSON response is `{"token":"<JWT>","expires_at":"<RFC3339 UTC time>"}`
+with `Cache-Control: no-store`. Its ES256 header uses the fixed key ID.
+Claims are `iss=team_id`, `sub=client_id`,
+`aud=https://appleid.apple.com`, `iat=server time`, and `exp` at most
+20 minutes later and no later than either access expiry. Expiry is rounded
+down to whole seconds; if no positive validity window remains, signing fails.
+The caller retains its public client ID and exchanges the JWT at
+`https://appleid.apple.com/auth/oauth2/token` with
+`grant_type=client_credentials`, `scope=searchadsorg`, `client_id` and
+`client_secret=<JWT>`. There is no private-key fallback.
+
+Missing, malformed, encrypted or non-P-256 keys fail closed with a generic
+503; claims/body/query errors never reach a signer. Wrong methods, expired or
+unauthorized roles/access, proxy requests to `/apple-ads/...`, and dashboard
+Test requests cannot send the PEM upstream. Neither PEM, JWT nor caller body
+is written to audit. Tokens themselves remain sensitive and must not be logged.
+
+**Scope warning:** a signing grant lets its holder obtain an Apple OAuth token
+with the underlying key's Apple privileges. Keyring methods/paths restrict
+signing, **not subsequent direct Apple API requests**. The 20-minute JWT bound
+does not shorten Apple's approximately one-hour OAuth token lifetime, and
+revoking a role does not revoke already issued Apple tokens. A sign-only role
+is not an Apple read-only scope. Existing campaign holds remain operational
+requirements. No App Store Connect migration is included.
+
+A Docker caller needs a separate relay sharing its loopback network namespace;
+`127.0.0.1` in a container is not host loopback. Keep role-token files only in
+the relay, and do not deploy or grant another role without owner approval.
+
+Build the token-only relay image from the reviewed keyring checkout:
+
+```sh
+docker build -f deploy/relay.Dockerfile --build-arg VERSION=REVIEWED_RELEASE \
+  -t keyring-relay:REVIEWED_RELEASE .
+```
+
+Replace `REVIEWED_RELEASE` with the release being installed; the build uses
+this checkout's source, not a downloaded binary. The image includes a static
+keyring and CA bundle, runs as UID/GID `65532:65532`, and its entrypoint is
+`/usr/local/bin/keyring relay`. Supply the flags
+`--listen 127.0.0.1:7700 --upstream https://KEYRING_HOST:7701 --tokens /run/keyring/tokens`
+(use the existing approved upstream URL and scheme, not a guessed address).
+Mount only the caller's role-token directory read-only, owned by UID 65532,
+directory mode 0700 and token mode 0600. It contains no Apple private key.
+Join the caller's network namespace instead of publishing relay ports.
+Building this image does not deploy it or authorize a role.
+
 
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
 - accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;

@@ -135,6 +135,9 @@ func isFull(a policy.Access) bool {
 
 // providerOf names the API a service calls, from the built-in presets.
 func providerOf(svc policy.Service) string {
+	if svc.Auth == policy.AuthAppleAdsSign {
+		return "Apple Ads (sign only)"
+	}
 	for _, p := range presets {
 		if strings.TrimSuffix(svc.Base, "/") == strings.TrimSuffix(p.Base, "/") {
 			return p.Label
@@ -664,7 +667,7 @@ func (b *Backend) testService(name string) string {
 	cfg := b.Proxy.Config()
 	var names []string
 	for sname, svc := range cfg.Services {
-		if svc.Key == name && svc.TestPath != "" {
+		if svc.Key == name && svc.Auth != policy.AuthAppleAdsSign && svc.TestPath != "" {
 			names = append(names, sname)
 		}
 	}
