@@ -39,7 +39,7 @@ const usage = `Usage:
                                              turn the dashboard on (loopback only; kept if already on)
   keyring admin-password --config FILE [--if-missing]
                                              set the dashboard password (asked twice, not shown)
-  keyring set --store FILE NAME              add or replace a key; the value is read from stdin
+  keyring set --store FILE [--file PATH] NAME add or replace a key; --file imports up to 1 MiB without echo
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
   keyring new-token                          make a role token and its hash for the rules file
@@ -80,7 +80,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	upgradeTo := fs.String("version", "", "upgrade: install this release tag instead of the latest")
+	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
 	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if *secretFile != "" && cmd != "set" {
+		fmt.Fprintln(stderr, "--file is only supported by keyring set")
 		return 2
 	}
 	need := func(flags ...string) bool {
@@ -130,7 +135,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		var value string
-		if value, err = readSecret(stdin, stderr, fs.Arg(0)); err == nil {
+		if *secretFile != "" {
+			value, err = readSecretFile(*secretFile, stdin)
+		} else {
+			value, err = readSecret(stdin, stderr, fs.Arg(0))
+		}
+		if err == nil {
 			err = store.Set(*storePath, fs.Arg(0), value)
 		}
 		if err == nil {

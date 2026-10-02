@@ -206,6 +206,7 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target.RawQuery = r.URL.RawQuery
+	target.ForceQuery = r.URL.ForceQuery
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
 	if err != nil {
 		http.Error(w, "relay: bad request", http.StatusBadRequest)
