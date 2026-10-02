@@ -182,6 +182,8 @@ keyring and CA bundle, runs as UID/GID `65532:65532`, and its entrypoint is
 (use the existing approved upstream URL and scheme, not a guessed address).
 Mount only the caller's role-token directory read-only, owned by UID 65532,
 directory mode 0700 and token mode 0600. It contains no Apple private key.
+The image pre-creates `/run/keyring` owned by UID 65532: the relay checks
+ownership of both the token directory and its parent before starting.
 Join the caller's network namespace instead of publishing relay ports.
 Building this image does not deploy it or authorize a role.
 
