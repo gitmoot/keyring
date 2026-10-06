@@ -228,6 +228,42 @@ approximately one-hour lifetime is not bounded by the JWT's 20-minute expiry.
 Signing permission carries the underlying key's Apple privileges, not a
 keyring-enforced read-only Apple scope.
 
+## App Store Connect signing
+
+Install a reviewed release containing `app-store-connect-sign` before adding
+the service; v0.8.0 supports only Apple Ads signing. This is a separate
+migration, not a reuse of the Apple Ads private key or grant.
+
+1. Upgrade with `sudo keyring-upgrade --version REVIEWED_RELEASE`, following
+   the root-owned updater rules above. Keep the previous tag for rollback.
+2. The owner imports the existing App Store Connect P-256 `.p8` file from a
+   protected location on the Mac. Use the same non-echoing `keyring set --file`
+   procedure above, with store name `APP_STORE_CONNECT_PRIVATE_KEY`. Never
+   send the key to an agent or stage it in a disposable directory.
+3. Merge the `appstoreconnect` service from
+   [the API documentation](../../README.md#app-store-connect-signing) into
+   `data/access.json`, preserving all other services and roles. Configure the
+   App Store Connect issuer ID and key ID, not the Apple Ads team/client ID.
+   Grant the approved role only `POST` on `/` for signing, with an explicit
+   expiry and request limit when access is for a single release.
+4. Run `keyring check` against the existing rules and store as `_keyring`,
+   then `sudo launchctl kill SIGHUP system/org.gitmoot.keyring`.
+5. Through the caller's loopback relay, make an empty `POST` to
+   `/<role>/_keyring/sign/appstoreconnect`. Without printing the token, use it
+   to make an approved App Store Connect read request. Verify the response
+   names the intended app before submitting a release. A key listing,
+   configuration check or successful signature alone does not prove Apple
+   accepts the credential.
+
+**Rollback:** stop the migrated caller, remove its App Store Connect signing
+grant and service, validate and reload before downgrading. Older binaries
+reject this configuration. Pin the previous reviewed tag with the root-owned
+updater if needed; do not restore a caller-side private-key fallback. Existing
+App Store tokens remain usable until their expiry (at most 20 minutes), even
+after the signing grant is removed. The grant carries the Apple key's full
+permissions, not a keyring-enforced per-app scope.
+
+
 
 ## Undo
 

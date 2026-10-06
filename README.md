@@ -3,9 +3,9 @@
 Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
 so a key never reaches the machine where agents run.
 
-Apple Ads can instead use **sign-only** access: the Mac signs a short-lived
-client-secret JWT, while its private key stays in the keyring. This does not
-migrate App Store Connect.
+Apple Ads and App Store Connect also support **sign-only** access: the Mac
+signs a short-lived JWT while the private key stays in the keyring. They use
+separate services, identities, keys and role grants.
 
 Status: the service, the relay and the Mac installer are done and in use; the dashboard is #15. Plan and steps: #1.
 
@@ -161,7 +161,56 @@ signing, **not subsequent direct Apple API requests**. The 20-minute JWT bound
 does not shorten Apple's approximately one-hour OAuth token lifetime, and
 revoking a role does not revoke already issued Apple tokens. A sign-only role
 is not an Apple read-only scope. Existing campaign holds remain operational
-requirements. No App Store Connect migration is included.
+requirements. An Apple Ads grant does not authorize App Store Connect signing.
+
+### App Store Connect signing
+
+App Store Connect uses a separate P-256 API key and issuer, not the Apple Ads
+client identity. Configure the fixed public identity in the access file:
+
+```json
+{
+  "services": {
+    "appstoreconnect": {
+      "key": "APP_STORE_CONNECT_PRIVATE_KEY",
+      "auth": "app-store-connect-sign",
+      "app_store_connect": {
+        "issuer_id": "YOUR_APP_STORE_CONNECT_ISSUER_ID",
+        "key_id": "YOUR_APP_STORE_CONNECT_KEY_ID"
+      }
+    }
+  }
+}
+```
+
+Import the private key only on the Mac using the protected-file procedure in
+[the Mac deployment guide](deploy/mac/README.md#app-store-connect-signing).
+Grant an approved role `POST` on this service's `/` path. A temporary release
+grant should have an explicit expiry and request limit. Neither an Apple Ads
+grant nor a proxy grant permits this signer.
+
+The caller sends an empty `POST` through its loopback relay to
+`/<role>/_keyring/sign/appstoreconnect`. The keyring route is
+`/_keyring/sign/appstoreconnect`. As with Apple Ads, request bodies, query
+strings and encoded paths are refused; no caller supplies JWT claims.
+The `no-store` JSON response contains `token` and `expires_at`.
+
+The token has an ES256 header with the configured `kid`, and fixed claims:
+`iss=issuer_id`, `aud=appstoreconnect-v1`, `iat=server time`, and `exp` at most
+20 minutes later, further bounded by the role and grant expiry. It has no
+Apple Ads `sub` claim. Use this token as `Authorization: Bearer <token>` in
+direct calls to `https://api.appstoreconnect.apple.com`; there is no OAuth
+exchange. Refresh it by requesting another signature, never by loading a
+private key locally. Keep tokens out of command arguments, logs and receipts.
+
+**Signing authority is not API path authority.** This grants the underlying
+key's Apple permissions, not access to one app or a read-only Apple scope.
+Keyring path/method rules restrict token issuance, not subsequent Apple API
+calls. Removing a grant stops new signatures; already issued App Store
+tokens remain usable until expiry. No `base`, proxy/test settings, mixed
+Apple identities, or key reuse by another service are allowed. Dashboard
+Test remains unavailable so it cannot send a PEM upstream.
+
 
 A Docker caller needs a separate relay sharing its loopback network namespace;
 `127.0.0.1` in a container is not host loopback. Keep role-token files only in
