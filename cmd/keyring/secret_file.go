@@ -4,7 +4,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"strings"
+	"syscall"
 )
 
 // readSecretFile preserves multiline values, unlike the interactive one-line
@@ -15,8 +17,19 @@ func readSecretFile(path string, stdin io.Reader) (string, error) {
 	if path == "/dev/stdin" {
 		if f, ok := stdin.(*os.File); ok {
 			info, err := f.Stat()
-			if err != nil || (!info.Mode().IsRegular() && info.Mode()&os.ModeNamedPipe == 0) || info.Mode().Perm()&0o077 != 0 {
-				return "", errors.New("--file /dev/stdin requires a private pipe or redirected file, not a terminal")
+			private := false
+			if err == nil {
+				private = info.Mode().Perm()&0o077 == 0
+				// Darwin anonymous pipes have mode 0660 but no filesystem link.
+				// Their inherited descriptors are private; named FIFOs still
+				// require private permission bits.
+				if runtime.GOOS == "darwin" && info.Mode()&os.ModeNamedPipe != 0 {
+					stat, ok := info.Sys().(*syscall.Stat_t)
+					private = private || (ok && stat.Nlink == 0)
+				}
+			}
+			if err != nil || (!info.Mode().IsRegular() && info.Mode()&os.ModeNamedPipe == 0) || !private {
+				return "", errors.New("--file /dev/stdin requires an anonymous pipe or private file/FIFO, not a terminal or public file/FIFO")
 			}
 		}
 		input = stdin
