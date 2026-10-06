@@ -16,11 +16,14 @@ import (
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
-const appleAdsSignPath = "/_keyring/sign/apple-ads"
+const (
+	appleAdsSignPath        = "/_keyring/sign/apple-ads"
+	appStoreConnectSignPath = "/_keyring/sign/appstoreconnect"
+)
 
 // Parse at snapshot load, never on the request path. Invalid material remains
 // unavailable; parser errors and private key bytes are never logged or returned.
-func parseAppleAdsKey(value string) *ecdsa.PrivateKey {
+func parseAppleSigningKey(value string) *ecdsa.PrivateKey {
 	value = strings.TrimSpace(value)
 	if !strings.HasPrefix(value, "-----BEGIN PRIVATE KEY-----") && !strings.HasPrefix(value, "-----BEGIN EC PRIVATE KEY-----") {
 		return nil
@@ -46,9 +49,20 @@ func parseAppleAdsKey(value string) *ecdsa.PrivateKey {
 	return key
 }
 
-func signAppleAds(key *ecdsa.PrivateKey, identity *policy.AppleAds, role policy.Role, access policy.Access, now time.Time) (string, time.Time, error) {
-	unavailable := errors.New("Apple Ads signing unavailable")
-	if key == nil || identity == nil {
+func signAppleToken(key *ecdsa.PrivateKey, service policy.Service, role policy.Role, access policy.Access, now time.Time) (string, time.Time, error) {
+	unavailable := errors.New("Apple signing unavailable")
+	if key == nil {
+		return "", time.Time{}, unavailable
+	}
+	var keyID, issuer, subject, audience string
+	switch {
+	case service.Auth == policy.AuthAppleAdsSign && service.AppleAds != nil:
+		keyID, issuer, subject = service.AppleAds.KeyID, service.AppleAds.TeamID, service.AppleAds.ClientID
+		audience = "https://appleid.apple.com"
+	case service.Auth == policy.AuthAppStoreConnectSign && service.AppStoreConnect != nil:
+		keyID, issuer = service.AppStoreConnect.KeyID, service.AppStoreConnect.IssuerID
+		audience = "appstoreconnect-v1"
+	default:
 		return "", time.Time{}, unavailable
 	}
 	expires := now.Add(20 * time.Minute)
@@ -67,14 +81,14 @@ func signAppleAds(key *ecdsa.PrivateKey, identity *policy.AppleAds, role policy.
 		Alg string `json:"alg"`
 		Kid string `json:"kid"`
 		Typ string `json:"typ"`
-	}{"ES256", identity.KeyID, "JWT"})
+	}{"ES256", keyID, "JWT"})
 	claims, _ := json.Marshal(struct {
 		Issuer   string `json:"iss"`
-		Subject  string `json:"sub"`
+		Subject  string `json:"sub,omitempty"`
 		Audience string `json:"aud"`
 		IssuedAt int64  `json:"iat"`
 		Expires  int64  `json:"exp"`
-	}{identity.TeamID, identity.ClientID, "https://appleid.apple.com", now.Unix(), expires.Unix()})
+	}{issuer, subject, audience, now.Unix(), expires.Unix()})
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
 	digest := sha256.Sum256([]byte(unsigned))
 	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])

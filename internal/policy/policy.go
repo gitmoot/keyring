@@ -27,10 +27,11 @@ import (
 
 // Auth kinds: how a service expects its key.
 const (
-	AuthBearer       = "bearer"         // Authorization: Bearer <key>
-	AuthHeader       = "header"         // <Header>: <key>
-	AuthQuery        = "query"          // ?<Param>=<key>
-	AuthAppleAdsSign = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
+	AuthBearer              = "bearer"         // Authorization: Bearer <key>
+	AuthHeader              = "header"         // <Header>: <key>
+	AuthQuery               = "query"          // ?<Param>=<key>
+	AuthAppleAdsSign        = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
+	AuthAppStoreConnectSign = "app-store-connect-sign"
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -96,9 +97,10 @@ type Service struct {
 	Param  string `json:"param,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
 	// key works (the dashboard's Test button). TestPath may carry a query.
-	TestMethod string    `json:"test_method,omitempty"`
-	TestPath   string    `json:"test_path,omitempty"`
-	AppleAds   *AppleAds `json:"apple_ads,omitempty"`
+	TestMethod      string           `json:"test_method,omitempty"`
+	TestPath        string           `json:"test_path,omitempty"`
+	AppleAds        *AppleAds        `json:"apple_ads,omitempty"`
+	AppStoreConnect *AppStoreConnect `json:"app_store_connect,omitempty"`
 
 	base *url.URL
 }
@@ -108,6 +110,17 @@ type AppleAds struct {
 	ClientID string `json:"client_id"`
 	TeamID   string `json:"team_id"`
 	KeyID    string `json:"key_id"`
+}
+
+// AppStoreConnect fixes the public identity of an App Store Connect API key.
+type AppStoreConnect struct {
+	IssuerID string `json:"issuer_id"`
+	KeyID    string `json:"key_id"`
+}
+
+// SignOnly services never send their private key to an upstream.
+func (s Service) SignOnly() bool {
+	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign
 }
 
 type Role struct {
@@ -311,15 +324,21 @@ func (c *Config) Validate() error {
 		if svc.Auth == AuthAppleAdsSign && name != "apple-ads" {
 			return errors.New("apple-ads-sign requires service name apple-ads")
 		}
+		if svc.Auth == AuthAppStoreConnectSign && name != "appstoreconnect" {
+			return errors.New("app-store-connect-sign requires service name appstoreconnect")
+		}
 		if err := svc.validate(); err != nil {
 			return fmt.Errorf("service %s: %w", name, err)
 		}
 		c.Services[name] = svc
 	}
-	if signer, ok := c.Services["apple-ads"]; ok && signer.Auth == AuthAppleAdsSign {
+	for signerName, signer := range c.Services {
+		if !signer.SignOnly() {
+			continue
+		}
 		for name, svc := range c.Services {
-			if name != "apple-ads" && svc.Key == signer.Key {
-				return errors.New("an Apple Ads signing key cannot be used by a proxy service")
+			if name != signerName && svc.Key == signer.Key {
+				return errors.New("a signing key cannot be shared with another service")
 			}
 		}
 	}
@@ -348,26 +367,36 @@ func (c *Config) Validate() error {
 }
 
 func (s *Service) validate() error {
-	if s.Auth == AuthAppleAdsSign {
+	if s.SignOnly() {
 		if !store.ValidName(s.Key) {
-			return errors.New("apple-ads-sign needs a valid key name")
+			return errors.New("sign-only service needs a valid key name")
 		}
 		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" {
-			return errors.New("apple-ads-sign cannot have proxy or test settings")
+			return errors.New("sign-only service cannot have proxy or test settings")
 		}
-		if s.AppleAds == nil {
-			return errors.New("apple-ads-sign needs apple_ads identity")
+		var identity []string
+		switch s.Auth {
+		case AuthAppleAdsSign:
+			if s.AppleAds == nil || s.AppStoreConnect != nil {
+				return errors.New("apple-ads-sign requires only apple_ads identity")
+			}
+			identity = []string{s.AppleAds.ClientID, s.AppleAds.TeamID, s.AppleAds.KeyID}
+		case AuthAppStoreConnectSign:
+			if s.AppStoreConnect == nil || s.AppleAds != nil {
+				return errors.New("app-store-connect-sign requires only app_store_connect identity")
+			}
+			identity = []string{s.AppStoreConnect.IssuerID, s.AppStoreConnect.KeyID}
 		}
-		for _, value := range []string{s.AppleAds.ClientID, s.AppleAds.TeamID, s.AppleAds.KeyID} {
+		for _, value := range identity {
 			if value == "" || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
-				return errors.New("apple_ads identity fields must be nonempty printable ASCII without spaces, at most 256 bytes")
+				return errors.New("signing identity fields must be nonempty printable ASCII without spaces, at most 256 bytes")
 			}
 		}
 		s.base = nil
 		return nil
 	}
-	if s.AppleAds != nil {
-		return errors.New("apple_ads identity requires apple-ads-sign")
+	if s.AppleAds != nil || s.AppStoreConnect != nil {
+		return errors.New("signing identity requires the corresponding sign-only auth")
 	}
 	u, err := url.Parse(s.Base)
 	if err != nil || u.Host == "" {
