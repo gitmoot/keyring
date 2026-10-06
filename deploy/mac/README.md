@@ -185,10 +185,16 @@ before upgrading. No App Store Connect keys or services are migrated.
    no value is printed, passed in argv, staged in `/tmp`, or sent to an agent.
    For an existing private file readable by `_keyring`, `--file /absolute/path`
    may be used directly. The file must be regular, not a symlink, and have no
-   group/other permission bits. `/dev/stdin` accepts a private pipe or private
-   redirected file, not a terminal. Input is preserved verbatim, bounded to
-   1 MiB, and empty, unsafe or unreadable input leaves the store unchanged.
+   group/other permission bits. `/dev/stdin` accepts an anonymous pipe or a
+   private named FIFO/redirected file, not a terminal. On macOS, anonymous
+   pipes report mode `0660` with no filesystem link; they are accepted because
+   no pathname exposes them. A filesystem-visible FIFO still needs private
+   permissions. Input is preserved verbatim, bounded to 1 MiB, and empty,
+   unsafe or unreadable input leaves the store unchanged.
    Do not use shell tracing, `tee`, debug logging or commands that echo the PEM.
+   Versions v0.8.0 and v0.9.0 mistakenly reject normal macOS anonymous pipes;
+   upgrade to a release containing the native-pipe fix before using this
+   pipeline. Do not work around it by echoing or staging the key.
 
 3. Merge the fixed identity and sign-only service from
    [the API documentation](../../README.md#apple-ads-signing-not-an-api-proxy)

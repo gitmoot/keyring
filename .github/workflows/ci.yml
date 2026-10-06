@@ -19,3 +19,12 @@ jobs:
       - run: go build ./...
       - run: GOOS=darwin GOARCH=arm64 go build ./...
       - run: go test -race ./... -count=1
+  macos-import:
+    name: native macOS private-pipe import
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./cmd/keyring -run '^TestSetDarwinPipeImportBoundary$' -count=1 -v
