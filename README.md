@@ -121,7 +121,7 @@ Store the full unencrypted P-256 PEM under `APPLE_ADS_PRIVATE_KEY` with the
 bounded, non-echoing `keyring set --file` import described in
 [the Mac operator instructions](deploy/mac/README.md#apple-ads-signing-upgrade-and-key-import).
 PKCS#8 `PRIVATE KEY` and SEC1 `EC PRIVATE KEY` encodings are supported.
-`base`, `header`, `param`, `test_method`, and `test_path` must be absent.
+`base`, `header`, `param`, `test_method`, `test_path`, and `tls_pin_sha256` must be absent.
 No other service may share this signing key, and no other service name may
 use `apple-ads-sign`. Dashboard access edits preserve its identity; dashboard
 **Test** is unavailable because this service has no upstream.
@@ -252,6 +252,8 @@ Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its
 
 A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
 
+A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
+
 ## Dashboard (#15)
 
 `admin_https` in `rules.json` (set by `keyring enable-dashboard --https-host NAME --device IP ...`) also serves the dashboard as `https://NAME` through a local HTTPS proxy, to the listed device IPs only. The proxy must put the client's IP in `X-Keyring-Client`; any other client, or a request without it, gets 403 before the login page. Over HTTPS the session cookie is `Secure` and the page sends HSTS. The Mac installer sets this up with Caddy (`deploy/mac/README.md`, built from `deploy/caddy`, versions pinned in its `go.sum`). A reload refuses a change to `admin_https`; restart the keyring.
@@ -278,7 +280,7 @@ The Keys and Agents pages are sortable tables (click a column); forms are one co
 
 The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (green: full access, amber: limited), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. A value is never shown, not even in part.
 - **Add key** asks for a name and a value only. The key works as soon as a service names it.
-- **Connect to a service** on a key's page adds the service that uses it. The API is guessed from the key's name (`OPENROUTER_API_KEY` is OpenRouter, `vCF_TOKEN` is Cloudflare), with the base URL, how the key is sent and a test request filled in from a built-in list; pick another, or "Other" and fill in the fields. An agent that works out the settings can hand them over as JSON to paste: `{"service":"acme","base":"https://api.acme.com","auth":"header","header":"X-Api-Key","test_path":"/v1/ping"}` (unknown fields are refused). The whole access list is checked before anything is written.
+- **Connect to a service** on a key's page adds the service that uses it. The API is guessed from the key's name (`OPENROUTER_API_KEY` is OpenRouter, `vCF_TOKEN` is Cloudflare), with the base URL, how the key is sent and a test request filled in from a built-in list; pick another, or "Other" and fill in the fields. An agent that works out the settings can hand them over as JSON to paste: `{"service":"acme","base":"https://api.acme.com","auth":"header","header":"X-Api-Key","test_path":"/v1/ping"}` (unknown fields are refused); add `"tls_pin_sha256"` for a pinned self-signed service. The whole access list is checked before anything is written.
 - **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
 - **Replace** takes effect at once; it clears the leaked flag and the test result.
 - **Mark as leaked** flags the key until it is replaced.

@@ -6,6 +6,10 @@ package server
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -41,7 +45,9 @@ type Handler struct {
 	requests *requests.Store
 	audit    io.Writer
 	client   *http.Client
-	now      func() time.Time
+	// pinned holds one client per tls_pin_sha256 value (see clientFor).
+	pinned sync.Map
+	now    func() time.Time
 
 	mu     sync.Mutex
 	day    string
@@ -78,6 +84,49 @@ func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handle
 	}
 	h.Swap(config, keys)
 	return h
+}
+
+// errTLSPin is the handshake error for a certificate that does not match the
+// service's tls_pin_sha256.
+var errTLSPin = errors.New("upstream certificate does not match tls_pin_sha256")
+
+// pinnedTLSConfig trusts exactly the leaf certificate whose DER SHA-256 is
+// want; a nil want trusts nothing.
+func pinnedTLSConfig(want []byte) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		// Chain and hostname checks are replaced by the exact pin below.
+		InsecureSkipVerify: true,
+		// VerifyConnection runs on every handshake, resumed ones included.
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(want) != sha256.Size || len(cs.PeerCertificates) == 0 {
+				return errTLSPin
+			}
+			sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+			if subtle.ConstantTimeCompare(sum[:], want) != 1 {
+				return errTLSPin
+			}
+			return nil
+		},
+	}
+}
+
+// clientFor returns the client for svc: the shared one (system CA roots) for
+// an unpinned service, or one that trusts exactly the pinned certificate.
+func (h *Handler) clientFor(svc policy.Service) *http.Client {
+	if svc.TLSPinSHA256 == "" {
+		return h.client
+	}
+	if c, ok := h.pinned.Load(svc.TLSPinSHA256); ok {
+		return c.(*http.Client)
+	}
+	// validate() refuses malformed pins; one that slipped through trusts
+	// nothing rather than falling back to no check.
+	want, _ := hex.DecodeString(svc.TLSPinSHA256)
+	transport := h.client.Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = pinnedTLSConfig(want)
+	c, _ := h.pinned.LoadOrStore(svc.TLSPinSHA256, &http.Client{Transport: transport, CheckRedirect: h.client.CheckRedirect})
+	return c.(*http.Client)
 }
 
 // Config returns the settings in use.
@@ -288,11 +337,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadGateway, "could not build upstream request")
 		return
 	}
-	resp, err := h.client.Do(out)
+	resp, err := h.clientFor(svc).Do(out)
 	if err != nil {
 		// The call never reached the service: do not charge the limit. The
 		// error text can include the URL, and so a query-string key.
 		h.refund(roleName, service, access.DailyRequests, start)
+		if errors.Is(err, errTLSPin) {
+			fail(http.StatusBadGateway, "upstream certificate does not match the pinned certificate")
+			return
+		}
 		fail(http.StatusBadGateway, "upstream unreachable")
 		return
 	}
@@ -404,9 +457,12 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	if err != nil {
 		return 0, err
 	}
-	resp, err := h.client.Do(out)
+	resp, err := h.clientFor(svc).Do(out)
 	if err != nil {
 		// The error text can include the URL, and so a query-string key.
+		if errors.Is(err, errTLSPin) {
+			return 0, errors.New("service certificate does not match the pinned certificate")
+		}
 		return 0, errors.New("service unreachable")
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))

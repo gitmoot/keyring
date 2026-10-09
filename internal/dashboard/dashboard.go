@@ -515,7 +515,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 
 // connectForm is "Connect to a service" on a key's page.
 type connectForm struct {
-	Preset, Service, Base, Auth, Header, Param, TestPath, Pasted string
+	Preset, Service, Base, Auth, Header, Param, TestPath, TLSPin, Pasted string
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -527,6 +527,7 @@ type agentSettings struct {
 	Header   string `json:"header,omitempty"`
 	Param    string `json:"param,omitempty"`
 	TestPath string `json:"test_path,omitempty"`
+	TLSPin   string `json:"tls_pin_sha256,omitempty"`
 }
 
 // connectFormFor fills the form from a preset for key name.
@@ -548,7 +549,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		Preset: r.PostFormValue("preset"), Service: strings.TrimSpace(r.PostFormValue("service")),
 		Base: strings.TrimSpace(r.PostFormValue("base")), Auth: r.PostFormValue("auth"),
 		Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
-		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
+		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")), Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
 	}
 	again := func(status int, msg string) { b.renderKey(w, r, sid, status, name, f, msg) }
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
@@ -569,7 +570,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
 			return
 		}
-		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath
+		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -586,7 +587,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusConflict, "A service named "+f.Service+" exists already. Pick another name.")
 		return
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
