@@ -213,6 +213,28 @@ func TestConnectTakesSettingsPastedFromAnAgent(t *testing.T) {
 	if svc.Key != "ACME_KEY" || svc.Auth != "header" || svc.Header != "X-Acme-Key" || svc.Base != "https://api.acme.example" {
 		t.Fatalf("service from pasted settings: %+v", svc)
 	}
+	// A pinned self-signed service, pasted and typed; the pin reaches the
+	// access file the running proxy loads.
+	pin := strings.Repeat("5a", 32)
+	w = e.request("POST", "/keys/ACME_KEY/connect", url.Values{"password": {password},
+		"pasted": {`{"service":"mac","base":"https://100.111.92.43:9443","auth":"bearer","test_path":"/v1/capabilities","tls_pin_sha256":"` + pin + `"}`}})
+	if w.Header().Get("Location") != "/keys/ACME_KEY?done=connected" {
+		t.Fatalf("connect with pasted pin: %d %s", w.Code, w.Body.String())
+	}
+	w = e.request("POST", "/keys/ACME_KEY/connect", url.Values{"password": {password}, "service": {"mac2"},
+		"base": {"https://100.111.92.43:9443"}, "auth": {"bearer"}, "tls_pin_sha256": {pin}})
+	if w.Header().Get("Location") != "/keys/ACME_KEY?done=connected" {
+		t.Fatalf("connect with typed pin: %d %s", w.Code, w.Body.String())
+	}
+	saved, _ := os.ReadFile(e.proxy.Config().AccessFile)
+	if strings.Count(string(saved), `"tls_pin_sha256": "`+pin+`"`) != 2 {
+		t.Fatalf("pins not saved: %s", saved)
+	}
+	w = e.request("POST", "/keys/ACME_KEY/connect", url.Values{"password": {password}, "service": {"mac3"},
+		"base": {"https://100.111.92.43:9443"}, "auth": {"bearer"}, "tls_pin_sha256": {"not-hex"}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed pin: %d", w.Code)
+	}
 	for name, pasted := range map[string]string{
 		"not json":      `service: acme2`,
 		"unknown field": `{"service":"acme2","base":"https://api.acme.example","auth":"bearer","key":"OTHER_KEY"}`,

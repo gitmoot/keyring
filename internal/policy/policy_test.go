@@ -3,7 +3,9 @@ package policy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +110,34 @@ func TestAccessMatchesWholeSegmentsAndDefaultMethods(t *testing.T) {
 	}
 	if (Access{Methods: []string{"GET"}}).AllowsMethod("POST") {
 		t.Error("explicit method list ignored")
+	}
+}
+
+func TestValidateTLSPin(t *testing.T) {
+	pin := hash("cert")
+	service := func(base, pin string) Service {
+		var svc Service
+		doc := `{"base":"` + base + `","key":"K","auth":"bearer","tls_pin_sha256":"` + pin + `"}`
+		if err := json.Unmarshal([]byte(doc), &svc); err != nil {
+			t.Fatal(err)
+		}
+		return svc
+	}
+	ok := validConfig()
+	ok.Services["openrouter"] = service("https://100.111.92.43:9443", pin)
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid pin refused: %v", err)
+	}
+	for name, svc := range map[string]Service{
+		"http base": service("http://127.0.0.1:9", pin),
+		"short":     service("https://h.example", pin[:63]),
+		"uppercase": service("https://h.example", strings.ToUpper(pin)),
+		"colon hex": service("https://h.example", pin[:62]+":a"),
+	} {
+		c := validConfig()
+		c.Services["openrouter"] = svc
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "tls_pin_sha256") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

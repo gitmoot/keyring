@@ -101,6 +101,11 @@ type Service struct {
 	TestPath        string           `json:"test_path,omitempty"`
 	AppleAds        *AppleAds        `json:"apple_ads,omitempty"`
 	AppStoreConnect *AppStoreConnect `json:"app_store_connect,omitempty"`
+	// TLSPinSHA256, when set, is the lowercase hex SHA-256 of the upstream's
+	// leaf certificate (DER). The keyring then trusts exactly that
+	// certificate for this service instead of the system CA roots, so a
+	// self-signed upstream can be used. https only.
+	TLSPinSHA256 string `json:"tls_pin_sha256,omitempty"`
 
 	base *url.URL
 }
@@ -366,12 +371,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 func (s *Service) validate() error {
 	if s.SignOnly() {
 		if !store.ValidName(s.Key) {
 			return errors.New("sign-only service needs a valid key name")
 		}
-		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" {
+		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" {
 			return errors.New("sign-only service cannot have proxy or test settings")
 		}
 		var identity []string
@@ -415,6 +422,14 @@ func (s *Service) validate() error {
 		}
 	default:
 		return fmt.Errorf("base %q: use https", s.Base)
+	}
+	if s.TLSPinSHA256 != "" {
+		if u.Scheme != "https" {
+			return fmt.Errorf("tls_pin_sha256 needs an https base, got %q", s.Base)
+		}
+		if !tlsPin.MatchString(s.TLSPinSHA256) {
+			return errors.New("tls_pin_sha256: want 64 lowercase hex characters (SHA-256 of the certificate DER)")
+		}
 	}
 	switch s.TestMethod {
 	case "", "GET", "HEAD", "POST":
