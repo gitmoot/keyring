@@ -67,6 +67,10 @@ func decodeEd25519Request(body io.Reader) ([]byte, error) {
 	if err := decoder.Decode(&req); err != nil {
 		return nil, errors.New("body must be JSON with message_base64")
 	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, errors.New("body must be exactly one JSON object")
+	}
 	message, err := base64.StdEncoding.DecodeString(req.MessageBase64)
 	if err != nil || len(message) == 0 || len(message) > ed25519MaxMessage {
 		return nil, errors.New("message_base64 must decode to 1-8192 bytes")

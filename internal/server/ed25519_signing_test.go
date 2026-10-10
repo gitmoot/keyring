@@ -101,6 +101,8 @@ func TestEd25519SigningRejectsMalformedAndUnauthorized(t *testing.T) {
 		{"not json", "POST", ed25519SignTestPath, "hello", testToken, 400},
 		{"bad base64", "POST", ed25519SignTestPath, `{"message_base64":"!!!"}`, testToken, 400},
 		{"empty message", "POST", ed25519SignTestPath, `{"message_base64":""}`, testToken, 400},
+		{"trailing garbage", "POST", ed25519SignTestPath, `{"message_base64":"` + message + `"} GARBAGE`, testToken, 400},
+		{"trailing object", "POST", ed25519SignTestPath, `{"message_base64":"` + message + `"}{"message_base64":"` + message + `"}`, testToken, 400},
 		{"query is refused", "POST", ed25519SignTestPath + "?x=1", `{"message_base64":"` + message + `"}`, testToken, 400},
 		{"extra segment", "POST", ed25519SignTestPath + "/extra", `{"message_base64":"` + message + `"}`, testToken, 403},
 		{"unconfigured service", "POST", "/_keyring/sign/nope", `{"message_base64":"` + message + `"}`, testToken, 403},
@@ -118,6 +120,35 @@ func TestEd25519SigningRejectsMalformedAndUnauthorized(t *testing.T) {
 	w := signCall(h, "POST", "/_keyring/sign/other-svc", `{"message_base64":"`+message+`"}`, testToken)
 	if w.Code != 403 {
 		t.Fatalf("service outside config: status = %d, want 403", w.Code)
+	}
+}
+
+func TestEd25519MalformedBodyDoesNotBurnQuota(t *testing.T) {
+	// DailyRequests=1: a 400 body must not charge the daily allowance, so the
+	// first valid request still signs.
+	_, stored := generatedEd25519Key(t)
+	var access policy.AccessList
+	if err := json.Unmarshal([]byte(`{"services":{"release":{"key":"RELEASE_KEY","auth":"ed25519-sign"}},"roles":{}}`), &access); err != nil {
+		t.Fatal(err)
+	}
+	access.Roles["phobos"] = policy.Role{TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"release": {Methods: []string{"POST"}, Paths: []string{"/"}, DailyRequests: 1}}}
+	cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"}, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h := ed25519Handler(t, cfg, stored)
+	w := signCall(h, "POST", ed25519SignTestPath, "not json", testToken)
+	if w.Code != 400 {
+		t.Fatalf("malformed body: status = %d, want 400", w.Code)
+	}
+	message := base64.StdEncoding.EncodeToString([]byte("digest"))
+	w = signCall(h, "POST", ed25519SignTestPath, `{"message_base64":"`+message+`"}`, testToken)
+	if w.Code != 200 {
+		t.Fatalf("first valid request after a 400: status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	w = signCall(h, "POST", ed25519SignTestPath, `{"message_base64":"`+message+`"}`, testToken)
+	if w.Code != 429 {
+		t.Fatalf("second valid request: status = %d, want 429", w.Code)
 	}
 }
 
