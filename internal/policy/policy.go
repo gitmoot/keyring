@@ -32,6 +32,7 @@ const (
 	AuthQuery               = "query"          // ?<Param>=<key>
 	AuthAppleAdsSign        = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
 	AuthAppStoreConnectSign = "app-store-connect-sign"
+	AuthEd25519Sign         = "ed25519-sign" // Local Ed25519 signing only; never proxy the key.
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -125,7 +126,7 @@ type AppStoreConnect struct {
 
 // SignOnly services never send their private key to an upstream.
 func (s Service) SignOnly() bool {
-	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign
+	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign
 }
 
 type Role struct {
@@ -393,6 +394,10 @@ func (s *Service) validate() error {
 				return errors.New("app-store-connect-sign requires only app_store_connect identity")
 			}
 			identity = []string{s.AppStoreConnect.IssuerID, s.AppStoreConnect.KeyID}
+		case AuthEd25519Sign:
+			if s.AppleAds != nil || s.AppStoreConnect != nil {
+				return errors.New("ed25519-sign takes no signing identity fields")
+			}
 		}
 		for _, value := range identity {
 			if value == "" || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {

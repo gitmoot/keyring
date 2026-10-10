@@ -254,6 +254,22 @@ A service may name a harmless request for the dashboard's Test button: `"test_me
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
+### Ed25519 signing (not an API proxy)
+
+For artifacts that need a signature without the key leaving this process — the
+first use is adspower-desk update manifests. A sign-only service with
+`"auth": "ed25519-sign"` holds the base64 of a 64-byte Ed25519 private key
+(Go's `ed25519.PrivateKey`: seed || public key). It takes no base, no identity
+fields and no test path, and may not share a key with any other service.
+
+`POST /<role>/<service>` where the path is exactly `/_keyring/sign/<service>`
+— the service is in the path, so one access rule controls one key. Body:
+`{"message_base64": "<base64 bytes to sign, 1-8192 bytes>"}`. Reply:
+`{"signature_base64": "...", "public_key_base64": "..."}`, `Cache-Control:
+no-store`. Malformed bodies 400, missing access or a non-sign service 403, a
+key that is not a base64 64-byte key 503. The Apple paths still take their
+fixed services; this route covers every other sign-only service.
+
 ## Dashboard (#15)
 
 `admin_https` in `rules.json` (set by `keyring enable-dashboard --https-host NAME --device IP ...`) also serves the dashboard as `https://NAME` through a local HTTPS proxy, to the listed device IPs only. The proxy must put the client's IP in `X-Keyring-Client`; any other client, or a request without it, gets 403 before the login page. Over HTTPS the session cookie is `Secure` and the page sends HSTS. The Mac installer sets this up with Caddy (`deploy/mac/README.md`, built from `deploy/caddy`, versions pinned in its `go.sum`). A reload refuses a change to `admin_https`; restart the keyring.

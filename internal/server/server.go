@@ -244,6 +244,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	service, rest, ok := splitPath(r.URL)
 	var signingKey *ecdsa.PrivateKey
+	var signMessage []byte
 	var signingAuth string
 	switch r.URL.Path {
 	case appleAdsSignPath:
@@ -252,6 +253,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case appStoreConnectSignPath:
 		service, rest, ok = "appstoreconnect", "/", true
 		signingAuth, signingKey = policy.AuthAppStoreConnectSign, snap.appStoreConnectKey
+	}
+	if signService := ed25519SignService(r.URL.Path); signService != "" && signingAuth == "" {
+		service, rest, ok = signService, "/", true
+		signingAuth = policy.AuthEd25519Sign
 	}
 	signing := signingAuth != ""
 	rec.Service, rec.Path = service, rest
@@ -278,14 +283,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusMethodNotAllowed, "signing requires POST")
 			return
 		}
-		var probe [1]byte
-		if n, err := io.ReadFull(r.Body, probe[:]); n != 0 || err != io.EOF {
-			fail(http.StatusBadRequest, "signing requires an empty body")
-			return
-		}
 		if svc.Auth != signingAuth {
 			fail(http.StatusForbidden, "service is not configured for signing")
 			return
+		}
+		if signingAuth == policy.AuthEd25519Sign {
+			var reqErr error
+			signMessage, reqErr = decodeEd25519Request(r.Body)
+			if reqErr != nil {
+				fail(http.StatusBadRequest, reqErr.Error())
+				return
+			}
+		} else {
+			var probe [1]byte
+			if n, err := io.ReadFull(r.Body, probe[:]); n != 0 || err != io.EOF {
+				fail(http.StatusBadRequest, "signing requires an empty body")
+				return
+			}
 		}
 	} else if svc.SignOnly() {
 		fail(http.StatusForbidden, "sign-only service cannot proxy requests")
@@ -306,6 +320,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.take(roleName, service, access.DailyRequests, start) {
 		fail(http.StatusTooManyRequests, "daily limit reached")
+		return
+	}
+	if signingAuth == policy.AuthEd25519Sign {
+		signKey, keyErr := parseEd25519Key(key)
+		if keyErr != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "Ed25519 signing unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		rec.Status = http.StatusOK
+		sink := &countingWriter{w: w}
+		_ = json.NewEncoder(sink).Encode(signEd25519(signKey, signMessage))
+		rec.Bytes = sink.n
 		return
 	}
 	if signing {
