@@ -189,10 +189,10 @@ func TestEd25519SigningBadKey(t *testing.T) {
 
 func TestEd25519SignPolicyValidation(t *testing.T) {
 	for name, service := range map[string]string{
-		"with base":          `{"key":"K","auth":"ed25519-sign","base":"https://example.com"}`,
-		"with test path":     `{"key":"K","auth":"ed25519-sign","test_path":"/x"}`,
-		"with identity":      `{"key":"K","auth":"ed25519-sign","apple_ads":{"client_id":"c","team_id":"t","key_id":"k"}}`,
-		"not a store name":   `{"key":"","auth":"ed25519-sign"}`,
+		"with base":        `{"key":"K","auth":"ed25519-sign","base":"https://example.com"}`,
+		"with test path":   `{"key":"K","auth":"ed25519-sign","test_path":"/x"}`,
+		"with identity":    `{"key":"K","auth":"ed25519-sign","apple_ads":{"client_id":"c","team_id":"t","key_id":"k"}}`,
+		"not a store name": `{"key":"","auth":"ed25519-sign"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var access policy.AccessList
