@@ -529,3 +529,45 @@ func TestContainerOption(t *testing.T) {
 		t.Fatalf("container proxy: %d", code)
 	}
 }
+
+// TestDailyLimitSurvivesRestart: the supervisor keeps GET /usage while the
+// process is stopped and hands it back on unlock, so a stop does not give a
+// role a fresh daily limit.
+func TestDailyLimitSurvivesRestart(t *testing.T) {
+	up := upstreamEcho(t)
+	x := newInst(t, "")
+	key := newKey(t)
+	listen := freeAddr(t)
+	x.must("POST", "/create", map[string]any{"id": "frank", "data_key": key, "listen": listen, "allow_sources": []string{"127.0.0.1"}})
+	x.must("PUT", "/services/api", map[string]any{"base": up.URL, "key": "API_KEY", "auth": "bearer"})
+	x.must("PUT", "/keys/API_KEY", map[string]any{"value": "v"})
+	token := x.must("PUT", "/roles/agent", map[string]any{"access": map[string]any{"api": map[string]any{"paths": []string{"/"}, "daily_requests": 2}}})["token"].(string)
+	for range 2 {
+		if code, _ := proxyGet(t, listen, token, "/api/x"); code != 200 {
+			t.Fatalf("call within the limit: %d", code)
+		}
+	}
+	usage := x.must("GET", "/usage", nil)
+	if counts, _ := usage["counts"].([]any); len(counts) != 1 || mustJSON(counts[0]) != `{"count":2,"role":"agent","service":"api"}` {
+		t.Fatalf("usage %v", usage)
+	}
+	blob := x.must("GET", "/state", nil)["state"]
+	x.in.Close()
+
+	y := newInst(t, "")
+	y.must("POST", "/unlock", map[string]any{"data_key": key, "state": blob, "usage": usage})
+	if code, _ := proxyGet(t, listen, token, "/api/x"); code != http.StatusTooManyRequests {
+		t.Fatalf("after restart with kept usage: %d, want 429", code)
+	}
+
+	// Yesterday's counts are ignored; a restore never lowers a count.
+	z := newInst(t, "")
+	stale := map[string]any{"day": "2000-01-01", "counts": []map[string]any{{"role": "agent", "service": "api", "count": 2}}}
+	listen2 := freeAddr(t)
+	y.in.Close()
+	z.must("POST", "/unlock", map[string]any{"data_key": key, "state": blob, "usage": stale})
+	z.must("PUT", "/network", map[string]any{"listen": listen2, "allow_sources": []string{"127.0.0.1"}})
+	if code, _ := proxyGet(t, listen2, token, "/api/x"); code != 200 {
+		t.Fatalf("stale usage applied: %d", code)
+	}
+}

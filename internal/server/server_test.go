@@ -557,3 +557,29 @@ func TestContainerModeNeverForwardsTheCallerProof(t *testing.T) {
 		t.Fatal("other headers dropped")
 	}
 }
+
+func TestRestoreDailyCountsNeverGivesMoreCalls(t *testing.T) {
+	up, _ := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, policy.Access{Paths: []string{"/"}, DailyRequests: 3})
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	for range 2 {
+		call(h, "GET", "/api/v1/x", testToken, nil)
+	}
+	// A lower kept count (an older checkpoint) does not undo calls made.
+	h.RestoreDailyCounts("2026-10-14", []DailyCount{{Role: "phobos", Service: "api", Count: 1}}, now)
+	if day, counts := h.DailyCounts(now); day != "2026-10-14" || len(counts) != 1 || counts[0].Count != 2 {
+		t.Fatalf("after a lower restore: %s %v", day, counts)
+	}
+	h.RestoreDailyCounts("2026-10-14", []DailyCount{{Role: "phobos", Service: "api", Count: 3}}, now)
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("after restoring a full count: %d", w.Code)
+	}
+	// The next day starts fresh, and a kept count from another day is ignored.
+	next := now.Add(24 * time.Hour)
+	h.now = func() time.Time { return next }
+	h.RestoreDailyCounts("2026-10-14", []DailyCount{{Role: "phobos", Service: "api", Count: 3}}, next)
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("next day: %d", w.Code)
+	}
+}
