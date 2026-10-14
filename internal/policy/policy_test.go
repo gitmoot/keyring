@@ -232,3 +232,90 @@ func TestValidateOAuth2(t *testing.T) {
 		t.Fatalf("KeyNames = %v", names)
 	}
 }
+
+func TestValidateConsent(t *testing.T) {
+	consent := func() *Consent {
+		return &Consent{Listen: "127.0.0.1:7710", PublicURL: "https://connect.example.com/p/alice/", APIListen: "127.0.0.1:7711",
+			APIAllowSources: []string{"10.0.0.5"}, APITokenSHA256: hash("consent-token")}
+	}
+	c := validConfig()
+	c.Consent = consent()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid consent refused: %v", err)
+	}
+	if got := c.Consent.PublicBase().String(); got != "https://connect.example.com/p/alice" {
+		t.Fatalf("PublicBase = %q", got)
+	}
+	if !c.Consent.APITokenMatches("consent-token") || c.Consent.APITokenMatches("") || c.Consent.APITokenMatches("t1") {
+		t.Fatal("APITokenMatches")
+	}
+	if !c.Consent.APISourceAllowed(netip.MustParseAddr("10.0.0.5")) || c.Consent.APISourceAllowed(netip.MustParseAddr("10.0.0.6")) {
+		t.Fatal("APISourceAllowed")
+	}
+	cases := map[string]func(*Config){
+		"pages on the proxy port":    func(c *Config) { c.Consent.Listen = c.Listen },
+		"api on the proxy port":      func(c *Config) { c.Consent.APIListen = c.Listen },
+		"pages and api on one port":  func(c *Config) { c.Consent.APIListen = c.Consent.Listen },
+		"wildcard pages":             func(c *Config) { c.Consent.Listen = "0.0.0.0:7710" },
+		"public url over plain http": func(c *Config) { c.Consent.PublicURL = "http://connect.example.com" },
+		"public url with a query":    func(c *Config) { c.Consent.PublicURL = "https://connect.example.com/?a=b" },
+		"api open to everyone":       func(c *Config) { c.Consent.APIAllowSources = []string{"0.0.0.0/0"} },
+		"no api sources":             func(c *Config) { c.Consent.APIAllowSources = nil },
+		"bad token hash":             func(c *Config) { c.Consent.APITokenSHA256 = "x" },
+		"api token is a role token":  func(c *Config) { c.Consent.APITokenSHA256 = hash("t1") },
+		"pages on the dashboard port": func(c *Config) {
+			c.AdminListen, c.AdminPasswordFile = "127.0.0.1:7702", "/x/admin.pw"
+			c.Consent.Listen = c.AdminListen
+		},
+	}
+	for name, mutate := range cases {
+		c := validConfig()
+		c.Consent = consent()
+		mutate(c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestValidateOAuth2SignIn(t *testing.T) {
+	svc := func() Service {
+		return Service{Base: "https://gmail.googleapis.com", Key: "GMAIL_REFRESH", Auth: AuthOAuth2, OAuth2: &OAuth2{
+			TokenURL: "https://oauth2.googleapis.com/token", ClientID: "id", AuthURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			Scopes: []string{"https://mail.google.com/"}, AuthParams: map[string]string{"access_type": "offline"}, RevokeURL: "https://oauth2.googleapis.com/revoke",
+		}}
+	}
+	c := validConfig()
+	c.Services["gmail"] = svc()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid sign-in refused: %v", err)
+	}
+	cases := map[string]func(*OAuth2){
+		"auth url over http":       func(o *OAuth2) { o.AuthURL = "http://accounts.google.com/auth" },
+		"scopes without auth url":  func(o *OAuth2) { o.AuthURL = "" },
+		"scope with a space":       func(o *OAuth2) { o.Scopes = []string{"a b"} },
+		"param overrides state":    func(o *OAuth2) { o.AuthParams = map[string]string{"state": "x"} },
+		"param overrides redirect": func(o *OAuth2) { o.AuthParams = map[string]string{"redirect_uri": "https://evil.example.com"} },
+		"param overrides pkce":     func(o *OAuth2) { o.AuthParams = map[string]string{"code_challenge_method": "plain"} },
+		"revoke url over http":     func(o *OAuth2) { o.RevokeURL = "http://oauth2.googleapis.com/revoke" },
+	}
+	for name, mutate := range cases {
+		c := validConfig()
+		s := svc()
+		mutate(s.OAuth2)
+		c.Services["gmail"] = s
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Two services sharing a refresh token must ask for the same scopes.
+	c = validConfig()
+	c.Services["gmail"] = svc()
+	drive := svc()
+	drive.Base = "https://www.googleapis.com"
+	drive.OAuth2.Scopes = []string{"https://www.googleapis.com/auth/drive"}
+	c.Services["drive"] = drive
+	if err := c.Validate(); err == nil {
+		t.Fatal("shared refresh token with different scopes accepted")
+	}
+}
