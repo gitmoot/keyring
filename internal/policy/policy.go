@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"net/url"
 	"os"
@@ -58,6 +59,9 @@ type Rules struct {
 	// AdminHTTPS, when set, also serves the dashboard under a DNS name through
 	// an HTTPS proxy on this machine, to the listed devices only.
 	AdminHTTPS *AdminHTTPS `json:"admin_https,omitempty"`
+	// Consent, when set, lets the owners of keys connect services
+	// themselves through single-use links (see Consent). Off by default.
+	Consent *Consent `json:"consent,omitempty"`
 }
 
 // AdminHTTPS is the dashboard's name behind a local HTTPS proxy. The proxy
@@ -75,6 +79,55 @@ func (a *AdminHTTPS) Equal(b *AdminHTTPS) bool {
 		return a == b
 	}
 	return a.Host == b.Host && slices.Equal(a.Devices, b.Devices)
+}
+
+// Consent turns on consent links. The pages are served on Listen, normally
+// behind an HTTPS reverse proxy at PublicURL: the link pages and the OAuth
+// callback only. The API that creates links and deletes keys is served on
+// APIListen, to APIAllowSources only, for callers holding the API token.
+// Neither listener serves the proxy or the dashboard.
+type Consent struct {
+	Listen          string   `json:"listen"`
+	PublicURL       string   `json:"public_url"`
+	APIListen       string   `json:"api_listen"`
+	APIAllowSources []string `json:"api_allow_sources"`
+	// APITokenSHA256 is the hex SHA-256 of the API token (keyring new-token).
+	APITokenSHA256 string `json:"api_token_sha256"`
+
+	public     *url.URL
+	apiSources []netip.Prefix
+}
+
+// Equal reports whether a and b are the same settings (nil is off).
+func (a *Consent) Equal(b *Consent) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Listen == b.Listen && a.PublicURL == b.PublicURL && a.APIListen == b.APIListen &&
+		slices.Equal(a.APIAllowSources, b.APIAllowSources) && a.APITokenSHA256 == b.APITokenSHA256
+}
+
+// PublicBase returns the parsed public_url of validated settings.
+func (a *Consent) PublicBase() *url.URL {
+	u := *a.public
+	return &u
+}
+
+// APISourceAllowed reports whether addr may call the consent API.
+func (a *Consent) APISourceAllowed(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, p := range a.apiSources {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// APITokenMatches reports whether token is the consent API token.
+func (a *Consent) APITokenMatches(token string) bool {
+	sum := sha256.Sum256([]byte(token))
+	return token != "" && subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(a.APITokenSHA256)) == 1
 }
 
 // AccessList is the access file: which services exist and what each role may
@@ -140,6 +193,66 @@ type OAuth2 struct {
 	// ClientSecretKey names the store key holding the client secret; empty
 	// for a public client.
 	ClientSecretKey string `json:"client_secret_key,omitempty"`
+
+	// Sign-in through a consent link (optional). AuthURL is the provider's
+	// authorization endpoint; Scopes and AuthParams are added to it (for
+	// Google, auth_params {"access_type": "offline", "prompt": "consent"}
+	// so that a refresh token is returned). The link never chooses them.
+	AuthURL    string            `json:"auth_url,omitempty"`
+	Scopes     []string          `json:"scopes,omitempty"`
+	AuthParams map[string]string `json:"auth_params,omitempty"`
+	// RevokeURL, when set, is told about a refresh token being deleted
+	// through the consent API (RFC 7009).
+	RevokeURL string `json:"revoke_url,omitempty"`
+}
+
+// Equal reports whether o and p are the same settings.
+func (o *OAuth2) Equal(p *OAuth2) bool {
+	if o == nil || p == nil {
+		return o == p
+	}
+	return o.TokenURL == p.TokenURL && o.ClientID == p.ClientID && o.ClientSecretKey == p.ClientSecretKey &&
+		o.AuthURL == p.AuthURL && slices.Equal(o.Scopes, p.Scopes) && maps.Equal(o.AuthParams, p.AuthParams) && o.RevokeURL == p.RevokeURL
+}
+
+// reservedAuthParams are set by the keyring on every sign-in.
+var reservedAuthParams = map[string]bool{
+	"response_type": true, "client_id": true, "redirect_uri": true, "scope": true,
+	"state": true, "code_challenge": true, "code_challenge_method": true,
+}
+
+// CanSignIn reports whether a consent link can run the provider sign-in.
+func (o *OAuth2) CanSignIn() bool { return o != nil && o.AuthURL != "" }
+
+func (o *OAuth2) validateSignIn() error {
+	if o.AuthURL == "" {
+		if len(o.Scopes) > 0 || len(o.AuthParams) > 0 {
+			return errors.New("oauth2 scopes and auth_params need auth_url")
+		}
+	} else if _, err := upstreamURL("oauth2 auth_url", o.AuthURL); err != nil {
+		return err
+	}
+	for _, s := range o.Scopes {
+		if !printableToken(s, 512) {
+			return fmt.Errorf("oauth2 scope %q: want printable ASCII without spaces", s)
+		}
+	}
+	for k, v := range o.AuthParams {
+		if !printableToken(k, 64) || reservedAuthParams[k] || len(v) > 512 {
+			return fmt.Errorf("oauth2 auth_params %q: not allowed (the keyring sets response_type, client_id, redirect_uri, scope, state and PKCE)", k)
+		}
+	}
+	if o.RevokeURL != "" {
+		if _, err := upstreamURL("oauth2 revoke_url", o.RevokeURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// printableToken: 1 to max printable ASCII characters, no spaces.
+func printableToken(s string, max int) bool {
+	return s != "" && len(s) <= max && strings.IndexFunc(s, func(r rune) bool { return r < 33 || r > 126 }) < 0
 }
 
 // KeyNames are the store keys the service needs: its key and, for oauth2, the
@@ -298,20 +411,8 @@ func (c *Config) Validate() error {
 	if len(c.AllowSources) == 0 {
 		return errors.New("allow_sources is empty")
 	}
-	c.sources = nil
-	for _, s := range c.AllowSources {
-		prefix, err := netip.ParsePrefix(s)
-		if err != nil {
-			addr, addrErr := netip.ParseAddr(s)
-			if addrErr != nil {
-				return fmt.Errorf("allow_sources %q: want an address or CIDR", s)
-			}
-			prefix = netip.PrefixFrom(addr, addr.BitLen())
-		}
-		if prefix.Bits() == 0 {
-			return fmt.Errorf("allow_sources %q allows every address", s)
-		}
-		c.sources = append(c.sources, prefix.Masked())
+	if c.sources, err = parseSources("allow_sources", c.AllowSources); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.AuditLog) == "" {
 		return errors.New("audit_log is empty")
@@ -342,6 +443,11 @@ func (c *Config) Validate() error {
 			if _, err := netip.ParseAddr(d); err != nil {
 				return fmt.Errorf("admin_https device %q: want an IP address", d)
 			}
+		}
+	}
+	if k := c.Consent; k != nil {
+		if err := k.validate(listen, c.AdminListen); err != nil {
+			return err
 		}
 	}
 	if c.Services == nil {
@@ -383,7 +489,7 @@ func (c *Config) Validate() error {
 			// A refresh token goes only to the token endpoint: a service
 			// that sends its key upstream must not hold it, and services
 			// sharing it share one access token, so one OAuth client.
-			if name != oauthName && svc.Key == oauth.Key && (svc.Auth != AuthOAuth2 || *svc.OAuth2 != *oauth.OAuth2) {
+			if name != oauthName && svc.Key == oauth.Key && (svc.Auth != AuthOAuth2 || !svc.OAuth2.Equal(oauth.OAuth2)) {
 				return errors.New("an oauth2 refresh token can be shared only by oauth2 services with the same oauth2 settings")
 			}
 			// A client secret is the key of no service (so no refresh
@@ -409,6 +515,9 @@ func (c *Config) Validate() error {
 		if other, dup := seen[role.TokenSHA256]; dup {
 			return fmt.Errorf("roles %s and %s share a token", other, name)
 		}
+		if c.Consent != nil && role.TokenSHA256 == c.Consent.APITokenSHA256 {
+			return fmt.Errorf("role %s shares its token with the consent API", name)
+		}
 		seen[role.TokenSHA256] = name
 		for svcName, access := range role.Access {
 			if _, ok := c.Services[svcName]; !ok {
@@ -418,6 +527,61 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("role %s, service %s: %w", name, svcName, err)
 			}
 		}
+	}
+	return nil
+}
+
+// parseSources reads addresses and CIDR ranges, refusing one that allows
+// every address.
+func parseSources(field string, list []string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, s := range list {
+		prefix, err := netip.ParsePrefix(s)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(s)
+			if addrErr != nil {
+				return nil, fmt.Errorf("%s %q: want an address or CIDR", field, s)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Bits() == 0 {
+			return nil, fmt.Errorf("%s %q allows every address", field, s)
+		}
+		out = append(out, prefix.Masked())
+	}
+	return out, nil
+}
+
+func (k *Consent) validate(proxy netip.AddrPort, adminListen string) error {
+	pages, err := netip.ParseAddrPort(k.Listen)
+	if err != nil || pages.Addr().IsUnspecified() || pages.Port() == 0 {
+		return fmt.Errorf("consent listen %q: want one specific IP:port", k.Listen)
+	}
+	api, err := netip.ParseAddrPort(k.APIListen)
+	if err != nil || api.Addr().IsUnspecified() || api.Port() == 0 {
+		return fmt.Errorf("consent api_listen %q: want one specific IP:port", k.APIListen)
+	}
+	admin, _ := netip.ParseAddrPort(adminListen)
+	for _, other := range []netip.AddrPort{proxy, admin} {
+		if pages == other || api == other {
+			return errors.New("consent listen and api_listen must differ from listen and admin_listen")
+		}
+	}
+	if pages == api {
+		return errors.New("consent listen and api_listen must differ")
+	}
+	if k.public, err = upstreamURL("consent public_url", k.PublicURL); err != nil {
+		return err
+	}
+	k.public.Path = strings.TrimSuffix(k.public.Path, "/")
+	if len(k.APIAllowSources) == 0 {
+		return errors.New("consent api_allow_sources is empty")
+	}
+	if k.apiSources, err = parseSources("consent api_allow_sources", k.APIAllowSources); err != nil {
+		return err
+	}
+	if !tokenHash.MatchString(k.APITokenSHA256) {
+		return errors.New("consent api_token_sha256 must be 64 lowercase hex characters")
 	}
 	return nil
 }
@@ -503,11 +667,14 @@ func (s *Service) validate() error {
 		if _, err := upstreamURL("oauth2 token_url", s.OAuth2.TokenURL); err != nil {
 			return err
 		}
-		if id := s.OAuth2.ClientID; id == "" || len(id) > 512 || strings.IndexFunc(id, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+		if !printableToken(s.OAuth2.ClientID, 512) {
 			return errors.New("oauth2 client_id must be nonempty printable ASCII without spaces, at most 512 bytes")
 		}
 		if secret := s.OAuth2.ClientSecretKey; secret != "" && (!store.ValidName(secret) || secret == s.Key) {
 			return fmt.Errorf("oauth2 client_secret_key %q must be a valid key name other than key", secret)
+		}
+		if err := s.OAuth2.validateSignIn(); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("auth %q: want bearer, header, query or oauth2", s.Auth)

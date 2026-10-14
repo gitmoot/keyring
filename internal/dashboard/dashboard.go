@@ -175,6 +175,28 @@ func (b *Backend) saveMeta(meta map[string]KeyMeta) error {
 	return fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600)
 }
 
+// NoteKeyChange records in the key notes at metaPath that a key was set or
+// deleted outside the dashboard (a consent link): a new value is not tested
+// and not leaked, as after Replace; a deleted key has no notes. Callers hold
+// the lock the dashboard's changes use.
+func NoteKeyChange(metaPath, name string, deleted bool, now time.Time) error {
+	b := &Backend{MetaPath: metaPath}
+	meta, err := b.loadMeta()
+	if err != nil {
+		return err
+	}
+	if deleted {
+		if _, ok := meta[name]; !ok {
+			return nil
+		}
+		delete(meta, name)
+	} else {
+		at := now.UTC()
+		meta[name] = KeyMeta{UpdatedAt: &at}
+	}
+	return b.saveMeta(meta)
+}
+
 // rows builds the keys table: every stored key, plus any key a service names
 // that has no value.
 func (b *Backend) rows() ([]keyRow, error) {

@@ -277,13 +277,15 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "usage not saved: %v\n", err)
 		}
 	}()
-	// changes serializes the dashboard's writes and the SIGHUP reload.
+	// changes serializes the dashboard's writes, consent links and the
+	// SIGHUP reload.
 	changes := &sync.Mutex{}
+	metaPath := filepath.Join(filepath.Dir(storePath), "keymeta.json")
 	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr, func(a *admin.Server) {
 		reqs := requests.Open(filepath.Join(filepath.Dir(storePath), "requests.json"))
 		handler.SetRequests(reqs)
 		dashboardpkg.Register(&dashboardpkg.Backend{
-			Mu: changes, StorePath: storePath, MetaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"), Requests: reqs,
+			Mu: changes, StorePath: storePath, MetaPath: metaPath, Requests: reqs,
 			Proxy: handler, Admin: a,
 		})
 	})
@@ -292,6 +294,13 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	}
 	if dashboardSrv != nil {
 		defer dashboardSrv.Close()
+	}
+	consentSrvs, err := startConsent(cfg, storeKeys{path: storePath, metaPath: metaPath, mu: changes, proxy: handler}, handler, audit, stderr)
+	if err != nil {
+		return err
+	}
+	for _, s := range consentSrvs {
+		defer s.Close()
 	}
 	srv := &http.Server{
 		Handler:           handler,
