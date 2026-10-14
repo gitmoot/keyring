@@ -359,6 +359,22 @@ Daily counts are kept in memory. A supervisor that stops the process (a containe
 
 Container mode is set only by the flag; a rules or access file cannot turn it on, and `keyring serve` never uses it.
 
+### Egress proxy tunnels: a person's own proxy (off by default)
+
+An `egress-proxy` service lets an agent's traffic go out through a person's own proxy. The keyring holds the proxy credential (`user:password`, for example stored through a consent link), and it is never returned to anyone.
+
+```json
+"myproxy": {"key": "PROXY_CREDENTIAL", "auth": "egress-proxy",
+  "egress_proxy": {"type": "http-connect", "address": "proxy.example.net:8080", "tls": false, "ports": [443], "idle_seconds": 300, "max_seconds": 3600}}
+```
+
+- `type` is `http-connect` (CONNECT with `Proxy-Authorization: Basic`, optionally over TLS with `"tls": true`) or `socks5` (username and password). `address` must be a DNS name or a public IP. A name is checked again at connect time, so it cannot point the keyring at a private address.
+- The service has no `base` and serves only `/<service>/_tunnel?host=H&port=P`. On every other service `/_tunnel` is an ordinary path and is forwarded as before. The request must be a WebSocket upgrade (RFC 6455, no subprotocol). The keyring connects through the proxy first, then answers 101. After that, binary frames carry the raw TCP bytes both ways.
+- `host` is a name, passed to the proxy unresolved so the person's proxy does the DNS lookup, or a public IP. Private, loopback, link-local, CGNAT (including Tailscale's 100.64.0.0/10), reserved, IPv6 outside global unicast 2000::/3 (so IPv4-compatible, SIIT and unique-local forms) and IPv4-carrying global ranges (NAT64, 6to4, Teredo), and any address with a zone (`%eth0`), are refused with 403, as is a port not in `ports` (default `[443]`).
+- Before the upgrade, errors are plain HTTP: 400 bad target or no upgrade; 401 token; 403 access, destination or port; 429 daily limit; 503 no credential stored; 502 proxy unreachable or refused (wrong credential). A failed tunnel does not count against `daily_requests`.
+- After the upgrade, close codes are: 1000 normal, 1002 protocol error (unmasked frame, RSV bits, bad fragmentation, control frame over 125 bytes), 1003 text frame, 1008 `daily_bytes` reached, 1009 frame over 1 MiB, 1011 upstream error, 4000 idle (`idle_seconds`, default 300), 4001 `max_seconds` (default 3600). Each write to the client has a 30-second deadline, so a client that stops reading cannot hold a tunnel open.
+- Per role: `daily_requests` counts tunnels, and `daily_bytes` (egress-proxy only) counts bytes both ways. Both are in an instance's `GET /usage` and are restored on unlock. The audit has one line per tunnel: role, service, `host:port`, close code, bytes up and down, and duration. It never holds the credential or tunnel contents.
+
 ### Ed25519 signing (not an API proxy)
 
 For artifacts that need a signature without the key leaving this process — the

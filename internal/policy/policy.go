@@ -13,12 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +39,9 @@ const (
 	// AuthOAuth2 sends Authorization: Bearer <access token>, minted from the
 	// refresh token stored under Key; the refresh token never goes upstream.
 	AuthOAuth2 = "oauth2"
+	// AuthEgressProxy opens TCP tunnels through a person's own proxy; the
+	// proxy credential stored under Key goes only to that proxy.
+	AuthEgressProxy = "egress-proxy"
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -217,6 +222,8 @@ type Service struct {
 	// OAuth2 tells an oauth2 service how to turn its stored refresh token
 	// into access tokens.
 	OAuth2 *OAuth2 `json:"oauth2,omitempty"`
+	// EgressProxy configures an egress-proxy service.
+	EgressProxy *EgressProxy `json:"egress_proxy,omitempty"`
 
 	base *url.URL
 }
@@ -315,6 +322,106 @@ func (s Service) KeyNames() []string {
 	return []string{s.Key}
 }
 
+// Proxy kinds for egress-proxy services.
+const (
+	ProxyHTTPConnect = "http-connect"
+	ProxySOCKS5      = "socks5"
+)
+
+// EgressProxy is the person's own proxy. The credential ("user:password")
+// is the service's key.
+type EgressProxy struct {
+	Type string `json:"type"`
+	// Address is host:port of the proxy. An IP address must be public; a
+	// name is checked again when it resolves.
+	Address string `json:"address"`
+	// TLS wraps the connection to the proxy in TLS (for http-connect).
+	TLS bool `json:"tls,omitempty"`
+	// Ports are the destination ports allowed; default [443].
+	Ports []int `json:"ports,omitempty"`
+	// IdleSeconds closes a tunnel with no bytes either way (default 300);
+	// MaxSeconds ends any tunnel (default 3600).
+	IdleSeconds int `json:"idle_seconds,omitempty"`
+	MaxSeconds  int `json:"max_seconds,omitempty"`
+}
+
+// AllowedPorts returns the destination ports allowed.
+func (e *EgressProxy) AllowedPorts() []int {
+	if len(e.Ports) == 0 {
+		return []int{443}
+	}
+	return e.Ports
+}
+
+// Idle and Max return the tunnel time limits.
+func (e *EgressProxy) Idle() time.Duration { return seconds(e.IdleSeconds, 300) }
+func (e *EgressProxy) Max() time.Duration  { return seconds(e.MaxSeconds, 3600) }
+
+func seconds(n, def int) time.Duration {
+	if n == 0 {
+		n = def
+	}
+	return time.Duration(n) * time.Second
+}
+
+// PublicAddr reports whether a is an address a tunnel or proxy may reach:
+// not private, loopback, link-local, multicast, unspecified, CGNAT (which
+// holds Tailscale's range), benchmarking or reserved.
+func PublicAddr(a netip.Addr) bool {
+	// A zone names a local interface and is ignored by every check below
+	// (and dropped on the wire), so an address with one is never public.
+	if a.Zone() != "" {
+		return false
+	}
+	a = a.Unmap()
+	if !a.IsValid() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
+		a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	// IPv6: only global unicast, so deprecated and translation forms that
+	// carry an IPv4 address (::/96, ::ffff:0:0:0/96, ...) are out by default.
+	if a.Is6() && !globalUnicast6.Contains(a) {
+		return false
+	}
+	for _, p := range nonPublic {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
+}
+
+var globalUnicast6 = netip.MustParsePrefix("2000::/3")
+
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	// IPv6 forms that carry or reach an IPv4 address: NAT64, 6to4, Teredo.
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+// TunnelHost checks a tunnel destination name or address.
+func TunnelHost(host string) bool {
+	if a, err := netip.ParseAddr(host); err == nil {
+		return PublicAddr(a)
+	}
+	return len(host) <= 253 && tunnelName.MatchString(host)
+}
+
+var tunnelName = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$`)
+
 // SignOnly services never send their private key to an upstream.
 func (s Service) SignOnly() bool {
 	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign
@@ -334,6 +441,9 @@ type Access struct {
 	Paths []string `json:"paths"`
 	// DailyRequests caps calls per UTC day; 0 means no cap.
 	DailyRequests int `json:"daily_requests,omitempty"`
+	// DailyBytes caps tunnel bytes (both ways) per UTC day for an
+	// egress-proxy service; 0 means no cap.
+	DailyBytes int64 `json:"daily_bytes,omitempty"`
 	// Expires ends this access (the role keeps its others); nil means never.
 	Expires *time.Time `json:"expires,omitempty"`
 }
@@ -571,6 +681,9 @@ func (c *Config) Validate() error {
 			if err := access.validate(); err != nil {
 				return fmt.Errorf("role %s, service %s: %w", name, svcName, err)
 			}
+			if access.DailyBytes != 0 && c.Services[svcName].Auth != AuthEgressProxy {
+				return fmt.Errorf("role %s, service %s: daily_bytes applies only to egress-proxy services", name, svcName)
+			}
 		}
 	}
 	return nil
@@ -674,6 +787,12 @@ func (s *Service) validate() error {
 	if s.AppleAds != nil || s.AppStoreConnect != nil {
 		return errors.New("signing identity requires the corresponding sign-only auth")
 	}
+	if s.Auth == AuthEgressProxy {
+		return s.validateEgress()
+	}
+	if s.EgressProxy != nil {
+		return errors.New("egress_proxy settings require auth egress-proxy")
+	}
 	u, err := upstreamURL("base", s.Base)
 	if err != nil {
 		return err
@@ -760,6 +879,46 @@ func upstreamURL(field, raw string) (*url.URL, error) {
 	return u, nil
 }
 
+func (s *Service) validateEgress() error {
+	e := s.EgressProxy
+	if e == nil {
+		return errors.New("auth egress-proxy needs egress_proxy settings (type, address)")
+	}
+	if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil {
+		return errors.New("an egress-proxy service takes only key and egress_proxy")
+	}
+	if !store.ValidName(s.Key) {
+		return fmt.Errorf("key %q is not a valid key name", s.Key)
+	}
+	if e.Type != ProxyHTTPConnect && e.Type != ProxySOCKS5 {
+		return fmt.Errorf("egress_proxy type %q: want http-connect or socks5", e.Type)
+	}
+	if e.TLS && e.Type != ProxyHTTPConnect {
+		return errors.New("egress_proxy tls is only for http-connect")
+	}
+	host, port, err := net.SplitHostPort(e.Address)
+	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("egress_proxy address %q: want host:port", e.Address)
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		if !PublicAddr(a) {
+			return fmt.Errorf("egress_proxy address %q: a private, loopback or reserved address is not allowed", e.Address)
+		}
+	} else if !tunnelName.MatchString(host) {
+		return fmt.Errorf("egress_proxy address %q: want a DNS name or public IP", e.Address)
+	}
+	for _, p := range e.Ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("egress_proxy port %d out of range", p)
+		}
+	}
+	if e.IdleSeconds < 0 || e.IdleSeconds > 3600 || e.MaxSeconds < 0 || e.MaxSeconds > 24*3600 {
+		return errors.New("egress_proxy idle_seconds must be 0-3600 and max_seconds 0-86400")
+	}
+	s.base = nil
+	return nil
+}
+
 func (a Access) validate() error {
 	for _, m := range a.Methods {
 		if !methods[m] {
@@ -774,8 +933,8 @@ func (a Access) validate() error {
 			return fmt.Errorf("path %q must start with / and contain no .. or %%", p)
 		}
 	}
-	if a.DailyRequests < 0 {
-		return errors.New("daily_requests is negative")
+	if a.DailyRequests < 0 || a.DailyBytes < 0 {
+		return errors.New("daily_requests or daily_bytes is negative")
 	}
 	return nil
 }
