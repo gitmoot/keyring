@@ -319,3 +319,61 @@ func TestValidateOAuth2SignIn(t *testing.T) {
 		t.Fatal("shared refresh token with different scopes accepted")
 	}
 }
+
+func TestContainerMode(t *testing.T) {
+	// A file cannot turn it on.
+	var fromFile Config
+	if err := json.Unmarshal([]byte(`{"ContainerMode":true,"container_mode":true}`), &fromFile); err != nil || fromFile.ContainerMode {
+		t.Fatalf("ContainerMode set from JSON: %v", err)
+	}
+
+	c := validConfig()
+	c.Listen, c.AllowSources = "0.0.0.0:8080", nil
+	if err := c.Validate(); err == nil {
+		t.Fatal("wildcard listen without container mode accepted")
+	}
+	c.ContainerMode = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("container mode: %v", err)
+	}
+	if !c.SourceAllowed(netip.MustParseAddr("203.0.113.7")) {
+		t.Fatal("container mode checked a source address")
+	}
+	c.AllowSources = []string{"10.0.0.1"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("container mode with allow_sources accepted (they would prove nothing)")
+	}
+
+	consent := func() *Consent {
+		return &Consent{Listen: "0.0.0.0:8081", PublicURL: "https://connect.example.com/p/x", APIListen: "0.0.0.0:8082", APITokenSHA256: hash("api")}
+	}
+	cases := map[string]func(*Config){
+		"pages on the proxy port":      func(c *Config) { c.Consent.Listen = "127.0.0.1:8080" },
+		"api on the proxy port":        func(c *Config) { c.Consent.APIListen = "10.1.2.3:8080" },
+		"pages and api on one port":    func(c *Config) { c.Consent.APIListen = "127.0.0.1:8081" },
+		"consent api sources in a box": func(c *Config) { c.Consent.APIAllowSources = []string{"10.0.0.1"} },
+	}
+	ok := validConfig()
+	ok.ContainerMode, ok.Listen, ok.AllowSources, ok.Consent = true, "0.0.0.0:8080", nil, consent()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("container consent: %v", err)
+	}
+	if !ok.Consent.APISourceAllowed(netip.MustParseAddr("203.0.113.7")) {
+		t.Fatal("container mode checked the consent API source")
+	}
+	for name, mutate := range cases {
+		c := validConfig()
+		c.ContainerMode, c.Listen, c.AllowSources, c.Consent = true, "0.0.0.0:8080", nil, consent()
+		mutate(c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Outside container mode the consent listeners keep refusing wildcards.
+	f := validConfig()
+	f.Consent = consent()
+	f.Consent.APIAllowSources = []string{"10.0.0.5"}
+	if err := f.Validate(); err == nil {
+		t.Fatal("wildcard consent listen accepted outside container mode")
+	}
+}

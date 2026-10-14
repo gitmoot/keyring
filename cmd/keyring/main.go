@@ -34,7 +34,7 @@ import (
 
 const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
-  keyring instance --admin-listen ADDR --admin-token-sha256 HEX [--state FILE] [--audit FILE]
+  keyring instance --admin-listen ADDR --admin-token-sha256 HEX [--state FILE] [--audit FILE] [--container]
                                              run one person's keyring, configured only through its admin
                                              API, its state sealed with a data key from the supervisor
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
@@ -88,6 +88,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
 	statePath := fs.String("state", "", "instance: keep the sealed state in this file (default: memory only)")
 	auditPath := fs.String("audit", "", "instance: audit log file (default: stdout)")
+	containerMode := fs.Bool("container", false, "instance: run in a container reached only through its supervisor (wildcard listen, no source check)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -111,7 +112,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "keyring instance: pass --admin-listen and --admin-token-sha256")
 			return 2
 		}
-		err = runInstance(*adminListen, *adminTokenSHA, *statePath, *auditPath, stdout, stderr)
+		err = runInstance(*adminListen, *adminTokenSHA, *statePath, *auditPath, *containerMode, stdout, stderr)
 	case "serve":
 		if !need("config", "store") || fs.NArg() != 0 {
 			return 2

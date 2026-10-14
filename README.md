@@ -349,7 +349,14 @@ After `DELETE /instance`, a copy of the sealed state that the supervisor still h
 
 One process per person, not one process for many people: the operating system keeps each person's keys in a separate address space, the proxy code is unchanged, and it matches one container per person at Cloudflare. An idle instance measured on Linux x64 (Go 1.24, one service, one role): about 12 MB resident, 8 threads, and 0 CPU ticks over 30 idle seconds.
 
-Limits of this version: daily counts and open consent links are in memory, so a restart resets them (as with `keyring serve`); #50 tracks keeping them across a container's sleep. The proxy listener still refuses a wildcard address (#51).
+Limits of this version: daily counts and open consent links are in memory, so a restart resets them (as with `keyring serve`); #50 tracks keeping them across a container's sleep.
+
+**Container mode** (`--container`, #51) is for an instance in a container that only its supervisor can reach, such as a Cloudflare Container behind the person's Durable Object. In this mode:
+- the admin API, the proxy and the consent listeners may use a wildcard address such as `0.0.0.0:8080`, and no two may share a port;
+- `allow_sources` and `consent.api_allow_sources` must be empty, and no source address is checked, because every request arrives through the supervisor. The supervisor is the network boundary. It checks the router's proof (`X-Keyring-Caller`, #52) and the admin token before forwarding anything;
+- the keyring never forwards `X-Keyring-Caller` upstream, even if the supervisor failed to remove it.
+
+Container mode is set only by the flag; a rules or access file cannot turn it on, and `keyring serve` never uses it.
 
 ### Ed25519 signing (not an API proxy)
 

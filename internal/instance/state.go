@@ -72,7 +72,8 @@ func (s *State) clone() *State {
 
 // config builds and validates the proxy settings for s. auditName only
 // fills the field Validate requires; the instance writes its own audit.
-func (s *State) config(auditName string) (*policy.Config, error) {
+// container sets policy.Config.ContainerMode.
+func (s *State) config(auditName string, container bool) (*policy.Config, error) {
 	// Round-trip through JSON so the config never shares maps or pointers
 	// with the state, and every parsed field is rebuilt by Validate.
 	raw, err := json.Marshal(struct {
@@ -91,6 +92,7 @@ func (s *State) config(auditName string) (*policy.Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	cfg.ContainerMode = container
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
