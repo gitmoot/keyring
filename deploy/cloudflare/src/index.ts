@@ -211,33 +211,52 @@ interface Reply {
 
 // ---------- Durable Object ----------
 
-interface Stored {
+/** Fixed for the life of a keyring; written once by create(). */
+interface Identity {
 	id: string;
 	label: string;
 	salt: string; // base64, 32 bytes
 	adminToken: string; // container admin API
 	consentToken: string; // container consent API
-	state?: string; // base64 sealed state
-	version?: number;
-	usage?: unknown; // last GET /usage
-	clientSecretsHash?: string;
-	openUntil?: number; // keep running until consent links and sign-ins end
 	created: string;
 }
 
+/** The sealed state and its version (#49). */
+interface Sealed {
+	state: string;
+	version: number;
+}
+
+// Storage keys. Each field has its own key, so writers of different fields
+// never overwrite each other with a stale copy.
+const K_ID = "identity";
+const K_SEALED = "sealed";
+const K_USAGE = "usage";
+const K_OPEN_UNTIL = "openUntil";
+const K_SECRETS = "clientSecretsHash";
+
+class Deleted extends Error {}
+
 export class KeyringInstance extends DurableObject<Env> {
+	/** The one start in progress or done; null when the container is stopped. */
 	private ready: Promise<void> | null = null;
+	/** Set synchronously when a delete begins; nothing restarts or writes after it. */
+	private deleted = false;
+	private inFlight = 0;
 	private lastUsed = 0;
 
-	private async meta(): Promise<Stored | undefined> {
-		return this.ctx.storage.get<Stored>("meta");
+	private async identity(): Promise<Identity | undefined> {
+		if (this.deleted) return undefined;
+		return this.ctx.storage.get<Identity>(K_ID);
 	}
 
-	private async save(m: Stored): Promise<void> {
-		await this.ctx.storage.put("meta", m);
+	/** Writes one field unless the keyring is being deleted. */
+	private async put(key: string, value: unknown): Promise<void> {
+		if (this.deleted) throw new Deleted();
+		await this.ctx.storage.put(key, value);
 	}
 
-	private async dataKey(m: Stored): Promise<string> {
+	private async dataKey(m: Identity): Promise<string> {
 		const master = await crypto.subtle.importKey("raw", unb64(this.env.MASTER_KEY), "HKDF", false, ["deriveBits"]);
 		const bits = await crypto.subtle.deriveBits(
 			{ name: "HKDF", hash: "SHA-256", salt: unb64(m.salt), info: enc.encode("keyring-instance-v1:" + m.id) },
@@ -254,7 +273,7 @@ export class KeyringInstance extends DurableObject<Env> {
 	}
 
 	/** Calls the container's admin API. */
-	private async adminCall(m: Stored, method: string, path: string, body?: unknown, timeoutMs = 30_000): Promise<Response> {
+	private async adminCall(m: Identity, method: string, path: string, body?: unknown, timeoutMs = 30_000): Promise<Response> {
 		return this.port(PORT_ADMIN).fetch("http://keyring" + path, {
 			method,
 			headers: { authorization: "Bearer " + m.adminToken, "content-type": "application/json" },
@@ -263,102 +282,107 @@ export class KeyringInstance extends DurableObject<Env> {
 		});
 	}
 
-	private async adminJSON(m: Stored, method: string, path: string, body?: unknown): Promise<Reply> {
+	private async adminJSON(m: Identity, method: string, path: string, body?: unknown): Promise<Reply> {
 		const r = await this.adminCall(m, method, path, body);
 		const out = await reply(r);
 		if (!r.ok) throw new KeyringError(r.status, out.error ?? `keyring answered ${r.status}`);
 		return out;
 	}
 
-	/** Starts the container if needed and waits until its admin API answers. */
-	private async start(m: Stored): Promise<void> {
+	/** Starts the container if needed and waits until it holds this keyring's state. */
+	private async start(m: Identity): Promise<void> {
 		const c = this.ctx.container!;
+		const adminHash = await sha256Hex(m.adminToken);
+		if (this.deleted) throw new Deleted();
 		if (!c.running) {
 			c.start({
 				enableInternet: true,
 				entrypoint: [
 					"/usr/local/bin/keyring", "instance", "--container",
 					"--admin-listen", `0.0.0.0:${PORT_ADMIN}`,
-					"--admin-token-sha256", await sha256Hex(m.adminToken),
+					"--admin-token-sha256", adminHash,
 				],
 			});
-			// Ends the container's life with this object's, and records a crash.
-			c.monitor().catch((e) => console.error("keyring container stopped:", String(e))).finally(() => { this.ready = null; });
+			const mine = this.ready;
+			c.monitor()
+				.catch((e) => console.error("keyring container stopped:", String(e)))
+				.finally(() => {
+					// Only the start this monitor belongs to is forgotten.
+					if (this.ready === mine) this.ready = null;
+				});
 		}
 		for (let i = 0; ; i++) {
+			if (this.deleted) throw new Deleted();
 			try {
 				const r = await this.adminCall(m, "GET", "/status", undefined, 1000);
 				if (r.ok) {
 					const s = await reply(r);
-					if (!s.unlocked && m.state) {
-						await this.adminJSON(m, "POST", "/unlock", { data_key: await this.dataKey(m), state: m.state, usage: m.usage });
+					const sealed = await this.ctx.storage.get<Sealed>(K_SEALED);
+					if (this.deleted) throw new Deleted();
+					if (!s.unlocked && sealed) {
+						const usage = await this.ctx.storage.get(K_USAGE);
+						await this.adminJSON(m, "POST", "/unlock", { data_key: await this.dataKey(m), state: sealed.state, usage });
 					}
 					break;
 				}
-			} catch {
+			} catch (e) {
+				if (e instanceof Deleted || e instanceof KeyringError) throw e;
 				// not listening yet
 			}
 			if (i >= 60) throw new KeyringError(503, "the keyring container did not start");
 			await scheduler.wait(250);
 		}
 		// A new keyring gets them from create(), once it exists.
-		if (m.state) await this.pushClientSecrets(m);
+		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
 		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
 	}
 
-	/** Makes sure the container runs and holds this instance's state. */
-	private async running(m: Stored): Promise<void> {
+	/** Makes sure the container runs and holds this keyring's state. One start at a time. */
+	private running(m: Identity): Promise<void> {
+		if (this.deleted) return Promise.reject(new Deleted());
 		this.lastUsed = Date.now();
-		if (this.ctx.container?.running && this.ready) return this.ready;
-		this.ready = this.start(m).catch((e) => {
-			this.ready = null;
+		if (this.ready) return this.ready;
+		const p: Promise<void> = this.start(m).catch((e) => {
+			if (this.ready === p) this.ready = null;
 			throw e;
 		});
-		return this.ready;
+		this.ready = p;
+		return p;
 	}
 
-	/** Saves the container's sealed state if it is newer than the one kept. */
-	private async sync(m: Stored): Promise<void> {
+	/** Saves the container's sealed state if it is newer than the one kept (#49). */
+	private async sync(m: Identity): Promise<void> {
 		const s = await this.adminJSON(m, "GET", "/state");
-		const cur = await this.meta();
-		if (!cur || cur.id !== m.id || s.state === undefined || s.version === undefined) return; // deleted meanwhile
-		// Never go back to an older state (#49).
-		if (cur.version === undefined || s.version > cur.version) {
-			cur.state = s.state;
-			cur.version = s.version;
-			await this.save(cur);
-			Object.assign(m, cur);
-		}
+		if (s.state === undefined || s.version === undefined) return;
+		const cur = await this.ctx.storage.get<Sealed>(K_SEALED);
+		if (!cur || s.version > cur.version) await this.put(K_SEALED, { state: s.state, version: s.version } satisfies Sealed);
 	}
 
-	private async pushClientSecrets(m: Stored): Promise<void> {
+	private async pushClientSecrets(m: Identity): Promise<void> {
 		const raw = this.env.OAUTH_CLIENT_SECRETS ?? "";
 		const h = await sha256Hex(raw);
-		if (h === m.clientSecretsHash) return;
+		if (h === (await this.ctx.storage.get<string>(K_SECRETS))) return;
 		const secrets = raw ? (JSON.parse(raw) as Record<string, string>) : {};
 		for (const [name, value] of Object.entries(secrets)) {
 			await this.adminJSON(m, "PUT", `/keys/${name}`, { value });
 		}
 		await this.sync(m);
-		const cur = (await this.meta())!;
-		cur.clientSecretsHash = h;
-		await this.save(cur);
-		m.clientSecretsHash = h;
+		await this.put(K_SECRETS, h);
 	}
 
 	// ----- RPC from the Worker's admin routes -----
 
 	async create(id: string, label: string): Promise<{ role_token: string } | { status: number; error: string }> {
-		if (await this.meta()) return { status: 409, error: "keyring exists" };
+		if (this.deleted || (await this.ctx.storage.get(K_ID))) return { status: 409, error: "keyring exists" };
 		const template = this.env.SERVICES_TEMPLATE;
-		const m: Stored = {
+		const m: Identity = {
 			id, label,
 			salt: b64(crypto.getRandomValues(new Uint8Array(32))),
 			adminToken: randomToken(),
 			consentToken: randomToken(),
 			created: new Date().toISOString(),
 		};
-		await this.save(m);
+		await this.put(K_ID, m);
 		try {
 			await this.running(m);
 			await this.adminJSON(m, "POST", "/create", { id, data_key: await this.dataKey(m), listen: `0.0.0.0:${PORT_PROXY}` });
@@ -372,7 +396,6 @@ export class KeyringInstance extends DurableObject<Env> {
 				await this.adminJSON(m, "PUT", `/services/${name}`, svc);
 			}
 			const role = await this.adminJSON(m, "PUT", `/roles/${ROLE}`, { access: template.access });
-			m.clientSecretsHash = undefined;
 			await this.pushClientSecrets(m);
 			await this.sync(m);
 			if (!role.token) throw new KeyringError(502, "the keyring returned no role token");
@@ -394,15 +417,16 @@ export class KeyringInstance extends DurableObject<Env> {
 			const out = await reply(r);
 			if (!r.ok) return { status: r.status, error: out.error ?? "link refused" };
 			// The keyring's link is <PUBLIC_BASE>/connect/c/<link>; the person
-			// opens it under this instance's path.
+			// opens it under this keyring's path.
 			const prefix = `${this.env.PUBLIC_BASE}/connect/c/`;
 			if (typeof out.url !== "string" || !out.url.startsWith(prefix)) return { status: 502, error: "unexpected link" };
 			out.url = `${this.env.PUBLIC_BASE}/connect/${m.id}/c/${out.url.slice(prefix.length)}`;
 			const until = Date.parse(out.expires_at ?? "") + SIGN_IN_MS;
 			if (Number.isNaN(until)) return { status: 502, error: "unexpected link" };
-			const cur = (await this.meta())!;
-			cur.openUntil = Math.max(cur.openUntil ?? 0, until);
-			await this.save(cur);
+			// Only this method writes the field, and nothing but storage is
+			// awaited between the read and the write.
+			const cur = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
+			await this.put(K_OPEN_UNTIL, Math.max(cur, until));
 			return { status: 201, body: out };
 		});
 	}
@@ -428,7 +452,7 @@ export class KeyringInstance extends DurableObject<Env> {
 				await this.adminJSON(m, "PUT", `/roles/${ROLE}`, { access, expires: s.roles?.[ROLE]?.expires });
 			}
 			await this.sync(m);
-			return { body: { version: m.version } };
+			return { body: { version: (await this.ctx.storage.get<Sealed>(K_SEALED))?.version } };
 		});
 	}
 
@@ -460,25 +484,34 @@ export class KeyringInstance extends DurableObject<Env> {
 	}
 
 	private async wipe(): Promise<void> {
-		const m = await this.meta();
-		if (m && this.ctx.container?.running) {
-			await this.adminCall(m, "DELETE", "/instance").catch(() => {});
-		}
-		if (this.ctx.container?.running) await this.ctx.container.destroy().catch(() => {});
+		// First, before any await: from here on nothing starts the container
+		// or writes storage, whatever it read before.
+		this.deleted = true;
+		const m = await this.ctx.storage.get<Identity>(K_ID);
+		const c = this.ctx.container;
+		if (m && c?.running) await this.adminCall(m, "DELETE", "/instance").catch(() => {});
+		// Also when it does not report running yet: a start may be under way.
+		await c?.destroy().catch(() => {});
 		this.ready = null;
 		await this.ctx.storage.deleteAlarm();
 		// The salt goes with the rest: no copy of the state can be opened again.
 		await this.ctx.storage.deleteAll();
+		// A start that slipped past its check before the flag stops here.
+		await c?.destroy().catch(() => {});
 	}
 
-	private async withInstance(fn: (m: Stored) => Promise<Result>): Promise<Result> {
-		const m = await this.meta();
+	private async withInstance(fn: (m: Identity) => Promise<Result>): Promise<Result> {
+		const m = await this.identity();
 		if (!m) return { status: 404, error: "unknown keyring" };
+		this.inFlight++;
 		try {
 			await this.running(m);
 			return await fn(m);
 		} catch (e) {
 			return failure(e);
+		} finally {
+			this.inFlight--;
+			this.lastUsed = Date.now();
 		}
 	}
 
@@ -486,68 +519,79 @@ export class KeyringInstance extends DurableObject<Env> {
 
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
-		const m = await this.meta();
+		const m = await this.identity();
 		if (url.pathname.startsWith("/_proxy/")) {
 			if (!m) return json(404, { error: "unknown keyring" });
+			this.inFlight++;
 			try {
 				await this.running(m);
+				const path = "/" + url.pathname.slice("/_proxy/".length) + url.search;
+				const headers = new Headers(request.headers);
+				headers.delete(CALLER_HEADER);
+				return await this.port(PORT_PROXY).fetch("http://keyring" + path, {
+					method: request.method, headers, body: request.body, redirect: "manual",
+				});
 			} catch (e) {
-				const f = failure(e) as { status: number; error: string };
+				const f = failure(e);
 				return json(f.status, { error: f.error });
+			} finally {
+				this.inFlight--;
+				this.lastUsed = Date.now();
 			}
-			const path = "/" + url.pathname.slice("/_proxy/".length) + url.search;
-			const headers = new Headers(request.headers);
-			headers.delete(CALLER_HEADER);
-			return this.port(PORT_PROXY).fetch("http://keyring" + path, {
-				method: request.method, headers, body: request.body, redirect: "manual",
-			});
 		}
 		if (url.pathname.startsWith("/_pages/")) {
 			// Links live in the container's memory: a stopped container has
 			// no open link, and a stranger cannot wake it.
-			if (!m || !this.ctx.container?.running || (m.openUntil ?? 0) < Date.now()) {
+			const openUntil = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
+			if (!m || !this.ctx.container?.running || openUntil < Date.now()) {
 				return page(410, "This link has expired or was already used. Ask for a new one.");
 			}
-			await this.running(m);
-			const path = "/" + url.pathname.slice("/_pages/".length) + url.search;
-			const resp = await this.port(PORT_PAGES).fetch("http://keyring" + path, {
-				method: request.method, headers: request.headers, body: request.body, redirect: "manual",
-			});
-			// A link or callback may have stored a key.
-			await this.sync(m).catch(() => {});
-			const out = new Response(resp.body, resp);
-			if (resp.status === 303 && path.startsWith("/connect/c/")) {
-				// Off to the provider: the shared callback URL needs to find
-				// this instance again. The keyring still checks its own state
-				// and browser cookie.
-				out.headers.append("set-cookie", `${INSTANCE_COOKIE}=${m.id}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
+			this.inFlight++;
+			try {
+				await this.running(m);
+				const path = "/" + url.pathname.slice("/_pages/".length) + url.search;
+				const resp = await this.port(PORT_PAGES).fetch("http://keyring" + path, {
+					method: request.method, headers: request.headers, body: request.body, redirect: "manual",
+				});
+				// A link or callback may have stored a key.
+				await this.sync(m).catch(() => {});
+				const out = new Response(resp.body, resp);
+				if (resp.status === 303 && path.startsWith("/connect/c/")) {
+					// Off to the provider: the shared callback URL needs to find
+					// this keyring again. The keyring still checks its own state
+					// and browser cookie.
+					out.headers.append("set-cookie", `${INSTANCE_COOKIE}=${m.id}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
+				}
+				return out;
+			} catch {
+				return page(410, "This link has expired or was already used. Ask for a new one.");
+			} finally {
+				this.inFlight--;
 			}
-			return out;
 		}
 		return json(404, { error: "not found" });
 	}
 
 	/** Saves daily counts while running; stops an idle container. */
 	async alarm(): Promise<void> {
-		const m = await this.meta();
+		const m = await this.identity();
 		const c = this.ctx.container;
 		if (!m || !c?.running) return;
 		try {
-			const usage = await this.adminJSON(m, "GET", "/usage");
-			const cur = (await this.meta())!;
-			cur.usage = usage;
-			await this.save(cur);
-		} catch {
+			await this.put(K_USAGE, await this.adminJSON(m, "GET", "/usage"));
+		} catch (e) {
+			if (e instanceof Deleted) return;
 			// next tick
 		}
-		const idle = Date.now() - this.lastUsed > IDLE_MS && (m.openUntil ?? 0) < Date.now();
+		const openUntil = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
+		const idle = this.inFlight === 0 && Date.now() - this.lastUsed > IDLE_MS && openUntil < Date.now();
 		if (idle) {
 			await this.sync(m).catch(() => {});
 			c.signal(15);
 			this.ready = null;
 			return;
 		}
-		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+		if (!this.deleted) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
 	}
 }
 

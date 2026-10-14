@@ -14,6 +14,9 @@ flowchart LR
 
 ## What lives where
 
+The DO keeps each item under its own storage key, so writers of different items never overwrite each other. A delete sets a flag before its first await: after that, nothing starts the container or writes storage, and the container is destroyed even while it is still starting.
+
+
 | Item | Where | Notes |
 |---|---|---|
 | Key values, roles, services | the container's memory, and the DO as a **sealed state** (AES-256-GCM) | the DO never decrypts it |

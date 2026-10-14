@@ -53,6 +53,7 @@ let starts = 0;
 /** A container whose ports P map to host ports base+P-8080, kept across restarts. */
 class FakeContainer {
 	proc: Subprocess | null = null;
+	pending: Timer | null = null;
 	base = 0;
 	get running() {
 		return this.proc !== null && this.proc.exitCode === null;
@@ -65,13 +66,21 @@ class FakeContainer {
 			this.base = nextPort;
 			nextPort += 20;
 		}
-		this.proc = spawn([BIN!, ...opts.entrypoint.slice(1).map((a) => this.map(a))], { stdout: "ignore", stderr: "ignore" });
 		starts++;
+		// `running` turning true right away is not documented, so here it
+		// turns true a little later.
+		this.pending = setTimeout(() => {
+			this.pending = null;
+			this.proc = spawn([BIN!, ...opts.entrypoint.slice(1).map((a) => this.map(a))], { stdout: "ignore", stderr: "ignore" });
+		}, 20);
 	}
 	async monitor() {
 		await this.proc?.exited;
 	}
 	async destroy() {
+		// Like the runtime's destroy(), this also ends a start under way.
+		if (this.pending) clearTimeout(this.pending);
+		this.pending = null;
 		this.proc?.kill(9);
 		await this.proc?.exited;
 		this.proc = null;
@@ -91,12 +100,11 @@ class FakeContainer {
 }
 
 class Storage {
-	// The object stores one record ("meta"); kept as a plain object here.
-	m = new Map<string, Record<string, unknown>>();
+	m = new Map<string, unknown>();
 	async get<T>(k: string) {
 		return structuredClone(this.m.get(k)) as T | undefined;
 	}
-	async put(k: string, v: Record<string, unknown>) {
+	async put(k: string, v: unknown) {
 		this.m.set(k, structuredClone(v));
 	}
 	async deleteAll() {
@@ -181,17 +189,24 @@ try {
 	expect("upstream got the key, never the caller proof", seen.map((s) => [s.auth, s.caller]), [
 		["Bearer echo-secret-123", ""], ["Bearer echo-secret-123", ""], ["Bearer echo-secret-123", ""],
 	]);
-	const meta = storages.get(id)!.m.get("meta") ?? {};
-	expect("Durable Object keeps only sealed state", [typeof meta.state, JSON.stringify(meta).includes("echo-secret-123")], ["string", false]);
+	const stored = JSON.stringify([...storages.get(id)!.m]);
+	expect("Durable Object keeps only sealed state", [storages.get(id)!.m.has("sealed"), stored.includes("echo-secret-123")], [true, false]);
 
 	await objects.get(id)!.alarm();
-	expect("alarm keeps usage", storages.get(id)!.m.get("meta")?.usage, {
+	expect("alarm keeps usage", storages.get(id)!.m.get("usage"), {
 		day: new Date().toISOString().slice(0, 10), counts: [{ role: "router", service: "echo", count: 3 }],
 	});
 	// The container sleeps: its process and the object's memory are gone.
 	await containers.get(id)!.destroy();
 	objects.delete(id);
 	expect("after a restart, the daily limit holds", [(await call("GET", `/p/${id}/echo/x5`, P)).status, starts], [429, 2]);
+
+	// Concurrent calls on a stopped container start it once (review P3).
+	await containers.get(id)!.destroy();
+	objects.get(id)!["ready" as never] = null as never;
+	const before = starts;
+	const both = await Promise.all([call("GET", `/p/${id}/echo/z1`, P), call("GET", `/p/${id}/echo/z2`, P)]);
+	expect("two calls on a stopped container: one start", [both.map((x) => x.status), starts - before], [[429, 429], 1]);
 
 	r = await call("POST", `/admin/instances/${id}/role-token`, ADMIN);
 	const token2 = ((await r.json()) as { role_token: string }).role_token;
@@ -205,6 +220,15 @@ try {
 	expect("gmail sign-in", [r.status, loc.origin, loc.searchParams.get("redirect_uri"), r.headers.getSetCookie().map((c) => c.split("=")[0]).sort()], [
 		303, "https://accounts.example.com", "https://keyring.test/connect/callback", ["__Host-keyring-consent", "__Host-keyring-instance"],
 	]);
+	// An open link cannot wake a stopped container: strangers can reach /connect.
+	r = await call("POST", `/admin/instances/${id}/links`, ADMIN, JSON.stringify({ service: "echo" }));
+	const sleepy = new URL(((await r.json()) as { url: string }).url).pathname;
+	await containers.get(id)!.destroy();
+	objects.get(id)!["ready" as never] = null as never;
+	const startsBefore = starts;
+	r = await call("GET", sleepy);
+	expect("link page on a stopped container", [r.status, starts - startsBefore, containers.get(id)!.running], [410, 0, false]);
+
 	r = await call("GET", "/connect/callback?state=x&code=y");
 	expect("callback without the instance cookie", r.status, 400);
 
@@ -213,6 +237,44 @@ try {
 	expect("storage and container after delete", [storages.get(id)!.m.size, containers.get(id)!.running], [0, false]);
 	expect("delete again", (await call("DELETE", `/admin/instances/${id}`, ADMIN)).status, 200);
 	expect("call after delete", (await call("GET", `/p/${id}/echo/x`, { ...P, "x-keyring-token": token2 })).status, 404);
+
+	// A delete racing calls that already started (review of b6a41be, P1):
+	// the container must not come back and storage must stay empty.
+	for (const racer of ["proxy", "page", "admin"]) {
+		for (const deleteFirst of [true, false]) {
+			r = await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "race" }));
+			const k = (await r.json()) as { keyring_id: string; role_token: string };
+			const RP = { "x-keyring-caller": "caller-secret", "x-keyring-token": k.role_token };
+			r = await call("POST", `/admin/instances/${k.keyring_id}/links`, ADMIN, JSON.stringify({ service: "echo" }));
+			const rl = new URL(((await r.json()) as { url: string }).url).pathname;
+			if (racer !== "page") {
+				// Stopped, as after idle, so the racer has to start it. (A link
+				// page never starts a stopped container.)
+				await containers.get(k.keyring_id)!.destroy();
+				objects.get(k.keyring_id)!["ready" as never] = null as never;
+			}
+			const racing = () =>
+				racer === "proxy" ? call("GET", `/p/${k.keyring_id}/echo/race`, RP)
+				: racer === "page" ? call("POST", rl, FORM, "value=late")
+				: call("POST", `/admin/instances/${k.keyring_id}/role-token`, ADMIN);
+			const del = () => call("DELETE", `/admin/instances/${k.keyring_id}`, ADMIN);
+			// The racing call may land before the delete (any status); what
+			// must hold is that nothing is left running or stored afterwards.
+			await Promise.all(deleteFirst ? [del(), racing()] : [racing(), del()]);
+			await Bun.sleep(300);
+			expect(`delete ${deleteFirst ? "before" : "after"} a racing ${racer} call`, [containers.get(k.keyring_id)!.running, storages.get(k.keyring_id)!.m.size], [false, 0]);
+		}
+	}
+
+	// Writers of different fields never undo each other (review P2).
+	r = await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "fields" }));
+	const kf = ((await r.json()) as { keyring_id: string }).keyring_id;
+	await Promise.all([
+		call("POST", `/admin/instances/${kf}/links`, ADMIN, JSON.stringify({ service: "echo" })),
+		objects.get(kf)!.alarm(),
+	]);
+	expect("link keep-alive survives a concurrent alarm", [typeof storages.get(kf)!.m.get("openUntil"), typeof storages.get(kf)!.m.get("usage")], ["number", "object"]);
+	await call("DELETE", `/admin/instances/${kf}`, ADMIN);
 } finally {
 	for (const c of containers.values()) await c.destroy();
 	api.stop(true);
