@@ -329,6 +329,7 @@ func (in *Instance) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /unlock", in.unlock)
 	mux.HandleFunc("GET /status", in.status)
 	mux.HandleFunc("GET /state", in.getState)
+	mux.HandleFunc("GET /usage", in.getUsage)
 	mux.HandleFunc("PUT /network", in.putNetwork)
 	mux.HandleFunc("PUT /consent", in.putConsent)
 	mux.HandleFunc("DELETE /consent", in.deleteConsent)
@@ -450,6 +451,9 @@ func (in *Instance) unlock(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DataKey string `json:"data_key"`
 		State   string `json:"state"`
+		// Usage is what GET /usage returned before the last stop; counts of
+		// another day are ignored.
+		Usage *usageReply `json:"usage"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeError(w, err)
@@ -496,6 +500,9 @@ func (in *Instance) unlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if req.Usage != nil {
+		in.proxy.RestoreDailyCounts(req.Usage.Day, req.Usage.Counts, time.Now())
+	}
 	in.writeAudit("unlocked", map[string]any{"id": s.ID, "version": s.Version})
 	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version})
 }
@@ -538,6 +545,25 @@ func (in *Instance) getState(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"version": in.state.Version, "state": base64.StdEncoding.EncodeToString(in.sealed)})
+}
+
+// usageReply is today's daily-limit counts. They are not secret and not
+// sealed: the supervisor keeps them while the process is stopped and passes
+// them back to POST /unlock.
+type usageReply struct {
+	Day    string              `json:"day"`
+	Counts []server.DailyCount `json:"counts"`
+}
+
+func (in *Instance) getUsage(w http.ResponseWriter, _ *http.Request) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.state == nil {
+		writeError(w, &httpError{http.StatusConflict, errLocked.Error()})
+		return
+	}
+	day, counts := in.proxy.DailyCounts(time.Now())
+	writeJSON(w, http.StatusOK, usageReply{Day: day, Counts: counts})
 }
 
 func (in *Instance) putNetwork(w http.ResponseWriter, r *http.Request) {

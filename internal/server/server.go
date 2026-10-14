@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -637,6 +638,59 @@ func (h *Handler) take(role, service string, limit int, now time.Time) bool {
 	}
 	h.counts[k]++
 	return true
+}
+
+// DailyCount is one role's calls to one service on one UTC day, as counted
+// against its daily limit.
+type DailyCount struct {
+	Role    string `json:"role"`
+	Service string `json:"service"`
+	Count   int    `json:"count"`
+}
+
+// DailyCounts returns today's counts (UTC day "2006-01-02"), so a supervisor
+// can keep them while the process is stopped.
+func (h *Handler) DailyCounts(now time.Time) (string, []DailyCount) {
+	day := now.UTC().Format("2006-01-02")
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := []DailyCount{}
+	if h.day != day {
+		return day, out
+	}
+	for k, n := range h.counts {
+		if n > 0 {
+			out = append(out, DailyCount{Role: k[0], Service: k[1], Count: n})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Role != out[j].Role {
+			return out[i].Role < out[j].Role
+		}
+		return out[i].Service < out[j].Service
+	})
+	return day, out
+}
+
+// RestoreDailyCounts adds back counts kept by a supervisor. Counts for
+// another day than today are ignored; for each pair the higher of the kept
+// and current count wins, so a restore never gives a role more calls.
+func (h *Handler) RestoreDailyCounts(day string, counts []DailyCount, now time.Time) {
+	today := now.UTC().Format("2006-01-02")
+	if day != today {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.day != today {
+		h.day, h.counts = today, map[[2]string]int{}
+	}
+	for _, c := range counts {
+		k := [2]string{c.Role, c.Service}
+		if c.Count > h.counts[k] {
+			h.counts[k] = c.Count
+		}
+	}
 }
 
 func (h *Handler) writeAudit(rec auditRecord) {

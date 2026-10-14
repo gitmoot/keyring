@@ -343,13 +343,14 @@ keyring instance --admin-listen 127.0.0.1:7720 --admin-token-sha256 <hex> [--sta
 | `DELETE /roles/<name>` | | |
 | `PUT /keys/<name>`, `DELETE /keys/<name>` | `{"value"}` | |
 | `POST /rotate` | `{"data_key"}` | seals with the new key; the old key opens nothing written after this |
+| `GET /usage` | | `{"day", "counts": [{"role", "service", "count"}]}`, today's daily-limit counts (UTC) |
 | `DELETE /instance` | | overwrites and removes the state file, forgets the state and key, stops the listeners; the process exits |
 
 After `DELETE /instance`, a copy of the sealed state that the supervisor still holds can be opened only with the data key. The supervisor deletes its copy of the key, and then nothing can open it.
 
 One process per person, not one process for many people: the operating system keeps each person's keys in a separate address space, the proxy code is unchanged, and it matches one container per person at Cloudflare. An idle instance measured on Linux x64 (Go 1.24, one service, one role): about 12 MB resident, 8 threads, and 0 CPU ticks over 30 idle seconds.
 
-Limits of this version: daily counts and open consent links are in memory, so a restart resets them (as with `keyring serve`); #50 tracks keeping them across a container's sleep.
+Daily counts are kept in memory. A supervisor that stops the process (a container going to sleep) keeps the last `GET /usage` and passes it back as `"usage"` in `POST /unlock`. Counts from another day are ignored, and a restore never lowers a count, so a stop cannot give a role a fresh daily limit. Calls made after the supervisor's last `GET /usage` are lost if the process stops without warning, so the supervisor should fetch `/usage` just before it stops the process. Open consent links stay in memory: the supervisor keeps the process running until its last link and sign-in have expired. The audit log goes to stdout unless `--audit` is given.
 
 **Container mode** (`--container`, #51) is for an instance in a container that only its supervisor can reach, such as a Cloudflare Container behind the person's Durable Object. In this mode:
 - the admin API, the proxy and the consent listeners may use a wildcard address such as `0.0.0.0:8080`, and no two may share a port;
