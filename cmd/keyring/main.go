@@ -34,6 +34,9 @@ import (
 
 const usage = `Usage:
   keyring serve --config FILE --store FILE   run the keyring
+  keyring instance --admin-listen ADDR --admin-token-sha256 HEX [--state FILE] [--audit FILE]
+                                             run one person's keyring, configured only through its admin
+                                             API, its state sealed with a data key from the supervisor
   keyring check --config FILE [--store FILE] check the rules and access file (and which keys are missing)
   keyring migrate --config FILE --access FILE move services and roles from an old rules file into an access file
   keyring enable-dashboard --config FILE [--admin-listen 127.0.0.1:7702] [--https-host NAME --device IP ...]
@@ -82,6 +85,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
 	upgradeTo := fs.String("version", "", "upgrade: install this release tag instead of the latest")
 	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
+	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
+	statePath := fs.String("state", "", "instance: keep the sealed state in this file (default: memory only)")
+	auditPath := fs.String("audit", "", "instance: audit log file (default: stdout)")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -100,6 +106,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	var err error
 	switch cmd {
+	case "instance":
+		if fs.NArg() != 0 || *adminTokenSHA == "" {
+			fmt.Fprintln(stderr, "keyring instance: pass --admin-listen and --admin-token-sha256")
+			return 2
+		}
+		err = runInstance(*adminListen, *adminTokenSHA, *statePath, *auditPath, stdout, stderr)
 	case "serve":
 		if !need("config", "store") || fs.NArg() != 0 {
 			return 2
