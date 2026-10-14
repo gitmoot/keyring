@@ -530,10 +530,20 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		c.APITokenSHA256 = "" // a token hash, like the roles' hashes, is not shown
 		consentView = &c
 	}
+	// Why a service's refresh failed, for oauth2 services whose last
+	// refresh failed (never a token).
+	failing := map[string]string{}
+	for name, svc := range s.Services {
+		if svc.Auth == policy.AuthOAuth2 {
+			if why := in.proxy.OAuthFailure(svc.Key); why != "" {
+				failing[name] = why
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"unlocked": true, "id": s.ID, "version": s.Version,
 		"listen": s.Listen, "allow_sources": s.AllowSources, "consent": consentView,
-		"services": s.Services, "roles": roles, "keys": keys,
+		"services": s.Services, "roles": roles, "keys": keys, "failing": failing,
 	})
 }
 
