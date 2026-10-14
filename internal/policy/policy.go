@@ -378,6 +378,11 @@ func PublicAddr(a netip.Addr) bool {
 		a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified() {
 		return false
 	}
+	// IPv6: only global unicast, so deprecated and translation forms that
+	// carry an IPv4 address (::/96, ::ffff:0:0:0/96, ...) are out by default.
+	if a.Is6() && !globalUnicast6.Contains(a) {
+		return false
+	}
 	for _, p := range nonPublic {
 		if p.Contains(a) {
 			return false
@@ -385,6 +390,8 @@ func PublicAddr(a netip.Addr) bool {
 	}
 	return true
 }
+
+var globalUnicast6 = netip.MustParsePrefix("2000::/3")
 
 var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),

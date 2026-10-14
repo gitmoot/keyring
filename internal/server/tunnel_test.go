@@ -472,6 +472,7 @@ func TestTunnelRefusesZonedAndEmbeddedIPv4(t *testing.T) {
 		"64:ff9b::a00:1%eth0", "64:ff9b::7f00:1%x", "100::1%eth0", "2001:db8::1%eth0", "::%eth0", "2001:0::1%eth0",
 		"2606:4700::1%\r\nX-Injected: yes]", "2606:4700::1%eth0",
 		"64:ff9b:1::a00:1", "2002:a00:1::1", "2001:0:a00:1::1", "fd00::1",
+		"::7f00:1", "::a00:1", "::ffff:0:a00:1", "fe80::1", "ff02::1", "::1",
 	} {
 		if policy.TunnelHost(host) {
 			t.Errorf("TunnelHost(%q) = true", host)
