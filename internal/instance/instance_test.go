@@ -211,8 +211,16 @@ func TestCreateUseRotateDelete(t *testing.T) {
 	if code, _ := x.call("GET", "/state", nil); code != http.StatusConflict {
 		t.Fatalf("GET /state after delete: %d", code)
 	}
-	if code, _ := x.call("POST", "/unlock", map[string]any{"data_key": key2}); code/100 == 2 {
-		t.Fatal("unlocked after delete")
+	// The process takes no new state after a delete, not even the sealed
+	// state the supervisor may still hold.
+	if code, _ := x.call("POST", "/unlock", map[string]any{"data_key": key2, "state": base64.StdEncoding.EncodeToString(sealed)}); code != http.StatusGone {
+		t.Fatalf("unlock after delete: %d", code)
+	}
+	if code, _ := x.call("POST", "/create", map[string]any{"id": "alice", "data_key": key2, "listen": freeAddr(t), "allow_sources": []string{"127.0.0.1"}}); code != http.StatusGone {
+		t.Fatalf("create after delete: %d", code)
+	}
+	if code, _ := x.call("DELETE", "/instance", nil); code != http.StatusGone {
+		t.Fatalf("second delete: %d", code)
 	}
 	for _, secret := range []string{"alice-secret-value", token, newToken, key1, key2} {
 		if strings.Contains(x.audit.String(), secret) {
@@ -359,6 +367,9 @@ func TestAdminNeedsTheToken(t *testing.T) {
 	if _, err := New(Options{AdminListen: "0.0.0.0:7720", AdminTokenSHA256: sha(adminToken), Audit: io.Discard}); err == nil {
 		t.Fatal("admin API on a wildcard address accepted")
 	}
+	if _, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken)}); err == nil {
+		t.Fatal("instance without an audit writer accepted")
+	}
 }
 
 func TestRefusedChangesLeaveTheStateAlone(t *testing.T) {
@@ -431,6 +442,12 @@ func TestNetworkMoveRebindsTheProxy(t *testing.T) {
 	if code, _ := proxyGet(t, listen, token, "/api/v1/x"); code != 0 {
 		t.Fatalf("proxy still on the old address: %d", code)
 	}
+	// The old port is free as soon as the change returns, so moving back
+	// works at once.
+	for range 20 {
+		x.must("PUT", "/network", map[string]any{"listen": listen, "allow_sources": []string{"127.0.0.1"}})
+		x.must("PUT", "/network", map[string]any{"listen": moved, "allow_sources": []string{"127.0.0.1"}})
+	}
 	// Source check follows the new settings.
 	x.must("PUT", "/network", map[string]any{"listen": moved, "allow_sources": []string{"10.9.9.9"}})
 	if code, _ := proxyGet(t, moved, token, "/api/v1/x"); code != http.StatusForbidden {
@@ -447,6 +464,9 @@ func TestConsentLinkStoresIntoTheSealedState(t *testing.T) {
 	pages, api := freeAddr(t), freeAddr(t)
 	x.must("PUT", "/consent", map[string]any{"listen": pages, "public_url": "http://" + pages + "/p", "api_listen": api,
 		"api_allow_sources": []string{"127.0.0.1"}, "api_token_sha256": sha("router-token")})
+	if st := mustJSON(x.must("GET", "/status", nil)); strings.Contains(st, sha("router-token")) {
+		t.Fatalf("status shows the consent API token hash: %s", st)
+	}
 	before := x.must("GET", "/state", nil)["version"].(float64)
 
 	req, _ := http.NewRequest("POST", "http://"+api+"/links", strings.NewReader(`{"service":"proxy"}`))

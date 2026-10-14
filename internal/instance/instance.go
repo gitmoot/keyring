@@ -66,6 +66,9 @@ type Instance struct {
 type running struct {
 	addr string
 	srv  *http.Server
+	// l is closed by us as well: srv.Close only closes listeners its
+	// Serve goroutine has already registered.
+	l net.Listener
 }
 
 // New prepares a locked instance. It serves nothing but the admin API (see
@@ -77,6 +80,12 @@ func New(opt Options) (*Instance, error) {
 	}
 	if len(opt.AdminTokenSHA256) != 64 || strings.Trim(opt.AdminTokenSHA256, "0123456789abcdef") != "" {
 		return nil, errors.New("admin token hash must be 64 lowercase hex characters")
+	}
+	if opt.Audit == nil {
+		return nil, errors.New("an audit writer is required")
+	}
+	if opt.AuditName == "" {
+		opt.AuditName = "audit"
 	}
 	if opt.Log == nil {
 		opt.Log = io.Discard
@@ -169,7 +178,7 @@ func (in *Instance) serve(cfg *policy.Config, opened map[string]net.Listener) {
 			ReadTimeout:       5 * time.Minute,
 			IdleTimeout:       2 * time.Minute,
 		}
-		in.listeners[name] = &running{addr: want[name].addr, srv: srv}
+		in.listeners[name] = &running{addr: want[name].addr, srv: srv, l: l}
 		go func() { _ = srv.Serve(l) }()
 		fmt.Fprintf(in.opt.Log, "%s on %s\n", name, want[name].addr)
 	}
@@ -182,6 +191,9 @@ func (in *Instance) closeListeners(keep func(name, addr string) bool) {
 		if keep != nil && keep(name, r.addr) {
 			continue
 		}
+		// Closing the listener first frees the port now, even if Serve has
+		// not started; Serve then returns at once.
+		_ = r.l.Close()
 		_ = r.srv.Close()
 		delete(in.listeners, name)
 		fmt.Fprintf(in.opt.Log, "%s on %s stopped\n", name, r.addr)
@@ -192,6 +204,19 @@ func (in *Instance) closeListeners(keep func(name, addr string) bool) {
 
 // errLocked: no state yet (create or unlock first), or wiped.
 var errLocked = errors.New("the instance is locked: create or unlock it first")
+
+// errWipedHTTP: the instance was deleted; this process takes no new state.
+var errWipedHTTP = &httpError{http.StatusGone, "the instance was deleted; start a new process"}
+
+// isWiped reports whether DELETE /instance ran. Callers hold in.mu.
+func (in *Instance) isWiped() bool {
+	select {
+	case <-in.wiped:
+		return true
+	default:
+		return false
+	}
+}
 
 type httpError struct {
 	status int
@@ -386,6 +411,10 @@ func (in *Instance) create(w http.ResponseWriter, r *http.Request) {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	if in.isWiped() {
+		writeError(w, errWipedHTTP)
+		return
+	}
 	if in.state != nil {
 		writeError(w, &httpError{http.StatusConflict, "the instance already has a state"})
 		return
@@ -422,6 +451,10 @@ func (in *Instance) unlock(w http.ResponseWriter, r *http.Request) {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	if in.isWiped() {
+		writeError(w, errWipedHTTP)
+		return
+	}
 	if in.state != nil {
 		writeError(w, &httpError{http.StatusConflict, "the instance is already unlocked"})
 		return
@@ -473,9 +506,15 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		roles[n] = roleView{role.Expires, role.Access}
 	}
 	keys := slices.Sorted(maps.Keys(s.Keys))
+	var consentView *policy.Consent
+	if s.Consent != nil {
+		c := *s.Consent
+		c.APITokenSHA256 = "" // a token hash, like the roles' hashes, is not shown
+		consentView = &c
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"unlocked": true, "id": s.ID, "version": s.Version,
-		"listen": s.Listen, "allow_sources": s.AllowSources, "consent": s.Consent,
+		"listen": s.Listen, "allow_sources": s.AllowSources, "consent": consentView,
 		"services": s.Services, "roles": roles, "keys": keys,
 	})
 }
@@ -680,11 +719,9 @@ func (in *Instance) rotate(w http.ResponseWriter, r *http.Request) {
 func (in *Instance) wipe(w http.ResponseWriter, _ *http.Request) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	select {
-	case <-in.wiped:
-		writeError(w, &httpError{http.StatusGone, "already deleted"})
+	if in.isWiped() {
+		writeError(w, errWipedHTTP)
 		return
-	default:
 	}
 	if in.opt.StatePath != "" {
 		if err := shred(in.opt.StatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
