@@ -368,6 +368,11 @@ func seconds(n, def int) time.Duration {
 // not private, loopback, link-local, multicast, unspecified, CGNAT (which
 // holds Tailscale's range), benchmarking or reserved.
 func PublicAddr(a netip.Addr) bool {
+	// A zone names a local interface and is ignored by every check below
+	// (and dropped on the wire), so an address with one is never public.
+	if a.Zone() != "" {
+		return false
+	}
 	a = a.Unmap()
 	if !a.IsValid() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
 		a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified() {
@@ -390,7 +395,12 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"),
 	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
+	// IPv6 forms that carry or reach an IPv4 address: NAT64, 6to4, Teredo.
 	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("fc00::/7"),
 	netip.MustParsePrefix("100::/64"),
 	netip.MustParsePrefix("2001:db8::/32"),
 }

@@ -454,15 +454,144 @@ func TestDialPublicRefusesPrivateProxy(t *testing.T) {
 	}
 }
 
-// TestTunnelPathOnlyOnEgressServices: /_tunnel on a normal API service is
-// refused, not forwarded to the API as a path.
+// TestTunnelPathOnlyOnEgressServices: on any other service /_tunnel is an
+// ordinary path and is forwarded as before (existing services unchanged).
 func TestTunnelPathOnlyOnEgressServices(t *testing.T) {
 	up, got := upstream(t)
 	h, _ := newHandler(t, up.URL, bearer, allowAll)
-	if w := call(h, "GET", "/api/_tunnel?host=example.com&port=443", testToken, nil); w.Code != http.StatusNotFound {
+	if w := call(h, "GET", "/api/_tunnel?host=example.com&port=443", testToken, nil); w.Code != http.StatusOK {
 		t.Fatalf("/_tunnel on a bearer service: %d", w.Code)
 	}
-	if got.count() != 0 {
-		t.Fatal("forwarded to the API")
+	if r := got.last(t); r.URL.Path != "/_tunnel" {
+		t.Fatalf("forwarded %q", r.URL.Path)
+	}
+}
+
+func TestTunnelRefusesZonedAndEmbeddedIPv4(t *testing.T) {
+	for _, host := range []string{
+		"64:ff9b::a00:1%eth0", "64:ff9b::7f00:1%x", "100::1%eth0", "2001:db8::1%eth0", "::%eth0", "2001:0::1%eth0",
+		"2606:4700::1%\r\nX-Injected: yes]", "2606:4700::1%eth0",
+		"64:ff9b:1::a00:1", "2002:a00:1::1", "2001:0:a00:1::1", "fd00::1",
+	} {
+		if policy.TunnelHost(host) {
+			t.Errorf("TunnelHost(%q) = true", host)
+		}
+	}
+	for _, host := range []string{"2606:4700::1", "1.1.1.1", "mail.example.com"} {
+		if !policy.TunnelHost(host) {
+			t.Errorf("TunnelHost(%q) = false", host)
+		}
+	}
+}
+
+// TestTunnelClientThatStopsReading: a client that never reads cannot hold
+// the tunnel and its proxy connection past the idle timeout plus the
+// teardown deadline.
+func TestTunnelClientThatStopsReading(t *testing.T) {
+	// A target that sends forever.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				chunk := bytes.Repeat([]byte("x"), 64<<10)
+				for {
+					if _, err := c.Write(chunk); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	proxy := newFakeProxy(t, policy.ProxyHTTPConnect, l.Addr().String())
+	_, audit, srv := tunnelHandler(t, policy.ProxyHTTPConnect, proxy.addr, allowAll, func(e *policy.EgressProxy) { e.MaxSeconds = 1 })
+	c, _, code, _ := wsClient(t, srv, "/api/_tunnel?host=example.com&port=443", testToken)
+	if code != 101 {
+		t.Fatalf("upgrade: %d", code)
+	}
+	defer c.Close()
+	// Never read. The handler must still finish: max 1 s + close timeout 5 s.
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(audit.String(), "closed 4001") {
+		if time.Now().After(deadline) {
+			t.Fatalf("tunnel still open with a client that stopped reading; audit:\n%s", audit)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestHTTPConnectReplyBodyIsTunnel: bytes after the 200 headers belong to
+// the tunnel even if the proxy sends a Content-Length.
+func TestHTTPConnectReplyBodyIsTunnel(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	go func() {
+		br := bufio.NewReader(b)
+		_, _ = http.ReadRequest(br)
+		io.WriteString(b, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfirst-tunnel-bytes")
+	}()
+	if err := httpConnect(a, proxyCredential, "example.com:443"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 18)
+	if _, err := io.ReadFull(a, buf); err != nil || string(buf) != "first-tunnel-bytes" {
+		t.Fatalf("tunnel bytes after CONNECT: %q %v", buf, err)
+	}
+}
+
+func TestTunnelFramingErrors(t *testing.T) {
+	proxy := newFakeProxy(t, policy.ProxyHTTPConnect, echoTarget(t))
+	_, _, srv := tunnelHandler(t, policy.ProxyHTTPConnect, proxy.addr, allowAll, nil)
+	cases := []struct {
+		name string
+		send func(net.Conn)
+		want uint16
+	}{
+		{"rsv bit", func(c net.Conn) { c.Write([]byte{0xC2, 0x80, 1, 2, 3, 4}) }, closeProtocol},
+		{"continuation without a message", func(c net.Conn) { sendFrame(c, opContinuation, []byte("x")) }, closeProtocol},
+		{"fragmented ping", func(c net.Conn) { c.Write([]byte{0x09, 0x80, 1, 2, 3, 4}) }, closeProtocol},
+		{"long ping", func(c net.Conn) { sendFrame(c, opPing, bytes.Repeat([]byte("p"), 200)) }, closeProtocol},
+		{"unmasked", func(c net.Conn) { c.Write([]byte{0x82, 0x01, 'x'}) }, closeProtocol},
+	}
+	for _, tc := range cases {
+		c, br, code, _ := wsClient(t, srv, "/api/_tunnel?host=example.com&port=443", testToken)
+		if code != 101 {
+			t.Fatalf("%s: upgrade %d", tc.name, code)
+		}
+		tc.send(c)
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		op, got := readFrame(t, br)
+		if op != opClose || binary.BigEndian.Uint16(got) != tc.want {
+			t.Errorf("%s: op %d code %v", tc.name, op, got)
+		}
+		c.Close()
+	}
+}
+
+func TestTunnelBytesSurviveRestart(t *testing.T) {
+	proxy := newFakeProxy(t, policy.ProxyHTTPConnect, echoTarget(t))
+	h, _, srv := tunnelHandler(t, policy.ProxyHTTPConnect, proxy.addr, policy.Access{Paths: []string{"/"}, DailyBytes: 20}, nil)
+	c, br, _, _ := wsClient(t, srv, "/api/_tunnel?host=example.com&port=443", testToken)
+	sendFrame(c, opBinary, []byte("0123456789"))
+	readFrame(t, br)
+	c.Close()
+	time.Sleep(100 * time.Millisecond)
+	day, counts := h.DailyCounts(time.Now())
+	if len(counts) != 1 || counts[0].Bytes != 20 {
+		t.Fatalf("exported %v", counts)
+	}
+	h2, _, srv2 := tunnelHandler(t, policy.ProxyHTTPConnect, proxy.addr, policy.Access{Paths: []string{"/"}, DailyBytes: 20}, nil)
+	h2.RestoreDailyCounts(day, counts, time.Now())
+	if _, _, code, _ := wsClient(t, srv2, "/api/_tunnel?host=example.com&port=443", testToken); code != 429 {
+		t.Fatalf("after restore: %d", code)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,8 +31,10 @@ const TunnelPath = "/_tunnel"
 // WebSocket close codes the tunnel uses (RFC 6455 and private range).
 const (
 	closeNormal      = 1000
+	closeProtocol    = 1002
 	closeUnsupported = 1003
 	closePolicy      = 1008
+	closeTooBig      = 1009
 	closeError       = 1011
 	closeIdle        = 4000
 	closeMaxDuration = 4001
@@ -105,14 +108,25 @@ func httpConnect(conn net.Conn, credential, target string) error {
 	if _, err := io.WriteString(conn, req+"\r\n"); err != nil {
 		return err
 	}
-	// Read the reply one byte at a time so no tunnel byte is buffered away.
-	resp, err := http.ReadResponse(bufio.NewReaderSize(oneByteReader{conn}, 1), nil)
+	// Read the status line and headers one byte at a time, so no tunnel
+	// byte is buffered away, and never read a body: a 2xx reply to CONNECT
+	// has none (RFC 9110 9.3.6), and anything after the headers is tunnel.
+	tp := textproto.NewReader(bufio.NewReaderSize(oneByteReader{conn}, 16))
+	line, err := tp.ReadLine()
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w (%d)", errProxyRefused, resp.StatusCode)
+	proto, rest, _ := strings.Cut(line, " ")
+	code, _, _ := strings.Cut(rest, " ")
+	status, err := strconv.Atoi(code)
+	if !strings.HasPrefix(proto, "HTTP/1.") || err != nil {
+		return errors.New("the proxy sent a malformed reply")
+	}
+	if _, err := tp.ReadMIMEHeader(); err != nil {
+		return err
+	}
+	if status < 200 || status > 299 {
+		return fmt.Errorf("%w (%d)", errProxyRefused, status)
 	}
 	return nil
 }
@@ -242,39 +256,53 @@ type tunnelStats struct {
 	close    int
 }
 
-// pipeTunnel accepts the WebSocket on w and copies bytes between it and upstream
-// until either side ends, the idle or maximum time passes, or allow refuses
-// more bytes. It returns the close code sent.
-func pipeTunnel(w http.ResponseWriter, r *http.Request, upstream net.Conn, e *policy.EgressProxy, allow func(n int64) bool, st *tunnelStats) error {
+// wsWriteTimeout bounds one frame write: a client that stops reading cannot
+// hold a tunnel (and its proxy connection) open.
+const (
+	wsWriteTimeout = 30 * time.Second
+	wsCloseTimeout = 5 * time.Second
+)
+
+// pipeTunnel accepts the WebSocket on w and copies bytes between it and
+// upstream until either side ends, the idle or maximum time passes, or allow
+// refuses more bytes. hijacked reports whether w was taken over (after that
+// no HTTP reply can be written).
+func pipeTunnel(w http.ResponseWriter, r *http.Request, upstream net.Conn, e *policy.EgressProxy, allow func(n int64) bool, st *tunnelStats) (hijacked bool, err error) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		return errors.New("connection cannot be upgraded")
+		return false, errors.New("connection cannot be upgraded")
 	}
 	sum := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	client, brw, err := hj.Hijack()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer client.Close()
 	defer upstream.Close()
-	_ = client.SetDeadline(time.Time{})
+	_ = client.SetDeadline(time.Now().Add(wsWriteTimeout))
 	if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
 		base64.StdEncoding.EncodeToString(sum[:]) + "\r\n\r\n"); err != nil {
-		return err
+		return true, err
 	}
 	if err := brw.Flush(); err != nil {
-		return err
+		return true, err
 	}
-	ws := &wsConn{r: brw.Reader, w: client}
+	_ = client.SetDeadline(time.Time{})
+	ws := &wsConn{r: brw.Reader, conn: client}
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
-	done := make(chan int, 3)
+	done := make(chan int, 2)
 	// Client to upstream.
 	go func() {
 		for {
-			op, payload, err := ws.readFrame()
+			op, payload, err := ws.readMessagePart()
 			if err != nil {
-				done <- closeNormal
+				var pe protocolError
+				if errors.As(err, &pe) {
+					done <- int(pe)
+				} else {
+					done <- closeNormal
+				}
 				return
 			}
 			switch op {
@@ -293,11 +321,11 @@ func pipeTunnel(w http.ResponseWriter, r *http.Request, upstream net.Conn, e *po
 				done <- closeNormal
 				return
 			case opPing:
-				_ = ws.writeFrame(opPong, payload)
+				if ws.writeFrame(opPong, payload) != nil {
+					done <- closeNormal
+					return
+				}
 			case opPong:
-			default:
-				done <- closeUnsupported
-				return
 			}
 		}
 	}()
@@ -349,10 +377,18 @@ wait:
 		}
 	}
 	st.close = code
-	reason := map[int]string{closeNormal: "", closeUnsupported: "binary frames only", closePolicy: "daily byte limit reached",
-		closeError: "upstream connection failed", closeIdle: "idle timeout", closeMaxDuration: "maximum duration reached"}[code]
+	// Unblock both goroutines before the close frame: the upstream side
+	// ends at once, and a write stuck on a client that stopped reading ends
+	// at its deadline, so the close frame never waits on a held lock for long.
+	upstream.Close()
+	ws.closing.Store(true)
+	// Applies to a write already blocked, too.
+	_ = client.SetWriteDeadline(time.Now().Add(wsCloseTimeout))
+	reason := map[int]string{closeNormal: "", closeProtocol: "protocol error", closeUnsupported: "binary frames only",
+		closePolicy: "daily byte limit reached", closeError: "upstream connection failed", closeIdle: "idle timeout",
+		closeMaxDuration: "maximum duration reached"}[code]
 	_ = ws.writeFrame(opClose, binary.BigEndian.AppendUint16(nil, uint16(code)), []byte(reason)...)
-	return nil
+	return true, nil
 }
 
 const (
@@ -365,22 +401,35 @@ const (
 	maxFrame       = 1 << 20
 )
 
+// protocolError is a client frame the tunnel refuses; its value is the close
+// code to send.
+type protocolError int
+
+func (p protocolError) Error() string { return "websocket protocol error " + strconv.Itoa(int(p)) }
+
 // wsConn is the server side of RFC 6455 framing: client frames must be
 // masked, server frames are not.
 type wsConn struct {
-	r  *bufio.Reader
-	w  io.Writer
-	mu sync.Mutex
+	r    *bufio.Reader
+	conn net.Conn
+	mu   sync.Mutex
+	// inMessage: a binary message was started and not finished (FIN 0).
+	inMessage bool
+	// closing shortens every later write to the teardown deadline.
+	closing atomic.Bool
 }
 
-func (c *wsConn) readFrame() (byte, []byte, error) {
+// readMessagePart reads one frame and checks it against RFC 6455: masked,
+// no RSV bits, control frames short and unfragmented, continuations only
+// inside a binary message, no text messages.
+func (c *wsConn) readMessagePart() (byte, []byte, error) {
 	var h [2]byte
 	if _, err := io.ReadFull(c.r, h[:]); err != nil {
 		return 0, nil, err
 	}
-	op := h[0] & 0x0F
-	if h[1]&0x80 == 0 {
-		return 0, nil, errors.New("unmasked client frame")
+	fin, op := h[0]&0x80 != 0, h[0]&0x0F
+	if h[0]&0x70 != 0 || h[1]&0x80 == 0 {
+		return 0, nil, protocolError(closeProtocol)
 	}
 	n := int64(h[1] & 0x7F)
 	switch n {
@@ -397,8 +446,23 @@ func (c *wsConn) readFrame() (byte, []byte, error) {
 		}
 		n = int64(binary.BigEndian.Uint64(b[:]))
 	}
-	if n < 0 || n > maxFrame {
-		return 0, nil, errors.New("frame too large")
+	control := op >= 0x8
+	switch {
+	case n < 0 || n > maxFrame:
+		return 0, nil, protocolError(closeTooBig)
+	case control && (n > 125 || !fin):
+		return 0, nil, protocolError(closeProtocol)
+	case op == opText:
+		return 0, nil, protocolError(closeUnsupported)
+	case op == opBinary && c.inMessage, op == opContinuation && !c.inMessage:
+		return 0, nil, protocolError(closeProtocol)
+	case !control && op != opBinary && op != opContinuation:
+		return 0, nil, protocolError(closeProtocol)
+	case control && op != opClose && op != opPing && op != opPong:
+		return 0, nil, protocolError(closeProtocol)
+	}
+	if !control {
+		c.inMessage = !fin
 	}
 	var mask [4]byte
 	if _, err := io.ReadFull(c.r, mask[:]); err != nil {
@@ -427,9 +491,13 @@ func (c *wsConn) writeFrame(op byte, payload []byte, more ...byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.w.Write(head); err != nil {
+	timeout := wsWriteTimeout
+	if c.closing.Load() {
+		timeout = wsCloseTimeout
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	if _, err := c.conn.Write(append(head, payload...)); err != nil {
 		return err
 	}
-	_, err := c.w.Write(payload)
-	return err
+	return nil
 }

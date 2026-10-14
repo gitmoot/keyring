@@ -318,9 +318,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "sign-only service cannot proxy requests")
 		return
 	}
+	// Other services keep forwarding every path, /_tunnel included.
 	tunnel := svc.Auth == policy.AuthEgressProxy
-	if tunnel != (rest == TunnelPath) {
-		fail(http.StatusNotFound, "an egress-proxy service only opens tunnels at /<service>/_tunnel, and only it does")
+	if tunnel && rest != TunnelPath {
+		fail(http.StatusNotFound, "an egress-proxy service only opens tunnels at /<service>/_tunnel")
 		return
 	}
 	if !access.AllowsMethod(r.Method) {
@@ -662,9 +663,15 @@ func (h *Handler) openTunnel(w http.ResponseWriter, r *http.Request, svc policy.
 		return access.DailyBytes <= 0 || h.addBytes(role, service, n, access.DailyBytes, h.now())
 	}
 	rec.Status = http.StatusSwitchingProtocols
-	if err := pipeTunnel(w, r, upstream, e, allow, &st); err != nil {
+	if hijacked, err := pipeTunnel(w, r, upstream, e, allow, &st); err != nil {
+		// The tunnel never carried a byte: not charged.
 		upstream.Close()
-		fail(http.StatusInternalServerError, "could not upgrade")
+		h.refund(role, service, access.DailyRequests, start)
+		if !hijacked {
+			fail(http.StatusInternalServerError, "could not upgrade")
+		} else {
+			rec.Status, rec.Note = 499, rec.Note+" client went away during the upgrade"
+		}
 		return
 	}
 	rec.Bytes = st.up.Load() + st.down.Load()
@@ -726,6 +733,8 @@ type DailyCount struct {
 	Role    string `json:"role"`
 	Service string `json:"service"`
 	Count   int    `json:"count"`
+	// Bytes is tunnel bytes, for egress-proxy services.
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // DailyCounts returns today's counts (UTC day "2006-01-02"), so a supervisor
@@ -738,9 +747,16 @@ func (h *Handler) DailyCounts(now time.Time) (string, []DailyCount) {
 	if h.day != day {
 		return day, out
 	}
+	keys := map[[2]string]bool{}
 	for k, n := range h.counts {
-		if n > 0 {
-			out = append(out, DailyCount{Role: k[0], Service: k[1], Count: n})
+		keys[k] = keys[k] || n > 0
+	}
+	for k, n := range h.bytes {
+		keys[k] = keys[k] || n > 0
+	}
+	for k, used := range keys {
+		if used {
+			out = append(out, DailyCount{Role: k[0], Service: k[1], Count: h.counts[k], Bytes: h.bytes[k]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -769,6 +785,9 @@ func (h *Handler) RestoreDailyCounts(day string, counts []DailyCount, now time.T
 		k := [2]string{c.Role, c.Service}
 		if c.Count > h.counts[k] {
 			h.counts[k] = c.Count
+		}
+		if c.Bytes > h.bytes[k] {
+			h.bytes[k] = c.Bytes
 		}
 	}
 }
