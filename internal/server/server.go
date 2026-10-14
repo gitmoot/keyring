@@ -12,12 +12,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +55,11 @@ type Handler struct {
 	mu     sync.Mutex
 	day    string
 	counts map[[2]string]int
+	// bytes counts tunnel bytes per role and service on day.
+	bytes map[[2]string]int64
+
+	// dialProxy reaches a person's proxy (dialPublic outside tests).
+	dialProxy proxyDialer
 
 	usage usageBook
 
@@ -82,8 +89,10 @@ func New(config *policy.Config, keys map[string]string, audit io.Writer) *Handle
 			// A redirect could point anywhere; hand it back to the caller.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		now:    time.Now,
-		counts: map[[2]string]int{},
+		now:       time.Now,
+		counts:    map[[2]string]int{},
+		bytes:     map[[2]string]int64{},
+		dialProxy: dialPublic,
 	}
 	h.Swap(config, keys)
 	return h
@@ -309,6 +318,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "sign-only service cannot proxy requests")
 		return
 	}
+	tunnel := svc.Auth == policy.AuthEgressProxy
+	if tunnel != (rest == TunnelPath) {
+		fail(http.StatusNotFound, "an egress-proxy service only opens tunnels at /<service>/_tunnel, and only it does")
+		return
+	}
 	if !access.AllowsMethod(r.Method) {
 		fail(http.StatusForbidden, "method not allowed for this role")
 		return
@@ -324,6 +338,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.take(roleName, service, access.DailyRequests, start) {
 		fail(http.StatusTooManyRequests, "daily limit reached")
+		return
+	}
+	if tunnel {
+		h.openTunnel(w, r, svc, key, roleName, service, access, start, &rec, fail)
 		return
 	}
 	if signingAuth == policy.AuthEd25519Sign {
@@ -608,6 +626,68 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 	return out
 }
 
+// openTunnel connects through the person's proxy and, once connected,
+// upgrades the request to a WebSocket that carries the TCP bytes. A failure
+// before the upgrade is an HTTP status and is not charged.
+func (h *Handler) openTunnel(w http.ResponseWriter, r *http.Request, svc policy.Service, credential, role, service string, access policy.Access, start time.Time, rec *auditRecord, fail func(int, string)) {
+	e := svc.EgressProxy
+	host, port, status, msg := tunnelTarget(r, e)
+	if status == 0 && !isWebSocketUpgrade(r) {
+		status, msg = http.StatusBadRequest, "a tunnel needs a WebSocket upgrade"
+	}
+	if status == 0 && access.DailyBytes > 0 && !h.addBytes(role, service, 0, access.DailyBytes, start) {
+		status, msg = http.StatusTooManyRequests, "daily byte limit reached"
+	}
+	if status != 0 {
+		h.refund(role, service, access.DailyRequests, start)
+		fail(status, msg)
+		return
+	}
+	rec.Note = "tunnel " + net.JoinHostPort(host, strconv.Itoa(port))
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	upstream, err := dialThroughProxy(ctx, h.dialProxy, e, credential, host, port)
+	cancel()
+	if err != nil {
+		h.refund(role, service, access.DailyRequests, start)
+		// The error text names no credential, but keep it generic.
+		if errors.Is(err, errProxyRefused) {
+			fail(http.StatusBadGateway, "the proxy refused the tunnel (check the proxy credential and destination)")
+		} else {
+			fail(http.StatusBadGateway, "the proxy is unreachable")
+		}
+		return
+	}
+	var st tunnelStats
+	allow := func(n int64) bool {
+		return access.DailyBytes <= 0 || h.addBytes(role, service, n, access.DailyBytes, h.now())
+	}
+	rec.Status = http.StatusSwitchingProtocols
+	if err := pipeTunnel(w, r, upstream, e, allow, &st); err != nil {
+		upstream.Close()
+		fail(http.StatusInternalServerError, "could not upgrade")
+		return
+	}
+	rec.Bytes = st.up.Load() + st.down.Load()
+	rec.Note += fmt.Sprintf(" closed %d, up %d down %d", st.close, st.up.Load(), st.down.Load())
+}
+
+// addBytes counts n tunnel bytes and reports whether the total stays within
+// limit (n = 0 asks whether any bytes are left).
+func (h *Handler) addBytes(role, service string, n, limit int64, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	day := now.UTC().Format("2006-01-02")
+	if day != h.day {
+		h.day, h.counts, h.bytes = day, map[[2]string]int{}, map[[2]string]int64{}
+	}
+	k := [2]string{role, service}
+	if h.bytes[k]+n > limit || (n == 0 && h.bytes[k] >= limit) {
+		return false
+	}
+	h.bytes[k] += n
+	return true
+}
+
 // refund gives back a call that never reached the service.
 func (h *Handler) refund(role, service string, limit int, now time.Time) {
 	if limit <= 0 {
@@ -630,7 +710,7 @@ func (h *Handler) take(role, service string, limit int, now time.Time) bool {
 	defer h.mu.Unlock()
 	day := now.UTC().Format("2006-01-02")
 	if day != h.day {
-		h.day, h.counts = day, map[[2]string]int{}
+		h.day, h.counts, h.bytes = day, map[[2]string]int{}, map[[2]string]int64{}
 	}
 	k := [2]string{role, service}
 	if h.counts[k] >= limit {
@@ -683,7 +763,7 @@ func (h *Handler) RestoreDailyCounts(day string, counts []DailyCount, now time.T
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.day != today {
-		h.day, h.counts = today, map[[2]string]int{}
+		h.day, h.counts, h.bytes = today, map[[2]string]int{}, map[[2]string]int64{}
 	}
 	for _, c := range counts {
 		k := [2]string{c.Role, c.Service}
