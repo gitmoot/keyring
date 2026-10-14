@@ -571,3 +571,33 @@ func TestDailyLimitSurvivesRestart(t *testing.T) {
 		t.Fatalf("stale usage applied: %d", code)
 	}
 }
+
+func TestStatusShowsOAuthRefreshFailure(t *testing.T) {
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":"invalid_grant"}`)
+	}))
+	t.Cleanup(tokens.Close)
+	up := upstreamEcho(t)
+	x := newInst(t, "")
+	listen := freeAddr(t)
+	x.must("POST", "/create", map[string]any{"id": "gina", "data_key": newKey(t), "listen": listen, "allow_sources": []string{"127.0.0.1"}})
+	x.must("PUT", "/services/gmail", map[string]any{"base": up.URL, "key": "GMAIL_REFRESH", "auth": "oauth2", "oauth2": map[string]any{"token_url": tokens.URL, "client_id": "c"}})
+	x.must("PUT", "/keys/GMAIL_REFRESH", map[string]any{"value": "1//revoked-refresh"})
+	token := x.must("PUT", "/roles/agent", map[string]any{"access": map[string]any{"gmail": map[string]any{"paths": []string{"/"}}}})["token"].(string)
+	if failing, _ := x.must("GET", "/status", nil)["failing"].(map[string]any); len(failing) != 0 {
+		t.Fatalf("failing before any call: %v", failing)
+	}
+	if code, _ := proxyGet(t, listen, token, "/gmail/x"); code != http.StatusServiceUnavailable {
+		t.Fatalf("revoked refresh token: %d", code)
+	}
+	status := x.must("GET", "/status", nil)
+	failing, _ := status["failing"].(map[string]any)
+	if why, _ := failing["gmail"].(string); !strings.Contains(why, "invalid_grant") {
+		t.Fatalf("status failing = %v", status["failing"])
+	}
+	if strings.Contains(mustJSON(status), "1//revoked-refresh") {
+		t.Fatal("status shows the refresh token")
+	}
+}

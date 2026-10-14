@@ -1,0 +1,46 @@
+{
+  // Per-person keyrings (gitmoot/keyring#46). Deploying needs the owner's
+  // approval: it changes the Cloudflare account and costs money.
+  "name": "keyring-instances",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "containers": [
+    {
+      "class_name": "KeyringInstance",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "instance_type": "lite",
+      "max_instances": 50
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "KEYRING", "class_name": "KeyringInstance" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KeyringInstance"] }],
+  "vars": {
+    // Set to the Worker's https origin, e.g. https://keyring.example.com
+    "PUBLIC_BASE": "https://keyring.example.com",
+    // The services every new keyring starts with, and the router's access.
+    "SERVICES_TEMPLATE": {
+      "services": {
+        "gmail": {
+          "base": "https://gmail.googleapis.com",
+          "key": "GMAIL_REFRESH_TOKEN",
+          "auth": "oauth2",
+          "test_path": "/gmail/v1/users/me/profile",
+          "oauth2": {
+            "token_url": "https://oauth2.googleapis.com/token",
+            "client_id": "REPLACE.apps.googleusercontent.com",
+            "client_secret_key": "GOOGLE_CLIENT_SECRET",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "scopes": ["https://mail.google.com/"],
+            "auth_params": { "access_type": "offline", "prompt": "consent" },
+            "revoke_url": "https://oauth2.googleapis.com/revoke"
+          }
+        }
+      },
+      "access": { "gmail": { "paths": ["/"], "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] } }
+    }
+  }
+  // Secrets (wrangler secret put): MASTER_KEY, CALLER_SECRET, ADMIN_TOKEN, OAUTH_CLIENT_SECRETS
+}
