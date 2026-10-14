@@ -55,6 +55,8 @@ type Handler struct {
 
 	usage usageBook
 
+	oauth oauthCache
+
 	auditMu sync.Mutex
 }
 
@@ -144,6 +146,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 		snap.appStoreConnectKey = parseAppleSigningKey(keys[svc.Key])
 	}
 	h.snap.Store(snap)
+	h.retainOAuth(config, keys)
 }
 
 type auditRecord struct {
@@ -356,7 +359,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := buildOutbound(r.Context(), svc, key, r.Method, rest, r.URL.RawQuery, outboundHeader(r.Header, svc), r.Body, r.ContentLength)
+	upstreamKey, alsoRedact := key, []string(nil)
+	if svc.Auth == policy.AuthOAuth2 {
+		refresh, secret := oauthSecrets(svc, snap.keys)
+		token, err := h.accessToken(r.Context(), svc, refresh, secret)
+		if err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			switch {
+			case errors.Is(err, errOAuthRejected):
+				fail(http.StatusServiceUnavailable, err.Error())
+			case r.Context().Err() != nil:
+				fail(http.StatusBadGateway, "client went away")
+			default:
+				fail(http.StatusBadGateway, err.Error())
+			}
+			return
+		}
+		// The refresh token and client secret never go upstream; they are
+		// masked too in case a service mirrors something unexpected.
+		upstreamKey, alsoRedact = token, []string{refresh, secret}
+	}
+	out, err := buildOutbound(r.Context(), svc, upstreamKey, r.Method, rest, r.URL.RawQuery, outboundHeader(r.Header, svc), r.Body, r.ContentLength)
 	if errors.Is(err, errBadQuery) {
 		h.refund(roleName, service, access.DailyRequests, start)
 		fail(http.StatusBadRequest, "malformed query string")
@@ -379,6 +402,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if svc.Auth == policy.AuthOAuth2 && resp.StatusCode == http.StatusUnauthorized {
+		// The token may have been revoked before it expired: mint a new
+		// one on the next call.
+		refresh, secret := oauthSecrets(svc, snap.keys)
+		h.dropAccessToken(svc, refresh, secret, upstreamKey)
+	}
 	// The transport already decoded gzip. Any other encoding would hide an
 	// echoed key from the redactor, so such a reply is not passed on.
 	if ce := strings.TrimSpace(resp.Header.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
@@ -386,7 +415,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forms := secretForms(key)
+	forms := secretForms(append([]string{upstreamKey}, alsoRedact...)...)
 	for name, values := range resp.Header {
 		if hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
 			continue
@@ -441,7 +470,7 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 	target.RawPath = ""
 	target.RawQuery = rawQuery
 	switch svc.Auth {
-	case policy.AuthBearer:
+	case policy.AuthBearer, policy.AuthOAuth2:
 		header.Set("Authorization", "Bearer "+key)
 	case policy.AuthHeader:
 		header.Set(svc.Header, key)
@@ -468,13 +497,23 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 }
 
 // TestKey sends the service's test request with key and returns the status
-// code. It never returns the reply body, which could echo the key.
+// code. It never returns the reply body, which could echo the key. For an
+// oauth2 service, key is the refresh token: the test mints an access token
+// with it and the client secret in use.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
 	if svc.SignOnly() {
 		return 0, errors.New("sign-only service has no upstream test")
 	}
 	if svc.TestPath == "" {
 		return 0, errors.New("the service has no test request")
+	}
+	if svc.Auth == policy.AuthOAuth2 {
+		_, secret := oauthSecrets(svc, h.snap.Load().keys)
+		token, err := h.accessToken(ctx, svc, key, secret)
+		if err != nil {
+			return 0, err
+		}
+		key = token
 	}
 	method := svc.TestMethod
 	if method == "" {

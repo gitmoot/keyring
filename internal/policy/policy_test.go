@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -139,5 +140,78 @@ func TestValidateTLSPin(t *testing.T) {
 		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "tls_pin_sha256") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestValidateOAuth2(t *testing.T) {
+	google := func() *OAuth2 {
+		return &OAuth2{TokenURL: "https://oauth2.googleapis.com/token", ClientID: "id.apps.googleusercontent.com", ClientSecretKey: "GOOGLE_CLIENT_SECRET"}
+	}
+	gmail := Service{Base: "https://gmail.googleapis.com", Key: "GMAIL_REFRESH", Auth: AuthOAuth2, OAuth2: google()}
+	cases := map[string]func(*Config){
+		"oauth2 without settings": func(c *Config) {
+			s := gmail
+			s.OAuth2 = nil
+			c.Services["gmail"] = s
+		},
+		"token url over plain http": func(c *Config) {
+			s := gmail
+			s.OAuth2 = google()
+			s.OAuth2.TokenURL = "http://oauth2.googleapis.com/token"
+			c.Services["gmail"] = s
+		},
+		"no client id": func(c *Config) {
+			s := gmail
+			s.OAuth2 = google()
+			s.OAuth2.ClientID = ""
+			c.Services["gmail"] = s
+		},
+		"client secret is the refresh token": func(c *Config) {
+			s := gmail
+			s.OAuth2 = google()
+			s.OAuth2.ClientSecretKey = "GMAIL_REFRESH"
+			c.Services["gmail"] = s
+		},
+		"oauth2 settings on a bearer service": func(c *Config) {
+			c.Services["openrouter"] = Service{Base: "https://openrouter.ai", Key: "OPENROUTER_API_KEY", Auth: AuthBearer, OAuth2: google()}
+		},
+		"refresh token sent as a bearer key": func(c *Config) {
+			c.Services["gmail"] = gmail
+			c.Services["leak"] = Service{Base: "https://example.com", Key: "GMAIL_REFRESH", Auth: AuthBearer}
+		},
+		"client secret sent as a bearer key": func(c *Config) {
+			c.Services["gmail"] = gmail
+			c.Services["leak"] = Service{Base: "https://example.com", Key: "GOOGLE_CLIENT_SECRET", Auth: AuthBearer}
+		},
+		"refresh token shared across clients": func(c *Config) {
+			c.Services["gmail"] = gmail
+			other := gmail
+			other.OAuth2 = google()
+			other.OAuth2.ClientID = "other.apps.googleusercontent.com"
+			c.Services["drive"] = other
+		},
+		"oauth2 on a sign-only service": func(c *Config) {
+			c.Services["sign"] = Service{Key: "SIGN", Auth: AuthEd25519Sign, OAuth2: google()}
+		},
+	}
+	for name, mutate := range cases {
+		c := validConfig()
+		mutate(c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// One Google login used by two APIs with one client: allowed.
+	c := validConfig()
+	c.Services["gmail"] = gmail
+	drive := gmail
+	drive.Base = "https://www.googleapis.com"
+	drive.OAuth2 = google()
+	c.Services["drive"] = drive
+	if err := c.Validate(); err != nil {
+		t.Fatalf("shared refresh token with the same client refused: %v", err)
+	}
+	if names := c.Services["gmail"].KeyNames(); !slices.Equal(names, []string{"GMAIL_REFRESH", "GOOGLE_CLIENT_SECRET"}) {
+		t.Fatalf("KeyNames = %v", names)
 	}
 }

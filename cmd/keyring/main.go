@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -232,12 +233,14 @@ func check(configPath, storePath string, stdout io.Writer) error {
 func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 	var missing []string
 	for _, svc := range cfg.Services {
-		if keys[svc.Key] == "" {
-			missing = append(missing, svc.Key)
+		for _, name := range svc.KeyNames() {
+			if keys[name] == "" {
+				missing = append(missing, name)
+			}
 		}
 	}
 	sort.Strings(missing)
-	return missing
+	return slices.Compact(missing)
 }
 
 func serve(configPath, storePath string, stderr io.Writer) error {

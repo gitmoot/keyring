@@ -14,15 +14,13 @@ const Mask = "[REDACTED]"
 
 var percentHex = regexp.MustCompile(`%[0-9A-F]{2}`)
 
-// secretForms lists the ways a key can come back from a service: as sent, URL
-// query- or path-encoded (with upper- or lowercase hex), and with JSON-escaped
-// slashes. Longest first, so a longer form is masked before a shorter one it
-// contains. Encodings that depend on position (base64 of a larger text) cannot
-// be listed; a service that echoes a key that way is not supported.
-func secretForms(key string) [][]byte {
-	if key == "" {
-		return nil
-	}
+// secretForms lists the ways the keys can come back from a service: as sent,
+// URL query- or path-encoded (with upper- or lowercase hex), and with
+// JSON-escaped slashes. Longest first, so a longer form is masked before a
+// shorter one it contains. Encodings that depend on position (base64 of a
+// larger text) cannot be listed; a service that echoes a key that way is not
+// supported.
+func secretForms(keys ...string) [][]byte {
 	seen := map[string]bool{}
 	var forms []string
 	add := func(s string) {
@@ -31,10 +29,15 @@ func secretForms(key string) [][]byte {
 			forms = append(forms, s)
 		}
 	}
-	for _, f := range []string{key, url.QueryEscape(key), url.PathEscape(key)} {
-		add(f)
-		add(percentHex.ReplaceAllStringFunc(f, strings.ToLower))
-		add(strings.ReplaceAll(f, "/", `\/`))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		for _, f := range []string{key, url.QueryEscape(key), url.PathEscape(key)} {
+			add(f)
+			add(percentHex.ReplaceAllStringFunc(f, strings.ToLower))
+			add(strings.ReplaceAll(f, "/", `\/`))
+		}
 	}
 	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
 	out := make([][]byte, len(forms))

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -193,9 +194,11 @@ func (b *Backend) rows() ([]keyRow, error) {
 	}
 	all := append([]string(nil), names...)
 	for _, svc := range cfg.Services {
-		if !has[svc.Key] {
-			has[svc.Key] = false
-			all = append(all, svc.Key)
+		for _, kn := range svc.KeyNames() {
+			if !has[kn] {
+				has[kn] = false
+				all = append(all, kn)
+			}
 		}
 	}
 	sort.Strings(all)
@@ -205,7 +208,7 @@ func (b *Backend) rows() ([]keyRow, error) {
 		row := keyRow{Name: name, HasValue: has[name]}
 		services := map[string]bool{}
 		for sname, svc := range cfg.Services {
-			if svc.Key == name {
+			if slices.Contains(svc.KeyNames(), name) {
 				services[sname] = true
 				row.Services = append(row.Services, sname)
 			}
@@ -251,8 +254,13 @@ func (b *Backend) rows() ([]keyRow, error) {
 		if at := meta[name].UpdatedAt; at != nil {
 			row.Updated = at.UTC().Format("2 Jan 2006")
 		}
-		row.Status, row.StatusClass = describe(has[name], meta[name])
-		row.State = state(has[name], meta[name])
+		m := meta[name]
+		if failure := b.Proxy.OAuthFailure(name); failure != "" {
+			// A live refresh failure outranks an older test result.
+			m.Status, m.Reason = "failing", failure
+		}
+		row.Status, row.StatusClass = describe(has[name], m)
+		row.State = state(has[name], m)
 		rows = append(rows, row)
 	}
 	return rows, nil
