@@ -379,7 +379,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// masked too in case a service mirrors something unexpected.
 		upstreamKey, alsoRedact = token, []string{refresh, secret}
 	}
-	out, err := buildOutbound(r.Context(), svc, upstreamKey, r.Method, rest, r.URL.RawQuery, outboundHeader(r.Header, svc), r.Body, r.ContentLength)
+	header := outboundHeader(r.Header, svc)
+	if snap.config.ContainerMode {
+		// The supervisor removes it; never pass the router's proof on even
+		// if one slipped through.
+		header.Del(policy.CallerHeader)
+	}
+	out, err := buildOutbound(r.Context(), svc, upstreamKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
 	if errors.Is(err, errBadQuery) {
 		h.refund(roleName, service, access.DailyRequests, start)
 		fail(http.StatusBadRequest, "malformed query string")

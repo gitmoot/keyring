@@ -96,6 +96,7 @@ type Consent struct {
 
 	public     *url.URL
 	apiSources []netip.Prefix
+	anySource  bool // container mode: no source check (see Config.ContainerMode)
 }
 
 // Equal reports whether a and b are the same settings (nil is off).
@@ -115,6 +116,9 @@ func (a *Consent) PublicBase() *url.URL {
 
 // APISourceAllowed reports whether addr may call the consent API.
 func (a *Consent) APISourceAllowed(addr netip.Addr) bool {
+	if a.anySource {
+		return true
+	}
 	addr = addr.Unmap()
 	for _, p := range a.apiSources {
 		if p.Contains(addr) {
@@ -142,7 +146,54 @@ type Config struct {
 	Rules
 	AccessList
 
+	// ContainerMode is set only by "keyring instance --container", never by
+	// a file: the instance runs in a container reached only through its
+	// supervisor (at Cloudflare, the person's Durable Object), so it may
+	// listen on a wildcard address and checks no source address. See
+	// CallerHeader.
+	ContainerMode bool `json:"-"`
+
 	sources []netip.Prefix
+}
+
+// CallerHeader carries the router's proof of identity to the supervisor in
+// container mode. The supervisor checks and removes it; the keyring never
+// forwards it upstream either.
+const CallerHeader = "X-Keyring-Caller"
+
+// listenAddr parses an IP:port a listener uses. A wildcard address is only
+// allowed in container mode.
+func (c *Config) listenAddr(field, value string) (netip.AddrPort, error) {
+	addr, err := netip.ParseAddrPort(value)
+	if err != nil || addr.Port() == 0 {
+		return addr, fmt.Errorf("%s %q: want IP:port", field, value)
+	}
+	if addr.Addr().IsUnspecified() && !c.ContainerMode {
+		return addr, fmt.Errorf("%s %q: use one specific address, not a wildcard", field, value)
+	}
+	return addr, nil
+}
+
+// sameSocket reports whether two listeners would need the same port on the
+// same address; a wildcard address holds the port on every address.
+func sameSocket(a, b netip.AddrPort) bool {
+	return a.Port() == b.Port() && (a.Addr() == b.Addr() || a.Addr().IsUnspecified() || b.Addr().IsUnspecified())
+}
+
+// sourcesFor parses an allow list. In container mode the list must be empty:
+// every request arrives through the supervisor, so a source address proves
+// nothing.
+func (c *Config) sourcesFor(field string, list []string) ([]netip.Prefix, error) {
+	if c.ContainerMode {
+		if len(list) > 0 {
+			return nil, fmt.Errorf("%s must be empty in container mode: requests arrive only through the supervisor", field)
+		}
+		return nil, nil
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("%s is empty", field)
+	}
+	return parseSources(field, list)
 }
 
 type Service struct {
@@ -401,17 +452,11 @@ func decodeStrict(raw []byte, v any) error {
 
 // Validate checks every field and prepares the parsed forms.
 func (c *Config) Validate() error {
-	listen, err := netip.ParseAddrPort(c.Listen)
+	listen, err := c.listenAddr("listen", c.Listen)
 	if err != nil {
-		return fmt.Errorf("listen %q: want IP:port", c.Listen)
+		return err
 	}
-	if listen.Addr().IsUnspecified() {
-		return fmt.Errorf("listen %q: use one specific address, not a wildcard", c.Listen)
-	}
-	if len(c.AllowSources) == 0 {
-		return errors.New("allow_sources is empty")
-	}
-	if c.sources, err = parseSources("allow_sources", c.AllowSources); err != nil {
+	if c.sources, err = c.sourcesFor("allow_sources", c.AllowSources); err != nil {
 		return err
 	}
 	if strings.TrimSpace(c.AuditLog) == "" {
@@ -446,7 +491,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	if k := c.Consent; k != nil {
-		if err := k.validate(listen, c.AdminListen); err != nil {
+		if err := k.validate(c, listen); err != nil {
 			return err
 		}
 	}
@@ -552,22 +597,22 @@ func parseSources(field string, list []string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
-func (k *Consent) validate(proxy netip.AddrPort, adminListen string) error {
-	pages, err := netip.ParseAddrPort(k.Listen)
-	if err != nil || pages.Addr().IsUnspecified() || pages.Port() == 0 {
-		return fmt.Errorf("consent listen %q: want one specific IP:port", k.Listen)
+func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
+	pages, err := c.listenAddr("consent listen", k.Listen)
+	if err != nil {
+		return err
 	}
-	api, err := netip.ParseAddrPort(k.APIListen)
-	if err != nil || api.Addr().IsUnspecified() || api.Port() == 0 {
-		return fmt.Errorf("consent api_listen %q: want one specific IP:port", k.APIListen)
+	api, err := c.listenAddr("consent api_listen", k.APIListen)
+	if err != nil {
+		return err
 	}
-	admin, _ := netip.ParseAddrPort(adminListen)
+	admin, _ := netip.ParseAddrPort(c.AdminListen)
 	for _, other := range []netip.AddrPort{proxy, admin} {
-		if pages == other || api == other {
+		if other.IsValid() && (sameSocket(pages, other) || sameSocket(api, other)) {
 			return errors.New("consent listen and api_listen must differ from listen and admin_listen")
 		}
 	}
-	if pages == api {
+	if sameSocket(pages, api) {
 		return errors.New("consent listen and api_listen must differ")
 	}
 	if k.public, err = upstreamURL("consent public_url", k.PublicURL); err != nil {
@@ -581,12 +626,10 @@ func (k *Consent) validate(proxy netip.AddrPort, adminListen string) error {
 			k.public.Host = "[" + k.public.Host + "]"
 		}
 	}
-	if len(k.APIAllowSources) == 0 {
-		return errors.New("consent api_allow_sources is empty")
-	}
-	if k.apiSources, err = parseSources("consent api_allow_sources", k.APIAllowSources); err != nil {
+	if k.apiSources, err = c.sourcesFor("consent api_allow_sources", k.APIAllowSources); err != nil {
 		return err
 	}
+	k.anySource = c.ContainerMode
 	if !tokenHash.MatchString(k.APITokenSHA256) {
 		return errors.New("consent api_token_sha256 must be 64 lowercase hex characters")
 	}
@@ -745,6 +788,9 @@ func (s Service) BaseURL() *url.URL {
 
 // SourceAllowed reports whether a connection from addr is accepted.
 func (c *Config) SourceAllowed(addr netip.Addr) bool {
+	if c.ContainerMode {
+		return true
+	}
 	addr = addr.Unmap()
 	for _, p := range c.sources {
 		if p.Contains(addr) {

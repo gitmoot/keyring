@@ -17,7 +17,7 @@ import (
 
 // runInstance serves one person's keyring until SIGTERM or until it is
 // deleted through its admin API.
-func runInstance(adminListen, adminTokenSHA, statePath, auditPath string, stdout, stderr io.Writer) error {
+func runInstance(adminListen, adminTokenSHA, statePath, auditPath string, container bool, stdout, stderr io.Writer) error {
 	audit, auditName := stdout, "stdout"
 	if auditPath != "" {
 		f, err := openAudit(auditPath)
@@ -29,7 +29,7 @@ func runInstance(adminListen, adminTokenSHA, statePath, auditPath string, stdout
 	}
 	in, err := instance.New(instance.Options{
 		AdminListen: adminListen, AdminTokenSHA256: adminTokenSHA, StatePath: statePath,
-		Audit: audit, AuditName: auditName, Log: stderr,
+		Audit: audit, AuditName: auditName, Log: stderr, Container: container,
 	})
 	if err != nil {
 		return err

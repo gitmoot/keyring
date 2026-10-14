@@ -529,3 +529,31 @@ func TestAccessRequestsAreFiledNotGranted(t *testing.T) {
 		t.Fatalf("audit: %s", audit.String())
 	}
 }
+
+func TestContainerModeNeverForwardsTheCallerProof(t *testing.T) {
+	up, got := upstream(t)
+	h, _ := newHandler(t, up.URL, bearer, allowAll)
+	cfg := *h.Config()
+	cfg.ContainerMode, cfg.Listen, cfg.AllowSources = true, "0.0.0.0:8080", nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	r := httptest.NewRequest("GET", "/api/v1/x", nil)
+	r.RemoteAddr = "172.16.0.9:4000" // the supervisor's side, any address
+	r.Header.Set(TokenHeader, testToken)
+	r.Header.Set(policy.CallerHeader, "router-proof")
+	r.Header.Set("X-Other", "kept")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("container-mode call: %d %s", w.Code, w.Body)
+	}
+	out := got.last(t)
+	if v := out.Header.Get(policy.CallerHeader); v != "" {
+		t.Fatalf("caller proof forwarded upstream: %q", v)
+	}
+	if out.Header.Get("X-Other") != "kept" {
+		t.Fatal("other headers dropped")
+	}
+}

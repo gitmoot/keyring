@@ -43,6 +43,10 @@ type Options struct {
 	AuditName string
 	// Log receives operational messages (listeners started and stopped).
 	Log io.Writer
+	// Container runs the instance inside a container that only its
+	// supervisor can reach (policy.Config.ContainerMode): listeners may use
+	// a wildcard address and no source address is checked. Off by default.
+	Container bool
 }
 
 // Instance is one person's keyring.
@@ -75,7 +79,13 @@ type running struct {
 // AdminHandler) until it is created or unlocked.
 func New(opt Options) (*Instance, error) {
 	admin, err := netip.ParseAddrPort(opt.AdminListen)
-	if err != nil || !admin.Addr().IsLoopback() || admin.Port() == 0 {
+	if opt.Container {
+		// The supervisor reaches the container over its own network
+		// interface, not loopback; the admin token still guards every call.
+		if err != nil || admin.Port() == 0 {
+			return nil, fmt.Errorf("admin listen %q: want IP:port", opt.AdminListen)
+		}
+	} else if err != nil || !admin.Addr().IsLoopback() || admin.Port() == 0 {
 		return nil, fmt.Errorf("admin listen %q: must be a loopback IP:port", opt.AdminListen)
 	}
 	if len(opt.AdminTokenSHA256) != 64 || strings.Trim(opt.AdminTokenSHA256, "0123456789abcdef") != "" {
@@ -137,7 +147,8 @@ func (in *Instance) wanted(cfg *policy.Config) []listenerSpec {
 func (in *Instance) bind(cfg *policy.Config) (map[string]net.Listener, error) {
 	opened := map[string]net.Listener{}
 	for _, s := range in.wanted(cfg) {
-		if s.addr == in.opt.AdminListen {
+		if addr, err := netip.ParseAddrPort(s.addr); err == nil && addr.Port() == in.admin.Port() &&
+			(addr.Addr() == in.admin.Addr() || addr.Addr().IsUnspecified() || in.admin.Addr().IsUnspecified()) {
 			closeAll(opened)
 			return nil, fmt.Errorf("%s cannot use the admin address", s.name)
 		}
@@ -234,7 +245,7 @@ func badRequest(format string, args ...any) error {
 // and closes listeners no longer used. On any error nothing changes.
 // Callers hold in.mu.
 func (in *Instance) commit(next *State, key []byte) error {
-	cfg, err := next.config(in.opt.AuditName)
+	cfg, err := next.config(in.opt.AuditName, in.opt.Container)
 	if err != nil {
 		return badRequest("%v", err)
 	}

@@ -500,3 +500,32 @@ func TestConsentLinkStoresIntoTheSealedState(t *testing.T) {
 		t.Fatal("audit log holds the pasted value")
 	}
 }
+
+func TestContainerOption(t *testing.T) {
+	if _, err := New(Options{AdminListen: "0.0.0.0:7720", AdminTokenSHA256: sha(adminToken), Audit: io.Discard}); err == nil {
+		t.Fatal("wildcard admin accepted without --container")
+	}
+	_, port, _ := net.SplitHostPort(freeAddr(t))
+	in, err := New(Options{AdminListen: "0.0.0.0:" + port, AdminTokenSHA256: sha(adminToken), Audit: io.Discard, Container: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(in.Close)
+	x := &inst{t: t, in: in, admin: in.AdminHandler(), audit: &syncBuffer{}}
+	_, proxyPort, _ := net.SplitHostPort(freeAddr(t))
+	// The proxy cannot take the admin port, whatever the address.
+	if code, _ := x.call("POST", "/create", map[string]any{"id": "c1", "data_key": newKey(t), "listen": "127.0.0.1:" + port}); code != http.StatusBadRequest {
+		t.Fatalf("proxy on the admin port: %d", code)
+	}
+	if code, out := x.call("POST", "/create", map[string]any{"id": "c1", "data_key": newKey(t), "listen": "0.0.0.0:" + proxyPort, "allow_sources": []string{"10.0.0.1"}}); code != http.StatusBadRequest {
+		t.Fatalf("allow_sources in container mode: %d %v", code, out)
+	}
+	up := upstreamEcho(t)
+	x.must("POST", "/create", map[string]any{"id": "c1", "data_key": newKey(t), "listen": "0.0.0.0:" + proxyPort})
+	x.must("PUT", "/services/api", map[string]any{"base": up.URL, "key": "API_KEY", "auth": "bearer"})
+	x.must("PUT", "/keys/API_KEY", map[string]any{"value": "container-value"})
+	token := x.must("PUT", "/roles/agent", map[string]any{"access": map[string]any{"api": map[string]any{"paths": []string{"/"}}}})["token"].(string)
+	if code, _ := proxyGet(t, "127.0.0.1:"+proxyPort, token, "/api/x"); code != 200 {
+		t.Fatalf("container proxy: %d", code)
+	}
+}
