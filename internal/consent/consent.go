@@ -228,11 +228,12 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 	}
 	ttl := DefaultLinkTTL
 	if req.TTLSeconds != 0 {
-		ttl = time.Duration(req.TTLSeconds) * time.Second
-		if req.TTLSeconds < 60 || ttl > MaxLinkTTL {
+		// Bounds first: a huge number would overflow the Duration.
+		if req.TTLSeconds < 60 || req.TTLSeconds > int(MaxLinkTTL/time.Second) {
 			apiError(w, http.StatusBadRequest, "ttl_seconds must be between 60 and 3600")
 			return
 		}
+		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
 	if !validLabel(req.Label) {
 		apiError(w, http.StatusBadRequest, "label must be at most 100 characters without control characters")

@@ -574,6 +574,13 @@ func (k *Consent) validate(proxy netip.AddrPort, adminListen string) error {
 		return err
 	}
 	k.public.Path = strings.TrimSuffix(k.public.Path, "/")
+	// Browsers leave a default port out of Origin; so does the public base.
+	if p := k.public.Port(); (k.public.Scheme == "https" && p == "443") || (k.public.Scheme == "http" && p == "80") {
+		k.public.Host = k.public.Hostname()
+		if strings.Contains(k.public.Host, ":") {
+			k.public.Host = "[" + k.public.Host + "]"
+		}
+	}
 	if len(k.APIAllowSources) == 0 {
 		return errors.New("consent api_allow_sources is empty")
 	}

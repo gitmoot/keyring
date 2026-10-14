@@ -248,7 +248,7 @@ func TestLinkExpires(t *testing.T) {
 		t.Fatalf("POST expired link: %d, stored %q", w.Code, e.keys.get("PROXY_KEY"))
 	}
 	// A custom lifetime is bounded.
-	for _, ttl := range []string{"30", "3601", "-5"} {
+	for _, ttl := range []string{"30", "3601", "-5", "9223372036854775807", "18446744074"} {
 		if w := e.api("POST", "/links", apiToken, `{"service":"proxy","ttl_seconds":`+ttl+`}`); w.Code != http.StatusBadRequest {
 			t.Fatalf("ttl %s: %d", ttl, w.Code)
 		}
@@ -504,5 +504,28 @@ func TestDeleteRevokesAndDeletes(t *testing.T) {
 	}
 	if strings.Contains(e.audit.String(), "1//") {
 		t.Fatalf("audit log holds a refresh token:\n%s", e.audit)
+	}
+}
+
+func TestDefaultPortInPublicURL(t *testing.T) {
+	e := newEnv(t)
+	next := *e.cfg
+	k := *e.cfg.Consent
+	k.PublicURL = "https://connect.example.com:443/p/alice"
+	next.Consent = &k
+	if err := next.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg = &next
+	w := e.api("POST", "/links", apiToken, `{"service":"proxy"}`)
+	var out struct{ URL string }
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if !strings.HasPrefix(out.URL, "https://connect.example.com/p/alice/c/") {
+		t.Fatalf("link url %q", out.URL)
+	}
+	u, _ := url.Parse(out.URL)
+	// Browsers send Origin without the default port.
+	if w := e.page("POST", u.Path, url.Values{"value": {"v"}}, map[string]string{"Origin": "https://connect.example.com"}); w.Code != http.StatusOK {
+		t.Fatalf("POST from the page: %d %s", w.Code, w.Body)
 	}
 }
