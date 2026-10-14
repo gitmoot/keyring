@@ -386,8 +386,15 @@ func (c *Config) Validate() error {
 			if name != oauthName && svc.Key == oauth.Key && (svc.Auth != AuthOAuth2 || *svc.OAuth2 != *oauth.OAuth2) {
 				return errors.New("an oauth2 refresh token can be shared only by oauth2 services with the same oauth2 settings")
 			}
-			if secret := oauth.OAuth2.ClientSecretKey; secret != "" && svc.Key == secret {
+			// A client secret is the key of no service (so no refresh
+			// token either, as svc ranges over every oauth2 service) and
+			// goes to one token endpoint only.
+			secret := oauth.OAuth2.ClientSecretKey
+			if secret != "" && svc.Key == secret {
 				return errors.New("an oauth2 client secret cannot be a service's key")
+			}
+			if secret != "" && svc.OAuth2 != nil && svc.OAuth2.ClientSecretKey == secret && svc.OAuth2.TokenURL != oauth.OAuth2.TokenURL {
+				return errors.New("an oauth2 client secret can be shared only by services with the same token_url")
 			}
 		}
 	}

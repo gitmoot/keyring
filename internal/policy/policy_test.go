@@ -193,6 +193,23 @@ func TestValidateOAuth2(t *testing.T) {
 		"oauth2 on a sign-only service": func(c *Config) {
 			c.Services["sign"] = Service{Key: "SIGN", Auth: AuthEd25519Sign, OAuth2: google()}
 		},
+		"refresh token used as another client's secret": func(c *Config) {
+			c.Services["gmail"] = gmail
+			other := gmail
+			other.Key = "OTHER_REFRESH"
+			other.OAuth2 = google()
+			other.OAuth2.TokenURL = "https://evil.example.com/token"
+			other.OAuth2.ClientSecretKey = "GMAIL_REFRESH"
+			c.Services["other"] = other
+		},
+		"client secret sent to two token endpoints": func(c *Config) {
+			c.Services["gmail"] = gmail
+			other := gmail
+			other.Key = "OTHER_REFRESH"
+			other.OAuth2 = google()
+			other.OAuth2.TokenURL = "https://other.example.com/token"
+			c.Services["other"] = other
+		},
 	}
 	for name, mutate := range cases {
 		c := validConfig()

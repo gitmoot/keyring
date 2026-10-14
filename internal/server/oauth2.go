@@ -209,7 +209,7 @@ func (h *Handler) OAuthFailure(keyName string) string {
 	return ""
 }
 
-var oauthErrorCode = regexp.MustCompile(`^[a-z_]{1,64}$`)
+var oauthErrorCode = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 // usableAccessToken reports whether token may go into an Authorization
 // header: 1 to 8192 printable ASCII characters, no spaces.
