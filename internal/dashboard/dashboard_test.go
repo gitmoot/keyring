@@ -549,3 +549,37 @@ func TestKeysTableFiltersSortsAndShowsDetails(t *testing.T) {
 		t.Fatalf("working filter: %v", got)
 	}
 }
+
+func TestOAuthRefreshFailureShowsOnTheKey(t *testing.T) {
+	e := newEnv(t)
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_grant"}`)
+	}))
+	t.Cleanup(tokens.Close)
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	svc := access.Services["api"]
+	svc.Auth = policy.AuthOAuth2
+	svc.OAuth2 = &policy.OAuth2{TokenURL: tokens.URL, ClientID: "client-id", ClientSecretKey: "CLIENT_SECRET"}
+	access.Services = map[string]policy.Service{"api": svc}
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.proxy.Swap(next, map[string]string{"API_KEY": oldValue})
+
+	page := e.request("GET", "/keys", nil).Body.String()
+	if !strings.Contains(page, "CLIENT_SECRET") {
+		t.Fatalf("the client secret the service needs is not listed:\n%s", page)
+	}
+	e.proxy.Swap(next, map[string]string{"API_KEY": oldValue, "CLIENT_SECRET": newValue})
+	if code := e.proxyCall(); code != http.StatusServiceUnavailable {
+		t.Fatalf("proxy call with a revoked refresh token: %d", code)
+	}
+	page = e.request("GET", "/keys/API_KEY", nil).Body.String()
+	if !strings.Contains(page, "Failing: oauth2 refresh failed: the provider rejected the refresh token or client (invalid_grant)") || strings.Contains(page, oldValue) || strings.Contains(page, newValue) {
+		t.Fatalf("refresh failure not shown on the key:\n%s", page)
+	}
+}

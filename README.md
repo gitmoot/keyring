@@ -254,6 +254,27 @@ A service may name a harmless request for the dashboard's Test button: `"test_me
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
+### OAuth services with refresh tokens
+
+Google (Gmail, Drive, Sheets, Calendar) and similar APIs give a long-lived refresh token and access tokens that expire after about an hour. A service with `"auth": "oauth2"` stores the refresh token under its `key`; the keyring mints access tokens from it and sends `Authorization: Bearer <access token>`:
+
+```json
+"gmail": {
+  "base": "https://gmail.googleapis.com", "key": "GMAIL_REFRESH_TOKEN", "auth": "oauth2",
+  "test_path": "/gmail/v1/users/me/profile",
+  "oauth2": {"token_url": "https://oauth2.googleapis.com/token", "client_id": "<id>.apps.googleusercontent.com", "client_secret_key": "GOOGLE_CLIENT_SECRET"}
+}
+```
+
+- `client_id` is public configuration. `client_secret_key` names the store key holding the client secret; leave it out for a public client. `token_url` must be `https` (plain `http` only to a loopback test server).
+- The refresh token and client secret go only to `token_url`, never to the API, and are masked like a key if the API echoes them. Access tokens are cached in memory only, never written to the store or the log, and replaced a minute before they expire (or after 10 minutes if the provider gives no lifetime). Concurrent calls share one refresh.
+- If the API answers 401, the cached access token is dropped and the next call mints a new one.
+- A refresh that the provider refuses (`invalid_grant`, `invalid_client`, `unauthorized_client`: revoked or expired consent) fails closed with 503 and a message to connect the account again; other refresh failures give 502. Nothing else is tried, the call does not count against the daily limit, and the token endpoint is asked again only after 10 seconds. The dashboard shows the key as failing with the reason until a refresh works.
+- Several services can share one refresh token (one Google login for Gmail and Drive) only if they are all `oauth2` with the same `oauth2` settings. A refresh token or client secret can never be the key of a service that sends its key upstream.
+- Per-role paths, methods, daily limits and expiry apply as for any service. Replacing the refresh token (dashboard or `keyring set` and `SIGHUP`) stops use of tokens minted from the old one.
+
+Getting the refresh token in the first place (the person signing in) is not part of this; store it with `keyring set` or the dashboard.
+
 ### Ed25519 signing (not an API proxy)
 
 For artifacts that need a signature without the key leaving this process — the

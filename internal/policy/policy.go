@@ -33,6 +33,9 @@ const (
 	AuthAppleAdsSign        = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
 	AuthAppStoreConnectSign = "app-store-connect-sign"
 	AuthEd25519Sign         = "ed25519-sign" // Local Ed25519 signing only; never proxy the key.
+	// AuthOAuth2 sends Authorization: Bearer <access token>, minted from the
+	// refresh token stored under Key; the refresh token never goes upstream.
+	AuthOAuth2 = "oauth2"
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -107,6 +110,9 @@ type Service struct {
 	// certificate for this service instead of the system CA roots, so a
 	// self-signed upstream can be used. https only.
 	TLSPinSHA256 string `json:"tls_pin_sha256,omitempty"`
+	// OAuth2 tells an oauth2 service how to turn its stored refresh token
+	// into access tokens.
+	OAuth2 *OAuth2 `json:"oauth2,omitempty"`
 
 	base *url.URL
 }
@@ -122,6 +128,27 @@ type AppleAds struct {
 type AppStoreConnect struct {
 	IssuerID string `json:"issuer_id"`
 	KeyID    string `json:"key_id"`
+}
+
+// OAuth2 is the public half of an OAuth client: the refresh token and client
+// secret stay in the store.
+type OAuth2 struct {
+	// TokenURL is the provider's token endpoint, e.g.
+	// https://oauth2.googleapis.com/token.
+	TokenURL string `json:"token_url"`
+	ClientID string `json:"client_id"`
+	// ClientSecretKey names the store key holding the client secret; empty
+	// for a public client.
+	ClientSecretKey string `json:"client_secret_key,omitempty"`
+}
+
+// KeyNames are the store keys the service needs: its key and, for oauth2, the
+// client secret.
+func (s Service) KeyNames() []string {
+	if s.OAuth2 != nil && s.OAuth2.ClientSecretKey != "" {
+		return []string{s.Key, s.OAuth2.ClientSecretKey}
+	}
+	return []string{s.Key}
 }
 
 // SignOnly services never send their private key to an upstream.
@@ -348,6 +375,29 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	for oauthName, oauth := range c.Services {
+		if oauth.Auth != AuthOAuth2 {
+			continue
+		}
+		for name, svc := range c.Services {
+			// A refresh token goes only to the token endpoint: a service
+			// that sends its key upstream must not hold it, and services
+			// sharing it share one access token, so one OAuth client.
+			if name != oauthName && svc.Key == oauth.Key && (svc.Auth != AuthOAuth2 || *svc.OAuth2 != *oauth.OAuth2) {
+				return errors.New("an oauth2 refresh token can be shared only by oauth2 services with the same oauth2 settings")
+			}
+			// A client secret is the key of no service (so no refresh
+			// token either, as svc ranges over every oauth2 service) and
+			// goes to one token endpoint only.
+			secret := oauth.OAuth2.ClientSecretKey
+			if secret != "" && svc.Key == secret {
+				return errors.New("an oauth2 client secret cannot be a service's key")
+			}
+			if secret != "" && svc.OAuth2 != nil && svc.OAuth2.ClientSecretKey == secret && svc.OAuth2.TokenURL != oauth.OAuth2.TokenURL {
+				return errors.New("an oauth2 client secret can be shared only by services with the same token_url")
+			}
+		}
+	}
 	seen := map[string]string{}
 	for name, role := range c.Roles {
 		if !roleName.MatchString(name) {
@@ -379,7 +429,7 @@ func (s *Service) validate() error {
 		if !store.ValidName(s.Key) {
 			return errors.New("sign-only service needs a valid key name")
 		}
-		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" {
+		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil {
 			return errors.New("sign-only service cannot have proxy or test settings")
 		}
 		var identity []string
@@ -410,23 +460,9 @@ func (s *Service) validate() error {
 	if s.AppleAds != nil || s.AppStoreConnect != nil {
 		return errors.New("signing identity requires the corresponding sign-only auth")
 	}
-	u, err := url.Parse(s.Base)
-	if err != nil || u.Host == "" {
-		return fmt.Errorf("base %q is not a URL", s.Base)
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("base %q must not carry credentials, a query or a fragment", s.Base)
-	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		// Plain HTTP would send the key in clear; only a loopback test
-		// server may use it.
-		if addr, err := netip.ParseAddr(u.Hostname()); err != nil || !addr.IsLoopback() {
-			return fmt.Errorf("base %q: use https", s.Base)
-		}
-	default:
-		return fmt.Errorf("base %q: use https", s.Base)
+	u, err := upstreamURL("base", s.Base)
+	if err != nil {
+		return err
 	}
 	if s.TLSPinSHA256 != "" {
 		if u.Scheme != "https" {
@@ -460,11 +496,51 @@ func (s *Service) validate() error {
 		if strings.TrimSpace(s.Param) == "" {
 			return errors.New("auth query needs a param name")
 		}
+	case AuthOAuth2:
+		if s.OAuth2 == nil {
+			return errors.New("auth oauth2 needs oauth2 settings (token_url, client_id)")
+		}
+		if _, err := upstreamURL("oauth2 token_url", s.OAuth2.TokenURL); err != nil {
+			return err
+		}
+		if id := s.OAuth2.ClientID; id == "" || len(id) > 512 || strings.IndexFunc(id, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+			return errors.New("oauth2 client_id must be nonempty printable ASCII without spaces, at most 512 bytes")
+		}
+		if secret := s.OAuth2.ClientSecretKey; secret != "" && (!store.ValidName(secret) || secret == s.Key) {
+			return fmt.Errorf("oauth2 client_secret_key %q must be a valid key name other than key", secret)
+		}
 	default:
-		return fmt.Errorf("auth %q: want bearer, header or query", s.Auth)
+		return fmt.Errorf("auth %q: want bearer, header, query or oauth2", s.Auth)
+	}
+	if s.OAuth2 != nil && s.Auth != AuthOAuth2 {
+		return errors.New("oauth2 settings require auth oauth2")
 	}
 	s.base = u
 	return nil
+}
+
+// upstreamURL parses a URL the keyring sends a secret to: https, or plain
+// http to a loopback test server only. field names it in errors.
+func upstreamURL(field, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("%s %q is not a URL", field, raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("%s %q must not carry credentials, a query or a fragment", field, raw)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		// Plain HTTP would send the secret in clear; only a loopback test
+		// server may use it.
+		if addr, err := netip.ParseAddr(u.Hostname()); err != nil || !addr.IsLoopback() {
+			return nil, fmt.Errorf("%s %q: use https", field, raw)
+		}
+	default:
+		return nil, fmt.Errorf("%s %q: use https", field, raw)
+	}
+	return u, nil
 }
 
 func (a Access) validate() error {
