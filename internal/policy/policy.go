@@ -39,6 +39,8 @@ const (
 	// AuthOAuth2 sends Authorization: Bearer <access token>, minted from the
 	// refresh token stored under Key; the refresh token never goes upstream.
 	AuthOAuth2 = "oauth2"
+	// AuthGcloud mints a Google token using a root-configured account.
+	AuthGcloud = "gcloud"
 	// AuthEgressProxy opens TCP tunnels through a person's own proxy; the
 	// proxy credential stored under Key goes only to that proxy.
 	AuthEgressProxy = "egress-proxy"
@@ -67,6 +69,8 @@ type Rules struct {
 	// Consent, when set, lets the owners of keys connect services
 	// themselves through single-use links (see Consent). Off by default.
 	Consent *Consent `json:"consent,omitempty"`
+	// GoogleAccounts is privileged host configuration, never dashboard input.
+	GoogleAccounts map[string]GoogleAccount `json:"google_accounts,omitempty"`
 }
 
 // AdminHTTPS is the dashboard's name behind a local HTTPS proxy. The proxy
@@ -203,11 +207,12 @@ func (c *Config) sourcesFor(field string, list []string) ([]netip.Prefix, error)
 
 type Service struct {
 	// Base is the API origin (and optional base path) requests are sent to.
-	Base   string `json:"base,omitempty"`
-	Key    string `json:"key"`
-	Auth   string `json:"auth"`
-	Header string `json:"header,omitempty"`
-	Param  string `json:"param,omitempty"`
+	Base          string `json:"base,omitempty"`
+	Key           string `json:"key"`
+	Auth          string `json:"auth"`
+	Header        string `json:"header,omitempty"`
+	Param         string `json:"param,omitempty"`
+	GoogleAccount string `json:"google_account,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
 	// key works (the dashboard's Test button). TestPath may carry a query.
 	TestMethod      string           `json:"test_method,omitempty"`
@@ -316,6 +321,9 @@ func printableToken(s string, max int) bool {
 // KeyNames are the store keys the service needs: its key and, for oauth2, the
 // client secret.
 func (s Service) KeyNames() []string {
+	if s.Auth == AuthGcloud {
+		return nil // credentials live in the host's private gcloud directory
+	}
 	if s.OAuth2 != nil && s.OAuth2.ClientSecretKey != "" {
 		return []string{s.Key, s.OAuth2.ClientSecretKey}
 	}
@@ -693,6 +701,9 @@ func (c *Config) Validate() error {
 	if c.Roles == nil {
 		c.Roles = map[string]Role{}
 	}
+	if err := c.validateGoogleAccounts(); err != nil {
+		return err
+	}
 	for name, svc := range c.Services {
 		if !serviceName.MatchString(name) {
 			return fmt.Errorf("service %q: use lowercase letters, digits and -", name)
@@ -705,6 +716,11 @@ func (c *Config) Validate() error {
 		}
 		if err := svc.validate(); err != nil {
 			return fmt.Errorf("service %s: %w", name, err)
+		}
+		if svc.Auth == AuthGcloud {
+			if _, ok := c.GoogleAccounts[svc.GoogleAccount]; !ok {
+				return fmt.Errorf("service %s: unknown google_account", name)
+			}
 		}
 		c.Services[name] = svc
 	}
@@ -834,6 +850,9 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	if s.GoogleAccount != "" && s.Auth != AuthGcloud {
+		return errors.New("google_account requires auth gcloud")
+	}
 	if s.SignOnly() {
 		if !store.ValidName(s.Key) {
 			return errors.New("sign-only service needs a valid key name")
@@ -898,11 +917,18 @@ func (s *Service) validate() error {
 			return fmt.Errorf("test_path %q must start with / and contain no .., %%, ; or \\", s.TestPath)
 		}
 	}
-	if !store.ValidName(s.Key) {
+	if s.Auth != AuthGcloud && !store.ValidName(s.Key) {
 		return fmt.Errorf("key %q is not a valid key name", s.Key)
 	}
 	switch s.Auth {
 	case AuthBearer:
+	case AuthGcloud:
+		if !serviceName.MatchString(s.GoogleAccount) || s.Key != "" || s.Header != "" || s.Param != "" || s.TLSPinSHA256 != "" {
+			return errors.New("auth gcloud needs google_account and no key, header, param or TLS pin")
+		}
+		if u.Scheme != "https" || u.Port() != "" || (u.Host != "www.googleapis.com" && u.Host != "sheets.googleapis.com" && u.Host != "drive.googleapis.com") {
+			return errors.New("auth gcloud requires a supported Google API HTTPS origin")
+		}
 	case AuthHeader:
 		if !headerName.MatchString(s.Header) {
 			return fmt.Errorf("auth header needs a valid header name, got %q", s.Header)
@@ -928,7 +954,7 @@ func (s *Service) validate() error {
 			return err
 		}
 	default:
-		return fmt.Errorf("auth %q: want bearer, header, query or oauth2", s.Auth)
+		return fmt.Errorf("auth %q: want bearer, header, query, oauth2 or gcloud", s.Auth)
 	}
 	if s.OAuth2 != nil && s.Auth != AuthOAuth2 {
 		return errors.New("oauth2 settings require auth oauth2")

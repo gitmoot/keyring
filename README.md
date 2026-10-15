@@ -275,6 +275,104 @@ Google (Gmail, Drive, Sheets, Calendar) and similar APIs give a long-lived refre
 
 To get the refresh token, store it with `keyring set` or the dashboard, or let the account's owner sign in through a consent link (next section).
 
+### Personal and business Google accounts through gcloud (host only)
+
+`auth: "gcloud"` uses the Google CLI's own login and token minting. It needs
+no manually created OAuth app. Keyring never reads gcloud refresh tokens or
+reuses its OAuth client identity. Install gcloud on the **Keyring host**, not
+on an agent using the relay. This mode is unavailable in per-person containers.
+
+Each account has a separate private gcloud directory and an explicit email.
+After the owner approves setup, sign in **as the Keyring service user** with
+the fixed gcloud executable, for each account:
+
+```sh
+CLOUDSDK_CONFIG=/private/keyring/google-personal /absolute/path/to/gcloud \
+  auth login personal@example.com --configuration=default --enable-gdrive-access
+```
+
+The directory must already be private (0700), accessible only to that service
+user and the host administrator. Use another directory for the business
+account. Follow Google's browser login; do not copy credentials from an agent,
+extract refresh tokens, or change existing personal login state. Account access
+to a Shared Drive must be granted separately by its owner.
+
+Add the bindings to **root-owned rules.json**, not access.json:
+
+```json
+"google_accounts": {
+  "personal": {
+    "executable": "/absolute/path/to/gcloud",
+    "config_dir": "/private/keyring/google-personal",
+    "account": "personal@example.com",
+    "quota_project": "owner-approved-quota-project"
+  },
+  "business": {
+    "executable": "/absolute/path/to/gcloud",
+    "config_dir": "/private/keyring/google-business",
+    "account": "business@example.com"
+  }
+}
+```
+
+`quota_project` is optional. When set it overrides `X-Goog-User-Project`;
+otherwise the caller's header is preserved. The selected Google account must
+have permission to use that quota project. Executable and configuration paths
+are privileged host configuration: requests and dashboard forms cannot set them.
+Keyring runs fixed argv, never a request-supplied shell command. Environment
+credential overrides are not inherited. Google validates the returned token's
+email and remaining lifetime before Keyring sends it upstream.
+
+In access.json, configure separate service names and **separate role grants**
+for each account. Example personal services (repeat with `business`):
+
+```json
+"google-personal-drive": {
+  "base": "https://www.googleapis.com/drive/v3",
+  "auth": "gcloud", "google_account": "personal"
+},
+"google-personal-upload": {
+  "base": "https://www.googleapis.com/upload/drive/v3",
+  "auth": "gcloud", "google_account": "personal"
+},
+"google-personal-sheets": {
+  "base": "https://sheets.googleapis.com/v4",
+  "auth": "gcloud", "google_account": "personal"
+}
+```
+
+These services have **no `key` field**. Check the configuration and reload as
+usual. Nothing grants an agent access just because the owner signed in.
+Keep personal and business relay role tokens separate; grant only intended
+service paths and methods. The dashboard shows account bindings, their service
+names and the last credential status without exposing tokens. It is an
+administrator dashboard, not a shared Google-data browser.
+
+Relay requests use `/<role>/<service>/<path>`: Drive listing/downloads go to
+the drive service (`/files`, `/files/ID?alt=media`), uploads to the upload service
+(`/files?uploadType=...`), and Sheets to the sheets service (`/spreadsheets/...`).
+Clients must validate and translate upload session URLs/redirects back through
+the same account's relay services; never bypass the relay or fall back to a
+local Google login. Shared Drive operations also require the relevant Google
+API flags (`supportsAllDrives`, `includeItemsFromAllDrives`, `driveId`, `corpora`).
+
+Renewal is single-flight per complete account binding, with a 30-second deadline
+including command descendants, bounded output, and redacted failures. Tokens
+are cached only until their verified expiry, with early renewal. A failed
+renewal fails closed (502), with a 10-second retry delay; it never uses another
+account or a stale token. An upstream 401 invalidates only the token used and
+is returned **without replay**, including POST/PATCH writes. An unavailable
+login must be repaired by signing in again on the host. Host logout alone
+does not erase an already minted in-memory access token: revoke the role first
+to stop new proxy calls immediately, then perform owner-approved logout and
+remove/reload the host binding. Historical audit records remain.
+
+Drivekey's explicit relay-profile support is tracked in
+[drivekey#14](https://github.com/jerryfane/drivekey/issues/14).
+Provider support alone is not proof of live two-account or Shared Drive access;
+complete that acceptance with owner-authorized fixtures and readback.
+
+
 ### Consent links (off by default)
 
 A consent link lets the owner of an account connect it themselves: "tap here to connect Gmail", or paste a proxy or API key into a one-time page instead of a chat. Nothing changes unless `rules.json` has a `consent` block:
