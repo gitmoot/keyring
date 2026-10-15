@@ -355,6 +355,15 @@ Clients must validate and translate upload session URLs/redirects back through
 the same account's relay services; never bypass the relay or fall back to a
 local Google login. Shared Drive operations also require the relevant Google
 API flags (`supportsAllDrives`, `includeItemsFromAllDrives`, `driveId`, `corpora`).
+Google-account paths accept encoded spaces for Sheets A1 names such as
+`'My Tab'!A1:append`; control characters, encoded separators, double encoding
+and traversal remain rejected. Other authentication modes retain their existing
+no-whitespace path rule.
+
+For Drivekey's full operations, the approved grants need Drive paths `/about`,
+`/files`, `/changes`, `/drives` with GET/POST/PATCH; upload `/files` with POST/PUT
+(resumable chunks use PUT); and Sheets `/spreadsheets` with GET/POST when using
+batch reads/writes and append. Narrow these to the operations the role needs.
 
 Renewal is single-flight per complete account binding, with a 30-second deadline
 including command descendants, bounded output, and redacted failures. Tokens

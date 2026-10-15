@@ -100,7 +100,7 @@ type googleTestTransport struct {
 }
 
 func (t googleTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.Host != "oauth2.googleapis.com" && r.URL.Host != "www.googleapis.com" {
+	if r.URL.Host != "oauth2.googleapis.com" && r.URL.Host != "www.googleapis.com" && r.URL.Host != "sheets.googleapis.com" {
 		return nil, fmt.Errorf("unexpected upstream")
 	}
 	copy := r.Clone(r.Context())
@@ -224,5 +224,55 @@ func TestGoogleCommandOutputAndTimeout(t *testing.T) {
 	}
 	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || !strings.Contains(w.Body.String(), "private configuration") {
 		t.Fatal("public gcloud directory was accepted")
+	}
+}
+
+func TestGoogleSheetAppendSpacedRange(t *testing.T) {
+	h, _, _, _, _ := googleFixture(t)
+	cfg := h.Config()
+	svc := cfg.Services["personal"]
+	svc.Base = "https://sheets.googleapis.com/v4"
+	cfg.Services["personal"] = svc
+	role := cfg.Roles["personal"]
+	role.Access["personal"] = policy.Access{Paths: []string{"/spreadsheets"}, Methods: []string{"POST"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(cfg, nil)
+	var appends atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tokeninfo" {
+			fmt.Fprint(w, `{"email":"personal@example.com","expires_in":120}`)
+			return
+		}
+		if r.URL.Path != "/v4/spreadsheets/sheet/values/'My Tab'!A1:append" ||
+			!strings.Contains(r.URL.EscapedPath(), "My%20Tab") ||
+			r.URL.Query().Get("valueInputOption") != "RAW" ||
+			r.Method != "POST" || r.Header.Get("Authorization") != "Bearer synthetic-personal" {
+			t.Errorf("incorrect append path/method/credential")
+			http.Error(w, "bad append", 400)
+			return
+		}
+		appends.Add(1)
+		fmt.Fprint(w, `{"updates":{"updatedRows":1}}`)
+	}))
+	defer up.Close()
+	target, _ := url.Parse(up.URL)
+	h.client.Transport = googleTestTransport{target: target, transport: http.DefaultTransport}
+	path := "/personal/spreadsheets/sheet/values/%27My%20Tab%27%21A1:append?valueInputOption=RAW"
+	if w := call(h, "POST", path, "role-personal", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"updatedRows":1`) {
+		t.Fatalf("append to tab with space: %d %s", w.Code, w.Body)
+	}
+	for _, escaped := range []string{"My%09Tab", "My%0aTab", "My%2520Tab", "My%2fTab", "%2e%2e", "My;Tab"} {
+		if w := call(h, "POST", "/personal/spreadsheets/sheet/values/"+escaped+":append", "role-personal", nil); w.Code != 400 {
+			t.Fatalf("ambiguous path %s: %d", escaped, w.Code)
+		}
+	}
+	if appends.Load() != 1 {
+		t.Fatalf("append effects=%d; rejected paths must not reach upstream", appends.Load())
+	}
+	legacy, _ := newHandler(t, up.URL, bearer, allowAll)
+	if w := call(legacy, "GET", "/api/My%20Tab", testToken, nil); w.Code != 400 {
+		t.Fatalf("non-Google path policy changed: %d", w.Code)
 	}
 }
