@@ -275,6 +275,14 @@ try {
 		await env.KEYRING.get(kf).alarm();
 		await Bun.sleep(200); // a signalled process takes a moment to exit
 		expect("first alarm of a fresh object keeps a running container", containers.get(kf)!.running, true);
+		// Evicted again, its last call 11 minutes ago (kept in storage): the
+		// alarm of the new object stops the idle container.
+		objects.delete(kf);
+		storages.get(kf)!.m.set("lastUsed", Date.now() - 11 * 60 * 1000);
+		await env.KEYRING.get(kf).alarm();
+		await Bun.sleep(200);
+		expect("an evicted object still stops an idle container", containers.get(kf)!.running, false);
+		objects.delete(kf);
 
 		await containers.get(kf)!.destroy();
 		objects.delete(kf);
