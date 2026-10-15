@@ -535,33 +535,40 @@ func TestDefaultPortInPublicURL(t *testing.T) {
 func TestProxyLinkStoresAddressAndCredentialTogether(t *testing.T) {
 	e := newEnv(t)
 	path := e.link("myproxy")
-	page := e.page("GET", path, nil, nil).Body.String()
-	for _, field := range []string{`name="type"`, `name="address"`, `name="username"`, `name="password"`} {
-		if !strings.Contains(page, field) {
-			t.Fatalf("form lacks %s:\n%s", field, page)
-		}
-	}
-	// Bad input is refused and the link stays usable.
-	for _, bad := range []url.Values{
-		{"type": {"socks5"}, "address": {"10.0.0.1:1080"}, "username": {"u"}, "password": {"p"}},
-		{"type": {"socks5"}, "address": {"gate.example.com"}, "username": {"u"}, "password": {"p"}},
-		{"type": {"ftp"}, "address": {"gate.example.com:21"}, "username": {"u"}, "password": {"p"}},
-		{"type": {"socks5"}, "address": {"gate.example.com:1080"}, "username": {""}, "password": {"p"}},
+	// Invalid pastes leave the link usable and never echo any input, even
+	// when a malformed paste puts credential-looking text in the address.
+	for _, bad := range []struct {
+		value, part string
+	}{
+		{"alice:s3cret@10.0.0.1:1080", "address"},
+		{"alice:s3cret@gate.example.com", "port"},
+		{"alice:s3cret@gate.example.com:", "port"},
+		{"alice:s3cret@gate.example.com:65536", "port"},
+		{"alice:s3cret@gate.example.com:s3cret", "port"},
+		{"ftp://alice:s3cret@gate.example.com:21", "scheme"},
+		{":s3cret@gate.example.com:1080", "username"},
+		{"alice:s3cret@bad/s3cret:1080", "address"},
+		{"gate.example.com:1080", "credentials"},
+		{"alice:s3cret\npw@gate.example.com:1080", "password"},
 	} {
-		if w := e.page("POST", path, bad, fromPage); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `name="address"`) {
-			t.Fatalf("bad %v: %d", bad, w.Code)
+		w := e.page("POST", path, url.Values{"type": {"socks5"}, "proxy": {bad.value}}, fromPage)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), bad.part) {
+			t.Fatalf("invalid %s: status=%d body=%s", bad.part, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), "s3cret") || strings.Contains(w.Body.String(), "gate.example.com") {
+			t.Fatal("invalid proxy input echoed in response")
 		}
 	}
 	if e.keys.get("MY_PROXY") != "" {
 		t.Fatal("stored bad input")
 	}
-	ok := url.Values{"type": {"socks5"}, "address": {" gate.person.example:5959 "}, "username": {"alice"}, "password": {"s3cret:pw"}}
+	ok := url.Values{"type": {"socks5"}, "proxy": {" alice:s3cret:p@w@gate.person.example:5959 "}}
 	if w := e.page("POST", path, ok, fromPage); w.Code != http.StatusOK {
 		t.Fatalf("good input: %d %s", w.Code, w.Body)
 	}
 	stored := e.keys.get("MY_PROXY")
 	got, cred, err := (&policy.EgressProxy{}).Resolve(stored)
-	if err != nil || got.Type != policy.ProxySOCKS5 || got.Address != "gate.person.example:5959" || cred != "alice:s3cret:pw" {
+	if err != nil || got.Type != policy.ProxySOCKS5 || got.Address != "gate.person.example:5959" || cred != "alice:s3cret:p@w" {
 		t.Fatalf("stored %q -> %+v %q %v", stored, got, cred, err)
 	}
 	if w := e.page("POST", path, ok, fromPage); w.Code != http.StatusGone {
@@ -573,14 +580,62 @@ func TestProxyLinkStoresAddressAndCredentialTogether(t *testing.T) {
 
 	// With the address in config, the form asks only for the credential.
 	path = e.link("fixedproxy")
-	page = e.page("GET", path, nil, nil).Body.String()
-	if strings.Contains(page, `name="address"`) || !strings.Contains(page, `name="username"`) {
-		t.Fatalf("fixed-address form:\n%s", page)
-	}
-	if w := e.page("POST", path, url.Values{"username": {"bob"}, "password": {"pw"}, "address": {"evil.example:1"}}, fromPage); w.Code != http.StatusOK {
+	if w := e.page("POST", path, url.Values{"username": {"bob"}, "password": {"pw"}, "proxy": {"eve:s3cret@evil.example:1"}}, fromPage); w.Code != http.StatusOK {
 		t.Fatalf("fixed-address save: %d", w.Code)
 	}
 	if got := e.keys.get("FIXED_PROXY"); got != "bob:pw" {
 		t.Fatalf("FIXED_PROXY = %q", got)
+	}
+}
+
+func TestProxyPasteSchemesAndCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name, paste, selected, wantType, wantAddress, wantCredential string
+		tls                                                          bool
+	}{
+		{"default", "alice:pw@8.8.8.8:8080", "", policy.ProxyHTTPConnect, "8.8.8.8:8080", "alice:pw", false},
+		{"http overrides dropdown", "http://alice:pw@gate.example:8080", policy.ProxySOCKS5, policy.ProxyHTTPConnect, "gate.example:8080", "alice:pw", false},
+		{"https", "https://alice:p@ss:word@gate.example:443", policy.ProxySOCKS5, policy.ProxyHTTPConnect, "gate.example:443", "alice:p@ss:word", true},
+		{"socks5", "socks5://alice:pw@gate.example:1080", policy.ProxyHTTPConnect, policy.ProxySOCKS5, "gate.example:1080", "alice:pw", false},
+		{"literal password", "alice:p%40+raw://pw@gate.example:8080", policy.ProxyHTTPConnect, policy.ProxyHTTPConnect, "gate.example:8080", "alice:p%40+raw://pw", false},
+		{"empty password", "alice:@gate.example:8080", policy.ProxyHTTPConnect, policy.ProxyHTTPConnect, "gate.example:8080", "alice:", false},
+		{"public IPv6", "alice:pw@[2001:4860:4860::8888]:8080", policy.ProxyHTTPConnect, policy.ProxyHTTPConnect, "[2001:4860:4860::8888]:8080", "alice:pw", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			w := e.page("POST", e.link("myproxy"), url.Values{"proxy": {tc.paste}, "type": {tc.selected}}, fromPage)
+			if w.Code != http.StatusOK {
+				t.Fatalf("save failed: %d %s", w.Code, w.Body)
+			}
+			got, credential, err := e.cfg.Services["myproxy"].EgressProxy.Resolve(e.keys.get("MY_PROXY"))
+			if err != nil || got.Type != tc.wantType || got.TLS != tc.tls || got.Address != tc.wantAddress || credential != tc.wantCredential {
+				t.Fatalf("stored proxy does not resolve to intended endpoint/credential: %+v %q %v", got, credential, err)
+			}
+			if strings.Contains(w.Body.String(), tc.paste) || strings.Contains(e.audit.String(), tc.wantAddress) || strings.Contains(e.audit.String(), tc.wantCredential) {
+				t.Fatal("proxy details leaked through response or audit")
+			}
+		})
+	}
+}
+
+func TestProxyPasteCannotOverrideConfiguredTypeOrTLS(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Services["myproxy"].EgressProxy.Type = policy.ProxyHTTPConnect
+	e.cfg.Services["myproxy"].EgressProxy.TLS = true
+	path := e.link("myproxy")
+	for _, paste := range []string{"socks5://alice:pw@gate.example:1080", "http://alice:pw@gate.example:8080"} {
+		if w := e.page("POST", path, url.Values{"proxy": {paste}}, fromPage); w.Code != http.StatusBadRequest {
+			t.Fatalf("service constraint bypass: %d", w.Code)
+		}
+	}
+	if e.keys.get("MY_PROXY") != "" {
+		t.Fatal("saved proxy violating service constraint")
+	}
+	if w := e.page("POST", path, url.Values{"proxy": {"alice:pw@gate.example:443"}}, fromPage); w.Code != http.StatusOK {
+		t.Fatalf("configured TLS proxy rejected: %d %s", w.Code, w.Body)
+	}
+	got, _, err := e.cfg.Services["myproxy"].EgressProxy.Resolve(e.keys.get("MY_PROXY"))
+	if err != nil || got.Type != policy.ProxyHTTPConnect || !got.TLS {
+		t.Fatalf("configured TLS lost: %+v %v", got, err)
 	}
 }
