@@ -49,6 +49,24 @@ const api = serve({
 });
 
 let nextPort = 19100 + Math.floor(Math.random() * 500) * 20;
+/** A base whose four container ports (8080-8082, 8090 mapped) are free now. */
+function freeBase(): number {
+	for (;;) {
+		const base = nextPort;
+		nextPort += 20;
+		if (nextPort > 60000) nextPort = 19100;
+		const free = [0, 1, 2, 10].every((d) => {
+			try {
+				const l = Bun.listen({ hostname: "127.0.0.1", port: base + d, socket: { data() {} } });
+				l.stop(true);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+		if (free) return base;
+	}
+}
 let starts = 0;
 /** A container whose ports P map to host ports base+P-8080, kept across restarts. */
 class FakeContainer {
@@ -62,10 +80,7 @@ class FakeContainer {
 		return s.replace(/0\.0\.0\.0:(\d+)/g, (_, p: string) => `127.0.0.1:${this.base + Number(p) - 8080}`);
 	}
 	start(opts: { entrypoint: string[] }) {
-		if (!this.base) {
-			this.base = nextPort;
-			nextPort += 20;
-		}
+		if (!this.base) this.base = freeBase();
 		starts++;
 		// `running` turning true right away is not documented, so here it
 		// turns true a little later.
@@ -244,6 +259,7 @@ try {
 	for (const racer of ["proxy", "page", "admin"]) {
 		for (const deleteFirst of [true, false]) {
 			r = await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "race" }));
+			if (r.status !== 201) throw new Error(`race setup: create ${r.status} ${await r.text()}`);
 			const k = (await r.json()) as { keyring_id: string; role_token: string };
 			const RP = { "x-keyring-caller": "caller-secret", "x-keyring-token": k.role_token };
 			r = await call("POST", `/admin/instances/${k.keyring_id}/links`, ADMIN, JSON.stringify({ service: "echo" }));

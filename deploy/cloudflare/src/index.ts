@@ -295,6 +295,7 @@ export class KeyringInstance extends DurableObject<Env> {
 		const adminHash = await sha256Hex(m.adminToken);
 		if (this.deleted) throw new Deleted();
 		if (!c.running) {
+			console.log(`keyring container starting (${m.id})`);
 			c.start({
 				enableInternet: true,
 				entrypoint: [
@@ -322,6 +323,7 @@ export class KeyringInstance extends DurableObject<Env> {
 					if (!s.unlocked && sealed) {
 						const usage = await this.ctx.storage.get(K_USAGE);
 						await this.adminJSON(m, "POST", "/unlock", { data_key: await this.dataKey(m), state: sealed.state, usage });
+						console.log(`keyring unlocked from sealed state v${sealed.version} (${m.id})`);
 					}
 					break;
 				}
@@ -591,6 +593,7 @@ export class KeyringInstance extends DurableObject<Env> {
 		const idle = this.inFlight === 0 && Date.now() - this.lastUsed > IDLE_MS && openUntil < Date.now();
 		if (idle) {
 			await this.sync(m).catch(() => {});
+			console.log(`keyring container stopped (idle) (${m.id})`);
 			c.signal(15);
 			this.ready = null;
 			return;
