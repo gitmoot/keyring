@@ -268,11 +268,75 @@ func TestGoogleSheetAppendSpacedRange(t *testing.T) {
 			t.Fatalf("ambiguous path %s: %d", escaped, w.Code)
 		}
 	}
+	knownDenied := call(h, "POST", path, "role-business", nil)
+	unknownDenied := call(h, "POST", strings.Replace(path, "/personal/", "/unknown/", 1), "role-business", nil)
+	if knownDenied.Code < 400 || knownDenied.Code != unknownDenied.Code || knownDenied.Body.String() != unknownDenied.Body.String() {
+		t.Fatal("a space probe reveals an ungranted Google service")
+	}
 	if appends.Load() != 1 {
 		t.Fatalf("append effects=%d; rejected paths must not reach upstream", appends.Load())
 	}
 	legacy, _ := newHandler(t, up.URL, bearer, allowAll)
 	if w := call(legacy, "GET", "/api/My%20Tab", testToken, nil); w.Code != 400 {
 		t.Fatalf("non-Google path policy changed: %d", w.Code)
+	}
+}
+
+type googleRenewalGate struct {
+	base    http.RoundTripper
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g googleRenewalGate) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host == "oauth2.googleapis.com" {
+		select {
+		case g.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-g.release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	}
+	return g.base.RoundTrip(r)
+}
+
+func TestGoogleRenewalSurvivesConfigTransition(t *testing.T) {
+	h, _, _, checks, _ := googleFixture(t)
+	gate := googleRenewalGate{base: h.client.Transport, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.client.Transport = gate
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	t.Cleanup(release)
+	results := make(chan int, 2)
+	request := func() {
+		results <- call(h, "GET", "/personal/files", "role-personal", nil).Code
+	}
+	go request()
+	select {
+	case <-gate.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first renewal did not reach token validation")
+	}
+	cfg := h.Config()
+	removed := *cfg
+	removed.Services = map[string]policy.Service{}
+	removed.Roles = map[string]policy.Role{}
+	if err := removed.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&removed, nil)
+	h.Swap(cfg, nil)
+	go request()
+	release()
+	for range 2 {
+		if status := <-results; status != 200 {
+			t.Fatalf("request across reload: %d", status)
+		}
+	}
+	if checks.Load() != 1 {
+		t.Fatalf("same binding renewed %d times across config transition; want one flight", checks.Load())
 	}
 }

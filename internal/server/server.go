@@ -257,7 +257,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnauthorized, "role expired")
 		return
 	}
-	service, rest, ok := splitPath(r.URL, snap.config.Services)
+	service, rest, ok := splitPath(r.URL, snap.config.Services, role.Access)
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
 	var signingAuth string
@@ -619,7 +619,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 // Google account services also accept spaces (Sheets A1 tab names); other
 // services retain their existing no-whitespace rule. buildOutbound re-escapes
 // the decoded path before sending it upstream.
-func splitPath(u *url.URL, services map[string]policy.Service) (service, rest string, ok bool) {
+func splitPath(u *url.URL, services map[string]policy.Service, grants map[string]policy.Access) (service, rest string, ok bool) {
 	escaped := u.EscapedPath()
 	lower := strings.ToLower(escaped)
 	if !strings.HasPrefix(escaped, "/") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
@@ -633,7 +633,9 @@ func splitPath(u *url.URL, services map[string]policy.Service) (service, rest st
 	if err != nil {
 		return service, "", false
 	}
-	allowSpace := services[service].Auth == policy.AuthGcloud
+	// Ungranted names must not reveal their auth kind through a space probe.
+	_, granted := grants[service]
+	allowSpace := granted && services[service].Auth == policy.AuthGcloud
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
 		if c < 0x20 || (c == 0x20 && !allowSpace) || c > 0x7e || c == '%' || c == ';' || c == '\\' {

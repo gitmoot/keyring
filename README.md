@@ -361,13 +361,17 @@ and traversal remain rejected. Other authentication modes retain their existing
 no-whitespace path rule.
 
 For Drivekey's full operations, the approved grants need Drive paths `/about`,
-`/files`, `/changes`, `/drives` with GET/POST/PATCH; upload `/files` with POST/PUT
-(resumable chunks use PUT); and Sheets `/spreadsheets` with GET/POST when using
+`/files`, `/changes`, `/drives` with GET/POST; upload `/files` with POST/PATCH
+(this client's resumable chunks use POST, replacement uses PATCH); and Sheets
+`/spreadsheets` with GET/POST when using
 batch reads/writes and append. Narrow these to the operations the role needs.
 
 Renewal is single-flight per complete account binding, with a 30-second deadline
 including command descendants, bounded output, and redacted failures. Tokens
-are cached only until their verified expiry, with early renewal. A failed
+are cached only until their verified expiry, with early renewal. Callers wait for
+that renewal rather than continuing with the old token; this matches OAuth mode.
+An in-flight renewal remains single-flight across configuration reloads, including
+removing and re-adding the same binding. A failed
 renewal fails closed (502), with a 10-second retry delay; it never uses another
 account or a stale token. An upstream 401 invalidates only the token used and
 is returned **without replay**, including POST/PATCH writes. An unavailable

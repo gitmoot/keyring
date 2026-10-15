@@ -131,8 +131,10 @@ func (h *Handler) retainGoogle(config *policy.Config) {
 	}
 	h.google.mu.Lock()
 	defer h.google.mu.Unlock()
-	for a := range h.google.entries {
-		if !keep[a] {
+	for a, e := range h.google.entries {
+		// As with OAuth refreshes, in-flight callers still own this entry.
+		// Keep their single flight across a remove/re-add during renewal.
+		if !keep[a] && e.refreshing == nil {
 			delete(h.google.entries, a)
 		}
 	}
