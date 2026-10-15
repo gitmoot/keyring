@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -167,9 +168,60 @@ func proxyValue(r *http.Request, svc policy.Service) (string, error) {
 	if proxyType == "" {
 		proxyType = r.PostFormValue("type")
 	}
-	address := strings.TrimSpace(r.PostFormValue("address"))
-	v, err := policy.ProxyURL(proxyType, e.TLS, address, user, pass)
+	value := strings.TrimSpace(r.PostFormValue("proxy"))
+	tls := e.TLS
+	// Credentials are literal, not URL-encoded. A password may contain both
+	// @ and :, so split at the last @ and then the first credential colon.
+	if scheme, rest, ok := strings.Cut(value, "://"); ok && !strings.ContainsAny(scheme, ":@") {
+		switch strings.ToLower(scheme) {
+		case "http":
+			proxyType, tls = policy.ProxyHTTPConnect, false
+		case "https":
+			proxyType, tls = policy.ProxyHTTPConnect, true
+		case "socks5":
+			proxyType, tls = policy.ProxySOCKS5, false
+		default:
+			return "", errors.New("proxy scheme: use http://, https:// or socks5://")
+		}
+		value = rest
+	}
+	if proxyType == "" {
+		proxyType = policy.ProxyHTTPConnect
+	}
+	if e.TLS && !tls {
+		return "", errors.New("proxy scheme: this service requires HTTPS")
+	}
+	at := strings.LastIndexByte(value, '@')
+	if at < 0 {
+		return "", errors.New("proxy credentials missing: use username:password@host:port")
+	}
+	var hasPassword bool
+	user, pass, hasPassword = strings.Cut(value[:at], ":")
+	if !hasPassword {
+		return "", errors.New("proxy credentials: separate username and password with a colon")
+	}
+	address := value[at+1:]
+	v, err := policy.ProxyURL(proxyType, tls, address, user, pass)
 	if err != nil {
+		// Policy address errors include the input. Classify failures without
+		// echoing it: a malformed paste can leave a password in the address.
+		_, port, splitErr := net.SplitHostPort(address)
+		if splitErr != nil {
+			if !strings.Contains(address, ":") || strings.HasSuffix(address, "]") {
+				return "", errors.New("proxy port missing: use host:port")
+			}
+			return "", errors.New("proxy address: use host:port and bracket IPv6 addresses")
+		}
+		if port == "" {
+			return "", errors.New("proxy port missing: use host:port")
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return "", errors.New("proxy port: use a number from 1 to 65535")
+		}
+		if err := policy.CheckProxyAddress(address); err != nil {
+			return "", errors.New("proxy address: use a public IP or valid DNS name")
+		}
+		// With a valid address, ProxyURL returns only static type/credential errors.
 		return "", err
 	}
 	// The same checks the tunnel makes before every use.
@@ -376,7 +428,9 @@ func (s *Server) PagesHandler() http.Handler {
 		}
 		h := w.Header()
 		h.Set("Cache-Control", "no-store")
-		h.Set("Referrer-Policy", "no-referrer")
+		// no-referrer makes browser form POSTs send Origin: null. Keep the
+		// origin check usable without sending the capability path as Referer.
+		h.Set("Referrer-Policy", "strict-origin")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
@@ -744,9 +798,10 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 <button type="submit">Sign in and connect</button>
 {{else if .Proxy}}<p>Your proxy's details. They are stored on the keyring and never shown again; the password is only ever sent to the proxy address saved with it.</p>
 {{if .ProxyAsksType}}<label>Type <select name="type"><option value="http-connect">HTTP</option><option value="socks5">SOCKS5</option></select></label>{{end}}
-{{if .ProxyAsksAddress}}<input name="address" required autocomplete="off" spellcheck="false" placeholder="host:port" aria-label="Proxy host:port">{{end}}
-<input name="username" required autocomplete="off" spellcheck="false" placeholder="username" aria-label="Proxy username">
-<input type="password" name="password" autocomplete="off" spellcheck="false" placeholder="password" aria-label="Proxy password">
+{{if .ProxyAsksAddress}}<input type="password" name="proxy" required autocomplete="off" spellcheck="false" placeholder="username:password@host:port" aria-label="Proxy URL or username:password@host:port">
+<p><small>Paste the whole proxy. An optional http://, https:// or socks5:// prefix selects its type. Credentials are required. Passwords may contain @ and :; paste them literally, not URL-encoded.</small></p>
+{{else}}<input name="username" required autocomplete="off" spellcheck="false" placeholder="username" aria-label="Proxy username">
+<input type="password" name="password" autocomplete="off" spellcheck="false" placeholder="password" aria-label="Proxy password">{{end}}
 <button type="submit">Save</button>
 {{else}}<p>Paste the key. It is stored on the keyring and never shown again.</p>
 <input type="password" name="value" required autocomplete="off" spellcheck="false" aria-label="Key">
