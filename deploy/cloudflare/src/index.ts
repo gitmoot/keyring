@@ -44,6 +44,14 @@ const PORT_CONSENT_API = 8082;
 const PORT_ADMIN = 8090;
 /** Stop a container after this long without a call (and no open link). */
 const IDLE_MS = 10 * 60 * 1000;
+/**
+ * How long Cloudflare keeps the container after the Durable Object goes
+ * inactive. Without it the platform stops the container soon after the last
+ * request, before the keyring's own idle stop and while links may be open
+ * (seen live: stopped about 6 minutes after the last call). The alarm, every
+ * minute, keeps the object active; the keyring decides when to stop.
+ */
+const INACTIVITY_MS = 15 * 60 * 1000;
 /** How often a running container's daily counts are saved. */
 const TICK_MS = 60 * 1000;
 /** A sign-in may finish this long after its link expires (keyring signInTTL). */
@@ -238,6 +246,13 @@ const K_SECRETS = "clientSecretsHash";
 class Deleted extends Error {}
 
 export class KeyringInstance extends DurableObject<Env> {
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		// A restarted object starts without a timeout (Cloudflare docs).
+		const c = ctx.container;
+		if (c?.running) void ctx.blockConcurrencyWhile(() => c.setInactivityTimeout(INACTIVITY_MS));
+	}
+
 	/** The one start in progress or done; null when the container is stopped. */
 	private ready: Promise<void> | null = null;
 	/** Set synchronously when a delete begins; nothing restarts or writes after it. */
@@ -304,6 +319,7 @@ export class KeyringInstance extends DurableObject<Env> {
 					"--admin-token-sha256", adminHash,
 				],
 			});
+			await c.setInactivityTimeout(INACTIVITY_MS);
 			const mine = this.ready;
 			c.monitor()
 				.catch((e) => console.error("keyring container stopped:", String(e)))
@@ -582,7 +598,12 @@ export class KeyringInstance extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		const m = await this.identity();
 		const c = this.ctx.container;
-		if (!m || !c?.running) return;
+		if (!m || !c?.running) {
+			// Stopped by the platform, not by the idle check below.
+			if (m && this.ready) console.log(`keyring container found stopped (${m.id})`);
+			this.ready = null;
+			return;
+		}
 		try {
 			await this.put(K_USAGE, await this.adminJSON(m, "GET", "/usage"));
 		} catch (e) {

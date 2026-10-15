@@ -100,6 +100,10 @@ class FakeContainer {
 		await this.proc?.exited;
 		this.proc = null;
 	}
+	inactivityMs = 0;
+	async setInactivityTimeout(ms: number) {
+		this.inactivityMs = ms;
+	}
 	signal(n: number) {
 		this.proc?.kill(n);
 	}
@@ -159,7 +163,10 @@ const env = {
 			if (!o) {
 				if (!storages.has(name)) storages.set(name, new Storage());
 				if (!containers.has(name)) containers.set(name, new FakeContainer());
-				o = new mod.KeyringInstance({ storage: storages.get(name), container: containers.get(name) } as never, env as never);
+				o = new mod.KeyringInstance(
+					{ storage: storages.get(name), container: containers.get(name), blockConcurrencyWhile: (f: () => Promise<unknown>) => f() } as never,
+					env as never,
+				);
 				objects.set(name, o);
 			}
 			return o;
@@ -202,6 +209,7 @@ try {
 	const codes = [];
 	for (let i = 1; i <= 4; i++) codes.push((await call("GET", `/p/${id}/echo/x${i}`, P)).status);
 	expect("calls with daily limit 3", codes, [200, 200, 200, 429]);
+	expect("container keeps running between alarms (inactivity timeout set)", containers.get(id)!.inactivityMs, 15 * 60 * 1000);
 	expect("upstream got the key, never the caller proof", seen.map((s) => [s.auth, s.caller]), [
 		["Bearer echo-secret-123", ""], ["Bearer echo-secret-123", ""], ["Bearer echo-secret-123", ""],
 	]);
