@@ -89,7 +89,10 @@ class FakeContainer {
 			this.proc = spawn([BIN!, ...opts.entrypoint.slice(1).map((a) => this.map(a))], { stdout: "ignore", stderr: "ignore" });
 		}, 20);
 	}
+	// Like the runtime's monitor(): resolves when the container started by
+	// the last start() has exited, including one still starting.
 	async monitor() {
+		while (this.pending) await Bun.sleep(5);
 		await this.proc?.exited;
 	}
 	async destroy() {
@@ -261,6 +264,30 @@ try {
 	expect("storage and container after delete", [storages.get(id)!.m.size, containers.get(id)!.running], [0, false]);
 	expect("delete again", (await call("DELETE", `/admin/instances/${id}`, ADMIN)).status, 200);
 	expect("call after delete", (await call("GET", `/p/${id}/echo/x`, { ...P, "x-keyring-token": token2 })).status, 404);
+
+	// Review of e61b020: a fresh object (evicted, redeployed) must not stop a
+	// running container on its first alarm, and an alarm during a start must
+	// not drop that start.
+	{
+		r = await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "fresh" }));
+		const kf = ((await r.json()) as { keyring_id: string }).keyring_id;
+		objects.delete(kf); // a new object instance, same storage and running container
+		await env.KEYRING.get(kf).alarm();
+		await Bun.sleep(200); // a signalled process takes a moment to exit
+		expect("first alarm of a fresh object keeps a running container", containers.get(kf)!.running, true);
+
+		await containers.get(kf)!.destroy();
+		objects.delete(kf);
+		const o = env.KEYRING.get(kf);
+		const startsAt = starts;
+		const wake = call("GET", `/admin/instances/${kf}/services`, ADMIN);
+		await Bun.sleep(5); // start() issued; the fake turns running after 20 ms
+		await o.alarm();
+		// A call arriving after that alarm must join the start in progress.
+		const [w, w2] = await Promise.all([wake, call("GET", `/admin/instances/${kf}/services`, ADMIN)]);
+		expect("alarm during a start", [w.status, w2.status, starts - startsAt, containers.get(kf)!.running], [200, 200, 1, true]);
+		await call("DELETE", `/admin/instances/${kf}`, ADMIN);
+	}
 
 	// A delete racing calls that already started (review of b6a41be, P1):
 	// the container must not come back and storage must stay empty.

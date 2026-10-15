@@ -258,7 +258,11 @@ export class KeyringInstance extends DurableObject<Env> {
 	/** Set synchronously when a delete begins; nothing restarts or writes after it. */
 	private deleted = false;
 	private inFlight = 0;
-	private lastUsed = 0;
+	// A fresh object (after an eviction or deploy) counts from now, so its
+	// first alarm does not stop a container that was just in use.
+	private lastUsed = Date.now();
+	/** A start() is between c.start() and the end of its wait. */
+	private starting = false;
 
 	private async identity(): Promise<Identity | undefined> {
 		if (this.deleted) return undefined;
@@ -307,6 +311,18 @@ export class KeyringInstance extends DurableObject<Env> {
 	/** Starts the container if needed and waits until it holds this keyring's state. */
 	private async start(m: Identity): Promise<void> {
 		const c = this.ctx.container!;
+		this.starting = true;
+		try {
+			await this.startAndUnlock(m, c);
+		} finally {
+			this.starting = false;
+		}
+		// A new keyring gets them from create(), once it exists.
+		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
+		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+	}
+
+	private async startAndUnlock(m: Identity, c: Container): Promise<void> {
 		const adminHash = await sha256Hex(m.adminToken);
 		if (this.deleted) throw new Deleted();
 		if (!c.running) {
@@ -350,9 +366,6 @@ export class KeyringInstance extends DurableObject<Env> {
 			if (i >= 60) throw new KeyringError(503, "the keyring container did not start");
 			await scheduler.wait(250);
 		}
-		// A new keyring gets them from create(), once it exists.
-		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
-		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
 	}
 
 	/** Makes sure the container runs and holds this keyring's state. One start at a time. */
@@ -598,9 +611,16 @@ export class KeyringInstance extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		const m = await this.identity();
 		const c = this.ctx.container;
-		if (!m || !c?.running) {
-			// Stopped by the platform, not by the idle check below.
-			if (m && this.ready) console.log(`keyring container found stopped (${m.id})`);
+		if (!m || !c) return;
+		if (!c.running) {
+			if (this.starting) {
+				// Not up yet; look again next tick.
+				if (!this.deleted) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+				return;
+			}
+			// Alarms run only while a container is up: this one was stopped
+			// by the platform, not by the idle check below.
+			console.log(`keyring container found stopped (${m.id})`);
 			this.ready = null;
 			return;
 		}
