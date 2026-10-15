@@ -44,6 +44,14 @@ const PORT_CONSENT_API = 8082;
 const PORT_ADMIN = 8090;
 /** Stop a container after this long without a call (and no open link). */
 const IDLE_MS = 10 * 60 * 1000;
+/**
+ * How long Cloudflare keeps the container after the Durable Object goes
+ * inactive. Without it the platform stops the container soon after the last
+ * request, before the keyring's own idle stop and while links may be open
+ * (seen live: stopped about 6 minutes after the last call). The alarm, every
+ * minute, keeps the object active; the keyring decides when to stop.
+ */
+const INACTIVITY_MS = 15 * 60 * 1000;
 /** How often a running container's daily counts are saved. */
 const TICK_MS = 60 * 1000;
 /** A sign-in may finish this long after its link expires (keyring signInTTL). */
@@ -234,16 +242,34 @@ const K_SEALED = "sealed";
 const K_USAGE = "usage";
 const K_OPEN_UNTIL = "openUntil";
 const K_SECRETS = "clientSecretsHash";
+const K_LAST_USED = "lastUsed";
+/** lastUsed is written to storage at most this often. */
+const LAST_USED_WRITE_MS = 30 * 1000;
 
 class Deleted extends Error {}
 
 export class KeyringInstance extends DurableObject<Env> {
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		// A restarted object starts without a timeout (Cloudflare docs).
+		const c = ctx.container;
+		if (c?.running) void ctx.blockConcurrencyWhile(() => c.setInactivityTimeout(INACTIVITY_MS));
+	}
+
 	/** The one start in progress or done; null when the container is stopped. */
 	private ready: Promise<void> | null = null;
 	/** Set synchronously when a delete begins; nothing restarts or writes after it. */
 	private deleted = false;
 	private inFlight = 0;
+	/**
+	 * Last call, kept in storage too: an object evicted between alarms comes
+	 * back without its memory, and must neither stop a container just in use
+	 * nor count idle time from zero again.
+	 */
 	private lastUsed = 0;
+	private lastUsedStored = 0;
+	/** A start() is between c.start() and the end of its wait. */
+	private starting = false;
 
 	private async identity(): Promise<Identity | undefined> {
 		if (this.deleted) return undefined;
@@ -292,6 +318,18 @@ export class KeyringInstance extends DurableObject<Env> {
 	/** Starts the container if needed and waits until it holds this keyring's state. */
 	private async start(m: Identity): Promise<void> {
 		const c = this.ctx.container!;
+		this.starting = true;
+		try {
+			await this.startAndUnlock(m, c);
+		} finally {
+			this.starting = false;
+		}
+		// A new keyring gets them from create(), once it exists.
+		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
+		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+	}
+
+	private async startAndUnlock(m: Identity, c: Container): Promise<void> {
 		const adminHash = await sha256Hex(m.adminToken);
 		if (this.deleted) throw new Deleted();
 		if (!c.running) {
@@ -304,6 +342,7 @@ export class KeyringInstance extends DurableObject<Env> {
 					"--admin-token-sha256", adminHash,
 				],
 			});
+			await c.setInactivityTimeout(INACTIVITY_MS);
 			const mine = this.ready;
 			c.monitor()
 				.catch((e) => console.error("keyring container stopped:", String(e)))
@@ -334,15 +373,22 @@ export class KeyringInstance extends DurableObject<Env> {
 			if (i >= 60) throw new KeyringError(503, "the keyring container did not start");
 			await scheduler.wait(250);
 		}
-		// A new keyring gets them from create(), once it exists.
-		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
-		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+	}
+
+	/** Records a call; stores it now and then, never while deleting. */
+	private touch(): void {
+		const now = Date.now();
+		this.lastUsed = now;
+		if (now - this.lastUsedStored >= LAST_USED_WRITE_MS && !this.deleted) {
+			this.lastUsedStored = now;
+			this.ctx.storage.put(K_LAST_USED, now).catch(() => {});
+		}
 	}
 
 	/** Makes sure the container runs and holds this keyring's state. One start at a time. */
 	private running(m: Identity): Promise<void> {
 		if (this.deleted) return Promise.reject(new Deleted());
-		this.lastUsed = Date.now();
+		this.touch();
 		if (this.ready) return this.ready;
 		const p: Promise<void> = this.start(m).catch((e) => {
 			if (this.ready === p) this.ready = null;
@@ -517,7 +563,7 @@ export class KeyringInstance extends DurableObject<Env> {
 			return failure(e);
 		} finally {
 			this.inFlight--;
-			this.lastUsed = Date.now();
+			this.touch();
 		}
 	}
 
@@ -542,7 +588,7 @@ export class KeyringInstance extends DurableObject<Env> {
 				return json(f.status, { error: f.error });
 			} finally {
 				this.inFlight--;
-				this.lastUsed = Date.now();
+				this.touch();
 			}
 		}
 		if (url.pathname.startsWith("/_pages/")) {
@@ -582,7 +628,19 @@ export class KeyringInstance extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		const m = await this.identity();
 		const c = this.ctx.container;
-		if (!m || !c?.running) return;
+		if (!m || !c) return;
+		if (!c.running) {
+			if (this.starting) {
+				// Not up yet; look again next tick.
+				if (!this.deleted) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+				return;
+			}
+			// Alarms run only while a container is up: this one was stopped
+			// by the platform, not by the idle check below.
+			console.log(`keyring container found stopped (${m.id})`);
+			this.ready = null;
+			return;
+		}
 		try {
 			await this.put(K_USAGE, await this.adminJSON(m, "GET", "/usage"));
 		} catch (e) {
@@ -590,7 +648,15 @@ export class KeyringInstance extends DurableObject<Env> {
 			// next tick
 		}
 		const openUntil = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
-		const idle = this.inFlight === 0 && Date.now() - this.lastUsed > IDLE_MS && openUntil < Date.now();
+		let stored = await this.ctx.storage.get<number>(K_LAST_USED);
+		if (stored === undefined) {
+			// No record yet (a keyring from before this was kept): start
+			// counting now rather than stop a container that may be in use.
+			stored = Date.now();
+			await this.put(K_LAST_USED, stored).catch(() => {});
+		}
+		const last = Math.max(this.lastUsed, stored);
+		const idle = this.inFlight === 0 && Date.now() - last > IDLE_MS && openUntil < Date.now();
 		if (idle) {
 			await this.sync(m).catch(() => {});
 			console.log(`keyring container stopped (idle) (${m.id})`);
