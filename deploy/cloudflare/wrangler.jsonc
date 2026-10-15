@@ -37,9 +37,12 @@
             "auth_params": { "access_type": "offline", "prompt": "consent" },
             "revoke_url": "https://oauth2.googleapis.com/revoke"
           }
-        }
+        },
+        // The person's own proxy: a consent link asks for type, host:port,
+        // username and password (no address here).
+        "proxy": { "key": "PROXY", "auth": "egress-proxy", "egress_proxy": { "ports": [80, 443] } }
       },
-      "access": { "gmail": { "paths": ["/"], "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] } }
+      "access": { "proxy": { "paths": ["/"] }, "gmail": { "paths": ["/"], "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] } }
     }
   }
   // Secrets (wrangler secret put): MASTER_KEY, CALLER_SECRET, ADMIN_TOKEN, OAUTH_CLIENT_SECRETS

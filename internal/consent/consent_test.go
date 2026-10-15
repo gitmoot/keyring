@@ -138,10 +138,12 @@ func newEnv(t *testing.T) *env {
 					AuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
 					RevokeURL:  prov.srv.URL + "/revoke",
 				}},
-				"proxy":  {Base: "https://proxy.example.com", Key: "PROXY_KEY", Auth: policy.AuthHeader, Header: "X-Api-Key"},
-				"other":  {Base: "https://other.example.com", Key: "OTHER_KEY", Auth: policy.AuthBearer},
-				"signer": {Key: "SIGN_KEY", Auth: policy.AuthEd25519Sign},
-				"nosign": {Base: "https://x.example.com", Key: "NOSIGN_REFRESH", Auth: policy.AuthOAuth2, OAuth2: &policy.OAuth2{TokenURL: prov.srv.URL + "/token", ClientID: "c"}},
+				"proxy":      {Base: "https://proxy.example.com", Key: "PROXY_KEY", Auth: policy.AuthHeader, Header: "X-Api-Key"},
+				"myproxy":    {Key: "MY_PROXY", Auth: policy.AuthEgressProxy, EgressProxy: &policy.EgressProxy{}},
+				"fixedproxy": {Key: "FIXED_PROXY", Auth: policy.AuthEgressProxy, EgressProxy: &policy.EgressProxy{Type: policy.ProxyHTTPConnect, Address: "proxy.example.net:8080"}},
+				"other":      {Base: "https://other.example.com", Key: "OTHER_KEY", Auth: policy.AuthBearer},
+				"signer":     {Key: "SIGN_KEY", Auth: policy.AuthEd25519Sign},
+				"nosign":     {Base: "https://x.example.com", Key: "NOSIGN_REFRESH", Auth: policy.AuthOAuth2, OAuth2: &policy.OAuth2{TokenURL: prov.srv.URL + "/token", ClientID: "c"}},
 			},
 			Roles: map[string]policy.Role{"phobos": {TokenSHA256: sha(roleToken), Access: map[string]policy.Access{"gmail": {Paths: []string{"/"}}}}},
 		},
@@ -527,5 +529,58 @@ func TestDefaultPortInPublicURL(t *testing.T) {
 	// Browsers send Origin without the default port.
 	if w := e.page("POST", u.Path, url.Values{"value": {"v"}}, map[string]string{"Origin": "https://connect.example.com"}); w.Code != http.StatusOK {
 		t.Fatalf("POST from the page: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestProxyLinkStoresAddressAndCredentialTogether(t *testing.T) {
+	e := newEnv(t)
+	path := e.link("myproxy")
+	page := e.page("GET", path, nil, nil).Body.String()
+	for _, field := range []string{`name="type"`, `name="address"`, `name="username"`, `name="password"`} {
+		if !strings.Contains(page, field) {
+			t.Fatalf("form lacks %s:\n%s", field, page)
+		}
+	}
+	// Bad input is refused and the link stays usable.
+	for _, bad := range []url.Values{
+		{"type": {"socks5"}, "address": {"10.0.0.1:1080"}, "username": {"u"}, "password": {"p"}},
+		{"type": {"socks5"}, "address": {"gate.example.com"}, "username": {"u"}, "password": {"p"}},
+		{"type": {"ftp"}, "address": {"gate.example.com:21"}, "username": {"u"}, "password": {"p"}},
+		{"type": {"socks5"}, "address": {"gate.example.com:1080"}, "username": {""}, "password": {"p"}},
+	} {
+		if w := e.page("POST", path, bad, fromPage); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `name="address"`) {
+			t.Fatalf("bad %v: %d", bad, w.Code)
+		}
+	}
+	if e.keys.get("MY_PROXY") != "" {
+		t.Fatal("stored bad input")
+	}
+	ok := url.Values{"type": {"socks5"}, "address": {" gate.person.example:5959 "}, "username": {"alice"}, "password": {"s3cret:pw"}}
+	if w := e.page("POST", path, ok, fromPage); w.Code != http.StatusOK {
+		t.Fatalf("good input: %d %s", w.Code, w.Body)
+	}
+	stored := e.keys.get("MY_PROXY")
+	got, cred, err := (&policy.EgressProxy{}).Resolve(stored)
+	if err != nil || got.Type != policy.ProxySOCKS5 || got.Address != "gate.person.example:5959" || cred != "alice:s3cret:pw" {
+		t.Fatalf("stored %q -> %+v %q %v", stored, got, cred, err)
+	}
+	if w := e.page("POST", path, ok, fromPage); w.Code != http.StatusGone {
+		t.Fatalf("reused: %d", w.Code)
+	}
+	if strings.Contains(e.audit.String(), "s3cret") || strings.Contains(e.audit.String(), "gate.person") {
+		t.Fatalf("audit holds proxy details:\n%s", e.audit)
+	}
+
+	// With the address in config, the form asks only for the credential.
+	path = e.link("fixedproxy")
+	page = e.page("GET", path, nil, nil).Body.String()
+	if strings.Contains(page, `name="address"`) || !strings.Contains(page, `name="username"`) {
+		t.Fatalf("fixed-address form:\n%s", page)
+	}
+	if w := e.page("POST", path, url.Values{"username": {"bob"}, "password": {"pw"}, "address": {"evil.example:1"}}, fromPage); w.Code != http.StatusOK {
+		t.Fatalf("fixed-address save: %d", w.Code)
+	}
+	if got := e.keys.get("FIXED_PROXY"); got != "bob:pw" {
+		t.Fatalf("FIXED_PROXY = %q", got)
 	}
 }
