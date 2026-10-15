@@ -475,8 +475,29 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	sortKeys(rows, by, desc)
 	cols := columns("/keys", query, by, desc, [][3]string{{"name", "Key", ""}, {"api", "API", ""}, {"status", "Status", ""},
 		{"agents", "Agents with access", ""}, {"last", "Last used", ""}, {"today", "Calls today", "num"}, {"", "7 days", ""}, {"", "Updated", ""}})
+	type googleRow struct {
+		Name, Account, Status, Expires string
+		Services                       []string
+	}
+	var accounts []googleRow
+	cfg := b.Proxy.Config()
+	for name, a := range cfg.GoogleAccounts {
+		status, expires := b.Proxy.GoogleStatus(name)
+		row := googleRow{Name: name, Account: a.Account, Status: status}
+		if !expires.IsZero() {
+			row.Expires = expires.UTC().Format(time.RFC3339)
+		}
+		for service, svc := range cfg.Services {
+			if svc.Auth == policy.AuthGcloud && svc.GoogleAccount == name {
+				row.Services = append(row.Services, service)
+			}
+		}
+		sort.Strings(row.Services)
+		accounts = append(accounts, row)
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Name < accounts[j].Name })
 	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Show": show, "Sort": by, "Desc": desc,
-		"Filters": filters, "Columns": cols, "Notice": query.Get("done")})
+		"GoogleAccounts": accounts, "Filters": filters, "Columns": cols, "Notice": query.Get("done")})
 }
 
 func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string) {

@@ -63,7 +63,8 @@ type Handler struct {
 
 	usage usageBook
 
-	oauth oauthCache
+	oauth  oauthCache
+	google googleCache
 
 	auditMu sync.Mutex
 }
@@ -157,6 +158,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 	}
 	h.snap.Store(snap)
 	h.retainOAuth(config, keys)
+	h.retainGoogle(config)
 }
 
 type auditRecord struct {
@@ -255,7 +257,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnauthorized, "role expired")
 		return
 	}
-	service, rest, ok := splitPath(r.URL)
+	service, rest, ok := splitPath(r.URL, snap.config.Services, role.Access)
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
 	var signingAuth string
@@ -333,7 +335,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := snap.keys[svc.Key]
-	if key == "" {
+	if key == "" && svc.Auth != policy.AuthGcloud {
 		fail(http.StatusServiceUnavailable, "key not loaded")
 		return
 	}
@@ -400,6 +402,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamKey, alsoRedact = token, []string{refresh, secret}
 	}
 	header := outboundHeader(r.Header, svc)
+	if svc.Auth == policy.AuthGcloud {
+		account := snap.config.GoogleAccounts[svc.GoogleAccount]
+		token, err := h.googleToken(r.Context(), account)
+		if err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusBadGateway, err.Error())
+			return
+		}
+		upstreamKey = token
+		if account.QuotaProject != "" {
+			header.Set("X-Goog-User-Project", account.QuotaProject)
+		}
+	}
 	if snap.config.ContainerMode {
 		// The supervisor removes it; never pass the router's proof on even
 		// if one slipped through.
@@ -433,6 +448,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// one on the next call.
 		refresh, secret := oauthSecrets(svc, snap.keys)
 		h.dropAccessToken(svc, refresh, secret, upstreamKey)
+	}
+	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
+		// Invalidate only the token used; never replay an ambiguous write.
+		h.dropGoogleToken(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey)
 	}
 	// The transport already decoded gzip. Any other encoding would hide an
 	// echoed key from the redactor, so such a reply is not passed on.
@@ -495,8 +514,21 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 	target.Path = strings.TrimSuffix(target.Path, "/") + rest
 	target.RawPath = ""
 	target.RawQuery = rawQuery
+	if svc.Auth == policy.AuthGcloud {
+		q, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			return nil, errBadQuery
+		}
+		for name := range q {
+			switch strings.ToLower(name) {
+			case "access_token", "oauth_token", "key", "userproject":
+				delete(q, name)
+			}
+		}
+		target.RawQuery = q.Encode()
+	}
 	switch svc.Auth {
-	case policy.AuthBearer, policy.AuthOAuth2:
+	case policy.AuthBearer, policy.AuthOAuth2, policy.AuthGcloud:
 		header.Set("Authorization", "Bearer "+key)
 	case policy.AuthHeader:
 		header.Set(svc.Header, key)
@@ -547,6 +579,18 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	}
 	path, query, _ := strings.Cut(svc.TestPath, "?")
 	header := http.Header{"User-Agent": {"keyring-test"}}
+	var googleAccount policy.GoogleAccount
+	if svc.Auth == policy.AuthGcloud {
+		googleAccount = h.snap.Load().config.GoogleAccounts[svc.GoogleAccount]
+		token, err := h.googleToken(ctx, googleAccount)
+		if err != nil {
+			return 0, err
+		}
+		key = token
+		if googleAccount.QuotaProject != "" {
+			header.Set("X-Goog-User-Project", googleAccount.QuotaProject)
+		}
+	}
 	out, err := buildOutbound(ctx, svc, key, method, path, query, header, http.NoBody, 0)
 	if err != nil {
 		return 0, err
@@ -559,6 +603,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		}
 		return 0, errors.New("service unreachable")
 	}
+	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
+		h.dropGoogleToken(googleAccount, key)
+	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
 	return resp.StatusCode, nil
@@ -569,7 +616,10 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 // reads the same way: printable ASCII after one decode, no "%" left (double
 // encoding), no ";" (path parameters such as "..;"), no backslash, no "." or
 // ".." segment, and no encoded "/", "." or "\" in the request.
-func splitPath(u *url.URL) (service, rest string, ok bool) {
+// Google account services also accept spaces (Sheets A1 tab names); other
+// services retain their existing no-whitespace rule. buildOutbound re-escapes
+// the decoded path before sending it upstream.
+func splitPath(u *url.URL, services map[string]policy.Service, grants map[string]policy.Access) (service, rest string, ok bool) {
 	escaped := u.EscapedPath()
 	lower := strings.ToLower(escaped)
 	if !strings.HasPrefix(escaped, "/") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
@@ -583,9 +633,12 @@ func splitPath(u *url.URL) (service, rest string, ok bool) {
 	if err != nil {
 		return service, "", false
 	}
+	// Ungranted names must not reveal their auth kind through a space probe.
+	_, granted := grants[service]
+	allowSpace := granted && services[service].Auth == policy.AuthGcloud
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
-		if c < 0x21 || c > 0x7e || c == '%' || c == ';' || c == '\\' {
+		if c < 0x20 || (c == 0x20 && !allowSpace) || c > 0x7e || c == '%' || c == ';' || c == '\\' {
 			return service, "", false
 		}
 	}
@@ -618,6 +671,9 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 	out.Del(TokenHeader)
 	out.Del("Authorization")
 	out.Del("Cookie")
+	if svc.Auth == policy.AuthGcloud {
+		out.Del("X-Goog-Api-Key")
+	}
 	// Let the transport negotiate compression and decode it, so the
 	// redactor sees plain text.
 	out.Del("Accept-Encoding")

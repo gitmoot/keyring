@@ -40,6 +40,11 @@ var pages = template.Must(template.New("pages").Parse(`
 </tr>{{else}}<tr><td colspan="8" class="empty">No keys{{if .Query}} match “{{.Query}}”{{end}}{{if .Show}} in this group{{end}}.</td></tr>{{end}}</tbody>
 </table></div>
 <p class="hint">Click a key to test, replace or delete it. Click a column to sort. Calls today count every attempt, refused ones too. Key values are never shown.</p>
+{{if .GoogleAccounts}}<h2>Host Google accounts</h2>
+<p class="hint">Managed on the keyring host with gcloud, not stored keys. Status is from the last token check, not a live permission test. Manage each service's grants under Agents; signing in grants no agent access.</p>
+<div class="tablewrap"><table class="t"><thead><tr><th>Binding</th><th>Google account</th><th>Services</th><th>Credential status</th><th>Token expires (UTC)</th></tr></thead><tbody>
+{{range .GoogleAccounts}}<tr><td>{{.Name}}</td><td>{{.Account}}</td><td>{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</td><td>{{.Status}}</td><td>{{.Expires}}</td></tr>{{end}}
+</tbody></table></div>{{end}}
 {{template "bottom"}}{{end}}
 
 {{define "newkey"}}{{template "top" .}}
