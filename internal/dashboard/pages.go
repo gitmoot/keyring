@@ -102,8 +102,10 @@ var pages = template.Must(template.New("pages").Parse(`
 <form method="post" action="/keys/{{.Row.Name}}/leaked"><input type="hidden" name="csrf" value="{{.CSRF}}"><p class="mute">Marking it leaked shows a warning until you replace it.</p>{{template "password" .}}<div class="actions"><button class="ghost">Mark as leaked</button></div></form>
 <hr>
 <form method="post" action="/keys/{{.Row.Name}}/delete"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<p>Delete only the stored value to keep the service settings for later, or remove this key completely.</p>
+{{if .Row.Services}}<p>Remove completely also deletes these services and all agents' access to them: {{range $i, $s := .Row.Services}}{{if $i}}, {{end}}<strong>{{$s}}</strong>{{end}}. Other stored keys are kept.</p>{{end}}
 {{if .Row.UsedBy}}<label class="check"><input type="checkbox" name="confirm_in_use" value="yes"> Delete even though {{range $i, $r := .Row.UsedBy}}{{if $i}}, {{end}}{{$r}}{{end}} {{if eq (len .Row.UsedBy) 1}}uses{{else}}use{{end}} it</label>{{end}}
-{{template "password" .}}<div class="actions"><button class="danger">Delete key</button></div></form>
+{{template "password" .}}<div class="actions">{{if .Row.HasValue}}<button class="ghost">Delete value only</button>{{end}}<button class="danger" name="remove_services" value="yes">Remove completely</button></div></form>
 </details>
 {{template "bottom"}}{{end}}
 

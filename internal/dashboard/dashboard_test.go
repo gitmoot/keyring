@@ -393,6 +393,100 @@ func TestDeleteInUseNeedsConfirmation(t *testing.T) {
 	}
 }
 
+func TestRemoveCompletely(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		label := "stored"
+		if missing {
+			label = "already-deleted"
+		}
+		t.Run(label, func(t *testing.T) {
+			e := newEnv(t)
+			next, err := policy.LoadAccess(e.backend.rules().AccessFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Both services using this key must go; another service and its
+			// credential and role grant must survive.
+			next.Services["alias"] = next.Services["api"]
+			other := next.Services["api"]
+			other.Key = "OTHER_KEY"
+			next.Services["other"] = other
+			next.Roles["phobos"].Access["alias"] = policy.Access{Paths: []string{"/"}}
+			next.Roles["phobos"].Access["other"] = policy.Access{Paths: []string{"/"}}
+			if err := store.Set(e.backend.StorePath, "OTHER_KEY", newValue); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.backend.saveAndApply(next); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.backend.saveMeta(map[string]KeyMeta{"API_KEY": {LeakedAt: e.now}, "OTHER_KEY": {LeakedAt: e.now}}); err != nil {
+				t.Fatal(err)
+			}
+			if missing {
+				w := e.request("POST", "/keys/API_KEY/delete", url.Values{"password": {password}, "confirm_in_use": {"yes"}})
+				if w.Code != http.StatusSeeOther {
+					t.Fatalf("delete value: %d", w.Code)
+				}
+			}
+			for _, form := range []url.Values{
+				{"remove_services": {"yes"}, "confirm_in_use": {"yes"}},
+				{"remove_services": {"yes"}, "password": {password}},
+			} {
+				w := e.request("POST", "/keys/API_KEY/delete", form)
+				if w.Code != http.StatusSeeOther || !strings.Contains(w.Header().Get("Location"), "error=") {
+					t.Fatalf("unconfirmed removal: %d %s", w.Code, w.Header().Get("Location"))
+				}
+				if _, ok := e.proxy.Config().Services["api"]; !ok {
+					t.Fatal("removed service without password and in-use confirmation")
+				}
+			}
+			w := e.request("POST", "/keys/API_KEY/delete", url.Values{
+				"password": {password}, "confirm_in_use": {"yes"}, "remove_services": {"yes"},
+			})
+			if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/keys?done=deleted" {
+				t.Fatalf("remove completely: %d %s %s", w.Code, w.Header().Get("Location"), w.Body.String())
+			}
+			if code := e.proxyCall(); code != http.StatusForbidden {
+				t.Fatalf("removed service still callable: %d", code)
+			}
+			access, err := policy.LoadAccess(e.backend.rules().AccessFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range []policy.AccessList{access, e.proxy.Config().AccessList} {
+				if len(a.Services) != 1 || a.Services["other"].Key != "OTHER_KEY" {
+					t.Fatalf("services after removal: %+v", a.Services)
+				}
+				role := a.Roles["phobos"]
+				if len(role.Access) != 1 || role.Access["other"].Paths[0] != "/" || role.TokenSHA256 == "" {
+					t.Fatalf("unrelated role access changed: %+v", role)
+				}
+			}
+			keys, err := store.Load(e.backend.StorePath)
+			if err != nil || len(keys) != 1 || keys["OTHER_KEY"] != newValue {
+				t.Fatalf("wrong keys left: %v", err)
+			}
+			meta, err := e.backend.loadMeta()
+			if err != nil || len(meta) != 1 || meta["OTHER_KEY"].LeakedAt == nil {
+				t.Fatalf("wrong metadata left: %+v %v", meta, err)
+			}
+			// Reload from disk as serve/SIGHUP would: the row must not return.
+			if err := e.backend.apply(); err != nil {
+				t.Fatal(err)
+			}
+			if w := e.request("GET", "/keys/API_KEY", nil); w.Code != http.StatusNotFound {
+				t.Fatalf("removed detail page: %d", w.Code)
+			}
+			if strings.Contains(e.request("GET", "/keys", nil).Body.String(), "API_KEY") {
+				t.Fatal("removed key returned to the dashboard after reload")
+			}
+			if strings.Contains(e.audit.String(), oldValue) || strings.Contains(e.audit.String(), newValue) {
+				t.Fatal("removal leaked a credential in the audit log")
+			}
+		})
+	}
+}
+
 func TestPagesNeedALoggedInSession(t *testing.T) {
 	e := newEnv(t)
 	e.cookie = ""

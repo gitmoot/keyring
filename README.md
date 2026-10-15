@@ -422,8 +422,9 @@ The **Keys** page (`/keys`) is a table of every key the access file names or the
 - **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
 - **Replace** takes effect at once; it clears the leaked flag and the test result.
 - **Mark as leaked** flags the key until it is replaced.
-- **Delete** asks for a tick when a role still uses the key; its calls then answer 503.
-- Add, replace, mark as leaked and delete ask for the password every time. They work only on keys the page lists.
+- Under **Leaked or no longer needed**, **Delete value only** keeps the service settings: the key stays listed as missing and its calls answer 503.
+- **Remove completely** deletes the key's stored value and notes, every service that references it, and those services' grants from all agents. The form lists the services that will be removed. It also works when the value was already deleted, so the empty row goes away and stays gone after reload. Other keys and agents are kept; a service using several credentials may leave its other keys listed for separate removal. This removes the key from this keyring, not from the provider's account.
+- Both deletion choices ask for a tick when a role still uses the key. Add, replace, mark as leaked and delete ask for the password every time. They work only on keys the page lists.
 
 Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
 

@@ -852,6 +852,7 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		b.fail(w, sid, err)
 		return
 	}
+	complete := r.PostFormValue("remove_services") == "yes"
 	for _, row := range rows {
 		if row.Name == name && len(row.UsedBy) > 0 && r.PostFormValue("confirm_in_use") != "yes" {
 			http.Redirect(w, r, "/keys/"+name+"?error=in-use", http.StatusSeeOther)
@@ -863,21 +864,52 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		b.fail(w, sid, err)
 		return
 	}
-	if _, ok := keys[name]; !ok {
+	if _, ok := keys[name]; !ok && !complete {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
 		return
 	}
-	if err := store.Delete(b.StorePath, name); err != nil {
-		b.fail(w, sid, err)
-		return
+	var removed []string
+	if complete {
+		next, err := policy.LoadAccess(b.rules().AccessFile)
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		for service, svc := range next.Services {
+			if slices.Contains(svc.KeyNames(), name) {
+				removed = append(removed, service)
+				delete(next.Services, service)
+				for _, role := range next.Roles {
+					delete(role.Access, service)
+				}
+			}
+		}
+		sort.Strings(removed)
+		if _, exists := keys[name]; !exists && len(removed) == 0 {
+			b.notFound(w, sid)
+			return
+		}
+		// Remove and apply access first. If deleting the value fails, no
+		// removed service can still use it; the remaining key can be retried.
+		if err := b.saveAndApply(next); err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		b.Admin.Audit("services_removed", sid, map[string]any{"key": name, "services": removed})
 	}
+	if _, exists := keys[name]; exists {
+		if err := store.Delete(b.StorePath, name); err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+	}
+	delete(keys, name)
+	// Dropping metadata must not keep the deleted value live in the proxy.
+	b.Proxy.Swap(b.Proxy.Config(), keys)
 	meta, err := b.loadMeta()
 	if err == nil {
 		delete(meta, name)
 		err = b.saveMeta(meta)
-	}
-	if err == nil {
-		err = b.apply()
 	}
 	if err != nil {
 		b.fail(w, sid, err)
