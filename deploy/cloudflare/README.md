@@ -61,6 +61,17 @@ npx wrangler secret put MASTER_KEY        # and CALLER_SECRET, ADMIN_TOKEN, OAUT
 npx wrangler deploy                        # builds the image from the repository root
 ```
 
+Deploying without editing `wrangler.jsonc` (for example from a checkout you do not change):
+
+```sh
+npx wrangler deploy \
+  --domain connect.example.com \
+  --var PUBLIC_BASE:https://connect.example.com \
+  --var "SERVICES_TEMPLATE:$(cat /path/to/services-template.json)"   # optional; a JSON string is accepted
+```
+
+`--domain` adds the Worker's custom domain and its DNS record only; other records in the zone are not touched. Until a Google OAuth client exists, the template's `REPLACE` client id only breaks the Gmail sign-in; fixed-key services, consent forms, the caller check and deletes all work. Add a fixed-key service to a keyring with `PUT /admin/instances/<id>/services/<name>`.
+
 ## Checking it without Cloudflare
 
 `smoke/smoke.ts` runs the Worker and DO code in Bun against the real binary, with fakes for `cloudflare:workers` and the container runtime:

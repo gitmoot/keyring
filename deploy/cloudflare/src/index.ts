@@ -19,7 +19,7 @@ export interface Env {
 	/** https origin of this Worker, e.g. https://keyring.example.com */
 	PUBLIC_BASE: string;
 	/** The services every new instance starts with (a JSON var). */
-	SERVICES_TEMPLATE: Template;
+	SERVICES_TEMPLATE: Template | string;
 	/** Secret: base64 of 32 random bytes; derives every instance's data key. */
 	MASTER_KEY: string;
 	/** Secret: the router's proof, sent as X-Keyring-Caller. */
@@ -374,7 +374,11 @@ export class KeyringInstance extends DurableObject<Env> {
 
 	async create(id: string, label: string): Promise<{ role_token: string } | { status: number; error: string }> {
 		if (this.deleted || (await this.ctx.storage.get(K_ID))) return { status: 409, error: "keyring exists" };
-		const template = this.env.SERVICES_TEMPLATE;
+		// A JSON var in wrangler.jsonc arrives as an object; one passed with
+		// `wrangler deploy --var` arrives as a string.
+		const raw = this.env.SERVICES_TEMPLATE;
+		const template = (typeof raw === "string" ? JSON.parse(raw) : raw) as Template;
+		if (!template?.services || !template?.access) return { status: 500, error: "SERVICES_TEMPLATE needs services and access" };
 		const m: Identity = {
 			id, label,
 			salt: b64(crypto.getRandomValues(new Uint8Array(32))),
