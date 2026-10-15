@@ -272,6 +272,7 @@ try {
 		r = await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "fresh" }));
 		const kf = ((await r.json()) as { keyring_id: string }).keyring_id;
 		objects.delete(kf); // a new object instance, same storage and running container
+		storages.get(kf)!.m.delete("lastUsed"); // as for a keyring made before lastUsed was kept
 		await env.KEYRING.get(kf).alarm();
 		await Bun.sleep(200); // a signalled process takes a moment to exit
 		expect("first alarm of a fresh object keeps a running container", containers.get(kf)!.running, true);

@@ -648,7 +648,14 @@ export class KeyringInstance extends DurableObject<Env> {
 			// next tick
 		}
 		const openUntil = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
-		const last = Math.max(this.lastUsed, (await this.ctx.storage.get<number>(K_LAST_USED)) ?? 0);
+		let stored = await this.ctx.storage.get<number>(K_LAST_USED);
+		if (stored === undefined) {
+			// No record yet (a keyring from before this was kept): start
+			// counting now rather than stop a container that may be in use.
+			stored = Date.now();
+			await this.put(K_LAST_USED, stored).catch(() => {});
+		}
+		const last = Math.max(this.lastUsed, stored);
 		const idle = this.inFlight === 0 && Date.now() - last > IDLE_MS && openUntil < Date.now();
 		if (idle) {
 			await this.sync(m).catch(() => {});
