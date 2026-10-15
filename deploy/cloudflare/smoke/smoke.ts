@@ -123,7 +123,8 @@ const env = {
 	CALLER_SECRET: "caller-secret",
 	ADMIN_TOKEN: "admin-token",
 	OAUTH_CLIENT_SECRETS: JSON.stringify({ GOOGLE_CLIENT_SECRET: "client-secret-value" }),
-	SERVICES_TEMPLATE: {
+	// Passed as a string when SMOKE_TEMPLATE_AS_STRING is set, as `wrangler deploy --var` does.
+	SERVICES_TEMPLATE: ((t: object) => (process.env.SMOKE_TEMPLATE_AS_STRING ? JSON.stringify(t) : t))({
 		services: {
 			echo: { base: `http://127.0.0.1:${api.port}`, key: "ECHO_KEY", auth: "bearer" },
 			gmail: {
@@ -135,7 +136,7 @@ const env = {
 			},
 		},
 		access: { echo: { paths: ["/"], daily_requests: 3 }, gmail: { paths: ["/"] } },
-	},
+	}),
 	KEYRING: {
 		idFromName: (n: string) => n,
 		get: (name: string) => {
