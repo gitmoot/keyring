@@ -333,8 +333,10 @@ const (
 type EgressProxy struct {
 	Type string `json:"type"`
 	// Address is host:port of the proxy. An IP address must be public; a
-	// name is checked again when it resolves.
-	Address string `json:"address"`
+	// name is checked again when it resolves. Empty: the person gives the
+	// address together with the credential (a consent link), and the key
+	// holds both as a proxy URL (see Resolve).
+	Address string `json:"address,omitempty"`
 	// TLS wraps the connection to the proxy in TLS (for http-connect).
 	TLS bool `json:"tls,omitempty"`
 	// Ports are the destination ports allowed; default [443].
@@ -343,6 +345,86 @@ type EgressProxy struct {
 	// MaxSeconds ends any tunnel (default 3600).
 	IdleSeconds int `json:"idle_seconds,omitempty"`
 	MaxSeconds  int `json:"max_seconds,omitempty"`
+}
+
+// CheckProxyAddress checks a proxy's host:port: a DNS name or a public IP,
+// and a port.
+func CheckProxyAddress(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("address %q: want host:port", address)
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		if !PublicAddr(a) {
+			return fmt.Errorf("address %q: a private, loopback or reserved address is not allowed", address)
+		}
+	} else if !tunnelName.MatchString(host) {
+		return fmt.Errorf("address %q: want a DNS name or public IP", address)
+	}
+	return nil
+}
+
+// ProxyURL is what a person-provided proxy is stored as: one value holding
+// the type, address and credential, so they are set and deleted together and
+// a credential is only ever sent to the address given with it.
+// Schemes: http (http-connect), https (http-connect over TLS), socks5.
+func ProxyURL(proxyType string, tls bool, address, user, password string) (string, error) {
+	scheme := map[string]string{ProxyHTTPConnect: "http", ProxySOCKS5: "socks5"}[proxyType]
+	if scheme == "" || (tls && proxyType != ProxyHTTPConnect) {
+		return "", errors.New("proxy type: want http-connect or socks5")
+	}
+	if tls {
+		scheme = "https"
+	}
+	if err := CheckProxyAddress(address); err != nil {
+		return "", err
+	}
+	if !proxyUser(user) || len(password) > 255 || strings.ContainsAny(password, "\r\n") {
+		return "", errors.New("proxy username: 1-255 characters without : or spaces; password at most 255 characters")
+	}
+	u := url.URL{Scheme: scheme, User: url.UserPassword(user, password), Host: address}
+	return u.String(), nil
+}
+
+func proxyUser(user string) bool {
+	return user != "" && len(user) <= 255 && !strings.ContainsAny(user, ": \t\r\n")
+}
+
+// Resolve returns the proxy to use and its credential ("user:password"),
+// given the service's stored key. With an address in config the key is the
+// credential; without one the key is a ProxyURL the person gave, checked
+// again here.
+func (e *EgressProxy) Resolve(key string) (EgressProxy, string, error) {
+	if e.Address != "" {
+		return *e, key, nil
+	}
+	u, err := url.Parse(key)
+	if err != nil || u.User == nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return EgressProxy{}, "", errors.New("the stored proxy settings are not valid")
+	}
+	out := *e
+	switch u.Scheme {
+	case "http":
+		out.Type, out.TLS = ProxyHTTPConnect, false
+	case "https":
+		out.Type, out.TLS = ProxyHTTPConnect, true
+	case "socks5":
+		out.Type, out.TLS = ProxySOCKS5, false
+	default:
+		return EgressProxy{}, "", errors.New("the stored proxy settings are not valid")
+	}
+	if e.Type != "" && out.Type != e.Type {
+		return EgressProxy{}, "", errors.New("the stored proxy type does not match the service")
+	}
+	if err := CheckProxyAddress(u.Host); err != nil {
+		return EgressProxy{}, "", err
+	}
+	pass, _ := u.User.Password()
+	if !proxyUser(u.User.Username()) {
+		return EgressProxy{}, "", errors.New("the stored proxy settings are not valid")
+	}
+	out.Address = u.Host
+	return out, u.User.Username() + ":" + pass, nil
 }
 
 // AllowedPorts returns the destination ports allowed.
@@ -890,22 +972,17 @@ func (s *Service) validateEgress() error {
 	if !store.ValidName(s.Key) {
 		return fmt.Errorf("key %q is not a valid key name", s.Key)
 	}
-	if e.Type != ProxyHTTPConnect && e.Type != ProxySOCKS5 {
+	// With no address the person chooses it, and may choose the type too.
+	if e.Type != ProxyHTTPConnect && e.Type != ProxySOCKS5 && (e.Type != "" || e.Address != "") {
 		return fmt.Errorf("egress_proxy type %q: want http-connect or socks5", e.Type)
 	}
 	if e.TLS && e.Type != ProxyHTTPConnect {
 		return errors.New("egress_proxy tls is only for http-connect")
 	}
-	host, port, err := net.SplitHostPort(e.Address)
-	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("egress_proxy address %q: want host:port", e.Address)
-	}
-	if a, err := netip.ParseAddr(host); err == nil {
-		if !PublicAddr(a) {
-			return fmt.Errorf("egress_proxy address %q: a private, loopback or reserved address is not allowed", e.Address)
+	if e.Address != "" {
+		if err := CheckProxyAddress(e.Address); err != nil {
+			return fmt.Errorf("egress_proxy %w", err)
 		}
-	} else if !tunnelName.MatchString(host) {
-		return fmt.Errorf("egress_proxy address %q: want a DNS name or public IP", e.Address)
 	}
 	for _, p := range e.Ports {
 		if p < 1 || p > 65535 {

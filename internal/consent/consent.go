@@ -137,10 +137,46 @@ func linkable(svc policy.Service) bool {
 	switch svc.Auth {
 	case policy.AuthOAuth2:
 		return svc.OAuth2.CanSignIn()
-	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery:
+	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery, policy.AuthEgressProxy:
 		return true
 	}
 	return false
+}
+
+// proxyForm fills the page fields for an egress-proxy service.
+func proxyForm(data *pageData, svc policy.Service) {
+	e := svc.EgressProxy
+	data.Proxy = true
+	data.ProxyAsksAddress = e.Address == ""
+	data.ProxyAsksType = e.Address == "" && e.Type == ""
+}
+
+// proxyValue builds the stored value from an egress-proxy form: the
+// credential when the address is in config, otherwise one proxy URL holding
+// type, address and credential together.
+func proxyValue(r *http.Request, svc policy.Service) (string, error) {
+	e := svc.EgressProxy
+	user, pass := strings.TrimSpace(r.PostFormValue("username")), r.PostFormValue("password")
+	if e.Address != "" {
+		if user == "" || strings.ContainsAny(user, ": \t\r\n") || strings.ContainsAny(pass, "\r\n") || len(user)+len(pass) > 511 {
+			return "", errors.New("enter the proxy username (no : or spaces) and password")
+		}
+		return user + ":" + pass, nil
+	}
+	proxyType := e.Type
+	if proxyType == "" {
+		proxyType = r.PostFormValue("type")
+	}
+	address := strings.TrimSpace(r.PostFormValue("address"))
+	v, err := policy.ProxyURL(proxyType, e.TLS, address, user, pass)
+	if err != nil {
+		return "", err
+	}
+	// The same checks the tunnel makes before every use.
+	if _, _, err := e.Resolve(v); err != nil {
+		return "", err
+	}
+	return v, nil
 }
 
 // prune drops expired links and sign-ins. Callers hold s.mu.
@@ -399,6 +435,9 @@ func (s *Server) linkPage(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	data.Form = true
 	data.SignIn = svc.Auth == policy.AuthOAuth2
+	if svc.Auth == policy.AuthEgressProxy {
+		proxyForm(&data, svc)
+	}
 	render(w, http.StatusOK, data)
 }
 
@@ -442,10 +481,22 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 	}
 	service := l.service
 	if svc.Auth != policy.AuthOAuth2 {
-		value, err := readValue(r)
+		var value string
+		var err error
+		retry := pageData{Service: service, Label: l.label, Form: true, Message: "Paste the value, on one line."}
+		if svc.Auth == policy.AuthEgressProxy {
+			value, err = proxyValue(r, svc)
+			proxyForm(&retry, svc)
+			if err != nil {
+				retry.Message = "Not saved: " + err.Error() + "."
+			}
+		} else {
+			value, err = readValue(r)
+		}
 		if err != nil {
+			// The link stays usable: the person can correct the form.
 			s.mu.Unlock()
-			render(w, http.StatusBadRequest, pageData{Service: service, Label: l.label, Form: true, Message: "Paste the value, on one line."})
+			render(w, http.StatusBadRequest, retry)
 			return
 		}
 		// Used up before the value is stored: a second post, even at the
@@ -675,6 +726,9 @@ func remoteAddr(hostport string) (netip.Addr, bool) {
 type pageData struct {
 	Service, Label, Message string
 	Form, SignIn            bool
+	// Proxy: an egress-proxy form; it asks for the address (and the type)
+	// when the service's config leaves them to the person.
+	Proxy, ProxyAsksAddress, ProxyAsksType bool
 }
 
 var page = template.Must(template.New("page").Parse(`<!doctype html>
@@ -688,6 +742,12 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 {{if .Form}}<form method="post" autocomplete="off">
 {{if .SignIn}}<p>You will sign in with the provider. Your password is never seen here.</p>
 <button type="submit">Sign in and connect</button>
+{{else if .Proxy}}<p>Your proxy's details. They are stored on the keyring and never shown again; the password is only ever sent to the proxy address saved with it.</p>
+{{if .ProxyAsksType}}<label>Type <select name="type"><option value="http-connect">HTTP</option><option value="socks5">SOCKS5</option></select></label>{{end}}
+{{if .ProxyAsksAddress}}<input name="address" required autocomplete="off" spellcheck="false" placeholder="host:port" aria-label="Proxy host:port">{{end}}
+<input name="username" required autocomplete="off" spellcheck="false" placeholder="username" aria-label="Proxy username">
+<input type="password" name="password" autocomplete="off" spellcheck="false" placeholder="password" aria-label="Proxy password">
+<button type="submit">Save</button>
 {{else}}<p>Paste the key. It is stored on the keyring and never shown again.</p>
 <input type="password" name="value" required autocomplete="off" spellcheck="false" aria-label="Key">
 <button type="submit">Save</button>

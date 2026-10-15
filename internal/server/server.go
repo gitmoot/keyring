@@ -645,8 +645,14 @@ func (h *Handler) openTunnel(w http.ResponseWriter, r *http.Request, svc policy.
 		return
 	}
 	rec.Note = "tunnel " + net.JoinHostPort(host, strconv.Itoa(port))
+	proxy, cred, err := e.Resolve(credential)
+	if err != nil {
+		h.refund(role, service, access.DailyRequests, start)
+		fail(http.StatusServiceUnavailable, "proxy not connected: "+err.Error()+"; connect it again")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	upstream, err := dialThroughProxy(ctx, h.dialProxy, e, credential, host, port)
+	upstream, err := dialThroughProxy(ctx, h.dialProxy, &proxy, cred, host, port)
 	cancel()
 	if err != nil {
 		h.refund(role, service, access.DailyRequests, start)

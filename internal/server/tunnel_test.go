@@ -596,3 +596,92 @@ func TestTunnelBytesSurviveRestart(t *testing.T) {
 		t.Fatalf("after restore: %d", code)
 	}
 }
+
+// TestTunnelThroughPersonProvidedProxy: the service leaves the address to the
+// person; the stored key holds type, address and credential together.
+func TestTunnelThroughPersonProvidedProxy(t *testing.T) {
+	proxy := newFakeProxy(t, policy.ProxySOCKS5, echoTarget(t))
+	h, audit, srv := tunnelHandler(t, policy.ProxySOCKS5, proxy.addr, allowAll, func(e *policy.EgressProxy) { e.Type, e.Address = "", "" })
+	var dialed []string
+	var mu sync.Mutex
+	h.dialProxy = func(ctx context.Context, address string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, address)
+		mu.Unlock()
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", proxy.addr)
+	}
+	user, pass, _ := strings.Cut(proxyCredential, ":")
+	stored, err := policy.ProxyURL(policy.ProxySOCKS5, false, "gate.person-proxy.example:5959", user, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(h.Config(), map[string]string{"PROXY_CRED": stored})
+	c, br, code, body := wsClient(t, srv, "/api/_tunnel?host=mail.example.com&port=443", testToken)
+	if code != 101 {
+		t.Fatalf("upgrade: %d %s", code, body)
+	}
+	sendFrame(c, opBinary, []byte("ping"))
+	if op, got := readFrame(t, br); op != opBinary || string(got) != "ping" {
+		t.Fatalf("echo: %d %q", op, got)
+	}
+	c.Close()
+	mu.Lock()
+	gotDial := append([]string(nil), dialed...)
+	mu.Unlock()
+	proxy.mu.Lock()
+	creds := append([]string(nil), proxy.creds...)
+	proxy.mu.Unlock()
+	if len(gotDial) != 1 || gotDial[0] != "gate.person-proxy.example:5959" || len(creds) != 1 || creds[0] != proxyCredential {
+		t.Fatalf("dialed %v with credentials %v", gotDial, creds)
+	}
+
+	// A stored value the tunnel cannot trust is "not connected", never dialed.
+	for _, bad := range []string{
+		proxyCredential, // a bare credential: no address
+		"http://person:pw@10.0.0.1:8080",
+		"socks5://person:pw@127.0.0.1:1080",
+		"ftp://person:pw@gate.example:21",
+		"socks5://gate.example:1080",
+	} {
+		h.Swap(h.Config(), map[string]string{"PROXY_CRED": bad})
+		if _, _, code, body := wsClient(t, srv, "/api/_tunnel?host=mail.example.com&port=443", testToken); code != 503 || strings.Contains(body, "pw") {
+			t.Errorf("stored %q: %d %s", bad, code, body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) != 1 {
+		t.Fatalf("an untrusted stored value was dialed: %v", dialed)
+	}
+	if strings.Contains(audit.String(), pass) {
+		t.Fatal("audit holds the password")
+	}
+}
+
+func TestProxyURLRoundTrip(t *testing.T) {
+	e := &policy.EgressProxy{}
+	v, err := policy.ProxyURL(policy.ProxyHTTPConnect, true, "gate.example.com:443", "alice", "p@ss:w/rd%20 #?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, cred, err := e.Resolve(v)
+	if err != nil || got.Type != policy.ProxyHTTPConnect || !got.TLS || got.Address != "gate.example.com:443" || cred != "alice:p@ss:w/rd%20 #?" {
+		t.Fatalf("Resolve(%q) = %+v %q %v", v, got, cred, err)
+	}
+	// A service that fixes the type refuses another.
+	if _, _, err := (&policy.EgressProxy{Type: policy.ProxySOCKS5}).Resolve(v); err == nil {
+		t.Fatal("type mismatch accepted")
+	}
+	for _, c := range []struct{ typ, addr, user string }{
+		{policy.ProxyHTTPConnect, "10.0.0.1:8080", "a"},
+		{policy.ProxyHTTPConnect, "gate.example.com", "a"},
+		{policy.ProxyHTTPConnect, "gate.example.com:8080", "a:b"},
+		{policy.ProxyHTTPConnect, "gate.example.com:8080", ""},
+		{"http", "gate.example.com:8080", "a"},
+	} {
+		if _, err := policy.ProxyURL(c.typ, false, c.addr, c.user, "pw"); err == nil {
+			t.Errorf("ProxyURL(%q, %q, %q) accepted", c.typ, c.addr, c.user)
+		}
+	}
+}
