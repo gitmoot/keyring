@@ -491,6 +491,7 @@ main.narrow{max-width:400px;margin:0 auto;padding:18vh 16px 40px}main.narrow h1{
 table.t{width:100%;border-collapse:collapse;font-size:14px}
 .t th{text-align:left;font-size:12px;font-weight:600;color:var(--mute);padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--bg)}.t th a{color:inherit;text-decoration:none}.t th a:hover{color:var(--text)}.t th .arrow{font-size:10px}
 .t td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}.t tbody tr:last-child td{border-bottom:0}.t tbody tr:hover td{background:var(--chip)}
+.t .google-status{white-space:normal;min-width:20rem;max-width:40rem;vertical-align:top}
 .t .num{text-align:right;font-variant-numeric:tabular-nums}.t .sub{font-size:12px;color:var(--mute)}.t .sub.link{color:var(--brand);text-decoration:none}
 .t .first{position:sticky;left:0;background:var(--card);z-index:1}.t th:first-child{position:sticky;left:0;z-index:2}.t tbody tr:hover td.first{background:var(--chip)}
 .kname{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-size:13px;text-decoration:none}.kname:hover{text-decoration:underline}

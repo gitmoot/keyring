@@ -43,7 +43,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{if .GoogleAccounts}}<h2>Host Google accounts</h2>
 <p class="hint">Managed on the keyring host with gcloud, not stored keys. Status is from the last token check, not a live permission test. Manage each service's grants under Agents; signing in grants no agent access.</p>
 <div class="tablewrap"><table class="t"><thead><tr><th>Binding</th><th>Google account</th><th>Services</th><th>Credential status</th><th>Token expires (UTC)</th></tr></thead><tbody>
-{{range .GoogleAccounts}}<tr><td>{{.Name}}</td><td>{{.Account}}</td><td>{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</td><td>{{.Status}}
+{{range .GoogleAccounts}}<tr><td>{{.Name}}</td><td>{{.Account}}</td><td>{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</td><td class="google-status">{{.Status}}
 {{if .HistoryUnavailable}}<p class="error">Protected renewal history is unavailable. Inspect host storage; new failures may not survive restart.</p>{{end}}
 {{with .LastSuccess}}<p class="hint">Last successful renewal (UTC): {{.}}</p>{{end}}
 {{if .History}}<details><summary>Recent renewal incidents ({{len .History}})</summary>

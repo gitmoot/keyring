@@ -371,19 +371,104 @@ including command descendants, bounded output, and redacted failures. Tokens
 are cached only until their verified expiry, with early renewal. Callers wait for
 that renewal rather than continuing with the old token; this matches OAuth mode.
 An in-flight renewal remains single-flight across configuration reloads, including
-removing and re-adding the same binding. A failed
-renewal fails closed (502), with a 10-second retry delay; it never uses another
-account or a stale token. An upstream 401 invalidates only the token used and
-is returned **without replay**, including POST/PATCH writes. An unavailable
-login must be repaired by signing in again on the host. Host logout alone
-does not erase an already minted in-memory access token: revoke the role first
-to stop new proxy calls immediately, then perform owner-approved logout and
-remove/reload the host binding. Historical audit records remain.
+removing and re-adding the same binding. A failed renewal fails closed (502), with
+the existing 10-second error-cache delay; **no background retry or diagnostic
+probe runs**. It never uses another account or a stale token. An upstream 401
+invalidates only the token used and is returned **without replay**, including
+POST/PATCH writes. Only a confirmed reauthentication requirement asks the owner
+to sign in; runtime, network and unknown failures must not be treated as login
+problems. Host logout alone does not erase an already minted in-memory access
+token: revoke the role first to stop new proxy calls immediately, then perform
+owner-approved logout and remove/reload the host binding. Historical audit
+records remain.
 
 Drivekey's explicit relay-profile support is tracked in
 [drivekey#14](https://github.com/jerryfane/drivekey/issues/14).
 Provider support alone is not proof of live two-account or Shared Drive access;
 complete that acceptance with owner-authorized fixtures and readback.
+
+#### Google renewal diagnosis and recovery
+
+A failed renewal retains the existing HTTP **502 / text/plain** response with
+fixed, safe wording. Its machine-readable contract is exactly:
+
+- `X-Keyring-Google-Cause`
+- `X-Keyring-Google-Stage`: `configuration`, `command_start`, `command`, or
+  `token_validation`
+- `X-Keyring-Google-Recovery`
+
+| Cause | Recovery | Next action |
+|---|---|---|
+| `reauth_required` | `owner_reauth` | Owner signs in to the affected account only. This does not establish a Workspace-policy cause. |
+| `credentials_invalid` | `owner_review_credentials` | Review the rejected, expired, revoked or mismatched credential before choosing a repair. |
+| `permission_denied` | `repair_host` | Inspect service-user access to the private configuration/runtime. |
+| `configuration_error` | `repair_host` | Repair the existing private/default configuration. |
+| `runtime_unavailable` | `repair_host` | Repair the installed executable or Python/SDK runtime. |
+| `network_error` | `check_connectivity` | Inspect connectivity/TLS, not a new login. |
+| `provider_error` | `inspect_provider` | Inspect the provider/token-validation failure, not a new login. |
+| `timeout` | `inspect_host`, or `check_connectivity` at `token_validation` | Inspect the recorded stage's time-bound failure. |
+| `output_limit` | `repair_host` | Inspect the installed command's excessive output. |
+| `unknown` | `inspect_host` | Use the protected incident record; sign-in is not established as the remedy. |
+
+Only the exact `reauth_required` + `owner_reauth` pair may prescribe sign-in.
+Missing, invalid or inconsistent fields must never do so. No account identity,
+email, raw error text, URL, code or token is included in these headers. Keyring
+strips all three reserved headers, case-insensitively, from **every forwarded
+upstream response**, regardless of service authentication or HTTP status.
+
+The owner dashboard's **Host Google accounts** table shows the last diagnosis and
+recent incident/recovery history; opening it does not run gcloud. Agents receive
+only the diagnosis for a request their role is already authorized to make.
+`google-renewals.json`, beside the host's key store, is written atomically at mode
+0600 after each actual renewal attempt. It retains at most **64 complete account
+bindings**, with **8 incidents per binding**; loading is limited to **1 MiB**.
+Changing an account behind a reused label does not expose the old binding's
+history. An insecure, oversized or corrupt history is not read or overwritten;
+the owner dashboard warns if persistence is unavailable.
+
+Records contain binding labels, a binding fingerprint, UTC first/last failure
+and last-success times, fixed category/stage/evidence codes, exit and bound flags
+when applicable, and recovery outcomes. Repeated identical failures update the
+same incident; a changed diagnosis preserves the prior one. A successfully
+validated renewal closes the active incident without deleting it. Raw command
+stdout/stderr, credentials, auth URLs/codes, environments and token-info request
+URLs are never retained. SDK/runtime versions are not inferred from error text;
+use the host deployment record when available. No version or extra token command
+is issued to obtain a diagnosis.
+
+For **confirmed reauthentication only**, reuse the existing trusted wrapper,
+service user, private directory and default configuration. For example, on a Mac
+installed as `_keyring`, with the business binding below (use that binding's
+actual configured email):
+
+```sh
+(cd / && sudo -u _keyring /usr/bin/env -i \
+  PATH=/usr/local/libexec:/usr/bin:/bin \
+  HOME='/Library/Application Support/keyring/google/business' \
+  CLOUDSDK_CONFIG='/Library/Application Support/keyring/google/business' \
+  CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true \
+  CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+  CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+  CLOUDSDK_PYTHON_SITEPACKAGES=0 LANG=C.UTF-8 \
+  /bin/sh -c 'set -eu; cd "$CLOUDSDK_CONFIG"; test -f configurations/config_default;
+    /usr/local/libexec/keyring-gcloud auth login business@example.com \
+      --account=business@example.com --configuration=default \
+      --enable-gdrive-access --no-launch-browser --force --no-activate')
+```
+
+The initial `cd /` is **before sudo**, avoiding inaccessible-working-directory
+warnings. `--force` starts fresh authorization; `--no-activate` preserves the
+configured active account and project. Verify these flags against the installed
+SDK before using them. Keep Google's URL and verification code in the owner's
+Mac terminal/browser, never in chat or an incident record. Do not delete
+credentials, change projects/grants, alter Google policy or start another
+account's login as a repair. Reauthentication may recur; this feature does not
+bypass Google consent or guarantee unattended renewal.
+
+Provider/consumer integration and its exact contract are tracked in
+[keyring#68](https://github.com/gitmoot/keyring/issues/68) and
+[drivekey#18](https://github.com/jerryfane/drivekey/issues/18).
+
 
 
 ### Consent links (off by default)
