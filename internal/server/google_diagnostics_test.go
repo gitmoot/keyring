@@ -430,3 +430,42 @@ func TestGoogleUnsafeHistoryIsNotReadOrOverwritten(t *testing.T) {
 		})
 	}
 }
+
+func TestGoogleAccountNameHistoryBoundary(t *testing.T) {
+	for _, length := range []int{129, 128} {
+		t.Run(fmt.Sprintf("length_%d", length), func(t *testing.T) {
+			h, _, dirs, _, _ := googleFixture(t)
+			cfg := h.Config()
+			name := strings.Repeat("a", length)
+			cfg.GoogleAccounts[name] = cfg.GoogleAccounts["personal"]
+			delete(cfg.GoogleAccounts, "personal")
+			service := cfg.Services["personal"]
+			service.GoogleAccount = name
+			cfg.Services["personal"] = service
+			if length == 129 {
+				if err := cfg.Validate(); err == nil {
+					t.Fatal("accepted an account name whose incidents cannot be retained")
+				}
+				return
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("rejected supported boundary name: %v", err)
+			}
+			h.Swap(cfg, nil)
+			path := filepath.Join(t.TempDir(), "google-renewals.json")
+			openGoogleHistoryForTest(t, h, path)
+			if err := os.WriteFile(filepath.Join(dirs["personal"], "fail"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			response := call(h, "GET", "/personal/files", "role-personal", nil)
+			if response.Code != 502 || response.Header().Get("X-Keyring-Google-Cause") != "unknown" {
+				t.Fatalf("boundary account did not use the renewal failure path: %d", response.Code)
+			}
+			records, _ := readGoogleHistoryForTest(t, path)
+			incidents := records[name].Incidents
+			if len(incidents) != 1 || incidents[0].Outcome != "active" || incidents[0].Failure.Category != "unknown" {
+				t.Fatalf("accepted boundary account lost its incident: %+v", incidents)
+			}
+		})
+	}
+}

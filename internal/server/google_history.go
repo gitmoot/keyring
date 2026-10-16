@@ -70,7 +70,7 @@ func googleBindingID(a policy.GoogleAccount) string {
 }
 
 func historyLabel(label string) bool {
-	if len(label) == 0 || len(label) > 128 {
+	if len(label) == 0 || len(label) > policy.GoogleAccountNameLimit {
 		return false
 	}
 	for _, c := range label {

@@ -422,6 +422,9 @@ only the diagnosis for a request their role is already authorized to make.
 `google-renewals.json`, beside the host's key store, is written atomically at mode
 0600 after each actual renewal attempt. It retains at most **64 complete account
 bindings**, with **8 incidents per binding**; loading is limited to **1 MiB**.
+Google account binding names are limited to **128 characters**. Configuration
+validation rejects longer names rather than accepting an account whose history
+cannot be retained.
 Changing an account behind a reused label does not expose the old binding's
 history. An insecure, oversized or corrupt history is not read or overwritten;
 the owner dashboard warns if persistence is unavailable.
