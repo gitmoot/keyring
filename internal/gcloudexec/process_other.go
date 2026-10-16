@@ -1,12 +1,12 @@
 //go:build !linux && !darwin
 
-package server
+package gcloudexec
 
 import (
 	"errors"
 	"os/exec"
 )
 
-func boundGoogleCommand(cmd *exec.Cmd) (func(), error) {
+func Bound(cmd *exec.Cmd) (func(), error) {
 	return nil, errors.New("gcloud credentials require a Linux or macOS keyring host")
 }

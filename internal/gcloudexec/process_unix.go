@@ -1,6 +1,6 @@
 //go:build linux || darwin
 
-package server
+package gcloudexec
 
 import (
 	"errors"
@@ -9,8 +9,8 @@ import (
 	"syscall"
 )
 
-// Kill the entire command group on timeout, including a gcloud Python child.
-func boundGoogleCommand(cmd *exec.Cmd) (func(), error) {
+// Bound kills the entire command group on timeout, including a Python child.
+func Bound(cmd *exec.Cmd) (func(), error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	kill := func() error {
 		if cmd.Process == nil {

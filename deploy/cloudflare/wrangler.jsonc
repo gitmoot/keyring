@@ -23,6 +23,9 @@
     // The services every new keyring starts with, and the router's access.
     "SERVICES_TEMPLATE": {
       "services": {
+        // Opt in to fixed per-person Drive/upload/Sheets provisioning after
+        // the router role is created. No agent grant to the consent service.
+        "drive": { "auth": "gcloud-login", "google_account": "me" },
         "gmail": {
           "base": "https://gmail.googleapis.com",
           "key": "GMAIL_REFRESH_TOKEN",

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
@@ -44,6 +45,8 @@ type State struct {
 	Services     map[string]policy.Service `json:"services"`
 	Roles        map[string]policy.Role    `json:"roles"`
 	Keys         map[string]string         `json:"keys"`
+	// Google is an immutable opaque snapshot, not a key any service can send.
+	Google *googlelogin.Snapshot `json:"google,omitempty"`
 }
 
 // clone returns a deep enough copy to change without touching s.
@@ -74,6 +77,12 @@ func (s *State) clone() *State {
 // fills the field Validate requires; the instance writes its own audit.
 // container sets policy.Config.ContainerMode.
 func (s *State) config(auditName string, container bool) (*policy.Config, error) {
+	if s.Google != nil && !container {
+		return nil, errors.New("managed Google login requires container mode")
+	}
+	if err := s.Google.Validate(); err != nil {
+		return nil, err
+	}
 	// Round-trip through JSON so the config never shares maps or pointers
 	// with the state, and every parsed field is rebuilt by Validate.
 	raw, err := json.Marshal(struct {
@@ -93,6 +102,9 @@ func (s *State) config(auditName string, container bool) (*policy.Config, error)
 		return nil, err
 	}
 	cfg.ContainerMode = container
+	if s.Google != nil && s.Google.Ready {
+		cfg.GoogleAccounts = map[string]policy.GoogleAccount{"me": s.Google.Binding()}
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}

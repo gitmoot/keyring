@@ -22,6 +22,7 @@ import (
 
 	"github.com/gitmoot/keyring/internal/consent"
 	"github.com/gitmoot/keyring/internal/fileutil"
+	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/server"
 	"github.com/gitmoot/keyring/internal/store"
@@ -63,6 +64,7 @@ type Instance struct {
 	sealed    []byte
 	proxy     *server.Handler
 	consent   *consent.Server
+	google    *googlelogin.Controller // fixed at construction for container mode
 	listeners map[string]*running
 	wiped     chan struct{}
 }
@@ -100,7 +102,11 @@ func New(opt Options) (*Instance, error) {
 	if opt.Log == nil {
 		opt.Log = io.Discard
 	}
-	return &Instance{opt: opt, admin: admin, listeners: map[string]*running{}, wiped: make(chan struct{})}, nil
+	in := &Instance{opt: opt, admin: admin, listeners: map[string]*running{}, wiped: make(chan struct{})}
+	if opt.Container {
+		in.google = googlelogin.New(in.saveGoogle)
+	}
+	return in, nil
 }
 
 // Wiped is closed when the instance was deleted through the API.
@@ -111,6 +117,9 @@ func (in *Instance) Close() {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.closeListeners(nil)
+	if in.google != nil {
+		in.google.Close()
+	}
 }
 
 func (in *Instance) writeAudit(event string, fields map[string]any) {
@@ -256,6 +265,10 @@ func (in *Instance) commit(next *State, key []byte) error {
 	if in.proxy == nil {
 		in.proxy = server.New(cfg, next.Keys, in.opt.Audit)
 		in.consent = consent.New(in.proxy.Config, instanceKeys{in}, in.opt.Audit)
+		if in.google != nil {
+			in.proxy.SetGoogleCommand(in.google.Token)
+			in.consent.SetGoogle(in.google)
+		}
 	}
 	opened, err := in.bind(cfg)
 	if err != nil {
@@ -275,6 +288,9 @@ func (in *Instance) commit(next *State, key []byte) error {
 	}
 	in.state, in.key, in.sealed = next, key, sealed
 	in.proxy.Swap(cfg, next.Keys)
+	if in.google != nil {
+		in.google.SetState(next.Google)
+	}
 	in.serve(cfg, opened)
 	return nil
 }
@@ -335,6 +351,7 @@ func (in *Instance) AdminHandler() http.Handler {
 	mux.HandleFunc("DELETE /consent", in.deleteConsent)
 	mux.HandleFunc("PUT /services/{name}", in.putService)
 	mux.HandleFunc("DELETE /services/{name}", in.deleteService)
+	mux.HandleFunc("POST /google-drive", in.provisionGoogle)
 	mux.HandleFunc("PUT /roles/{name}", in.putRole)
 	mux.HandleFunc("POST /roles/{name}/token", in.newRoleToken)
 	mux.HandleFunc("DELETE /roles/{name}", in.deleteRole)
@@ -496,6 +513,12 @@ func (in *Instance) unlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &httpError{http.StatusForbidden, err.Error()})
 		return
 	}
+	if in.google != nil {
+		if err := in.google.Restore(s.Google); err != nil {
+			writeError(w, badRequest("cannot restore private Google login"))
+			return
+		}
+	}
 	if err := in.commit(s, key); err != nil {
 		writeError(w, err)
 		return
@@ -538,12 +561,26 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 			if why := in.proxy.OAuthFailure(svc.Key); why != "" {
 				failing[name] = why
 			}
+		} else if svc.Auth == policy.AuthGcloud || svc.Auth == policy.AuthGcloudLogin {
+			why, _ := in.proxy.GoogleStatus(svc.GoogleAccount)
+			switch why {
+			case "not configured", "not checked", "renewing", "renewal required", "ready":
+			default:
+				failing[name] = why
+			}
 		}
+	}
+	var googleView *googlelogin.View
+	if in.google != nil {
+		view := in.google.Status()
+		view.Account, view.Project = "", ""
+		googleView = &view
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"unlocked": true, "id": s.ID, "version": s.Version,
 		"listen": s.Listen, "allow_sources": s.AllowSources, "consent": consentView,
 		"services": s.Services, "roles": roles, "keys": keys, "failing": failing,
+		"google": googleView,
 	})
 }
 
@@ -716,6 +753,10 @@ func (in *Instance) putKey(w http.ResponseWriter, r *http.Request) {
 
 func (in *Instance) deleteKey(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if name == "drive" && in.google != nil {
+		in.disconnectGoogle(w, r)
+		return
+	}
 	v, err := in.change(func(s *State) error {
 		if _, ok := s.Keys[name]; !ok {
 			return &httpError{http.StatusNotFound, "no such key"}
@@ -777,6 +818,9 @@ func (in *Instance) wipe(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	in.closeListeners(nil)
+	if in.google != nil {
+		in.google.Close()
+	}
 	// The proxy may still be reading the keys map; only drop references.
 	clear(in.key)
 	in.state, in.key, in.sealed = nil, nil, nil

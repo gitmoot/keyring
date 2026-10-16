@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
@@ -159,46 +160,55 @@ func (w *limitedOutput) Write(p []byte) (int, error) {
 }
 
 func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) (string, time.Duration, error) {
-	info, err := os.Stat(a.ConfigDir)
-	if err != nil || !info.IsDir() {
-		if os.IsPermission(err) {
-			return "", 0, googleFailure("permission_denied", "configuration", "permission_denied")
+	var token string
+	if h.googleCommand != nil {
+		var err error
+		token, err = h.googleCommand(ctx, a)
+		if err != nil {
+			return "", 0, err
 		}
-		return "", 0, googleFailure("configuration_error", "configuration", "configuration_unavailable")
+	} else {
+		info, err := os.Stat(a.ConfigDir)
+		if err != nil || !info.IsDir() {
+			if os.IsPermission(err) {
+				return "", 0, googleFailure("permission_denied", "configuration", "permission_denied")
+			}
+			return "", 0, googleFailure("configuration_error", "configuration", "configuration_unavailable")
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			return "", 0, googleFailure("configuration_error", "configuration", "configuration_not_private")
+		}
+		cmd := exec.CommandContext(ctx, a.Executable, "auth", "print-access-token", a.Account, "--account="+a.Account, "--configuration=default", "--quiet")
+		// Do not inherit proxy variables, CLOUDSDK_AUTH_ACCESS_TOKEN,
+		// impersonation, credential overrides, Python hooks, or an agent's HOME.
+		cmd.Env = []string{
+			"PATH=" + filepath.Dir(a.Executable) + ":/usr/bin:/bin",
+			"HOME=" + a.ConfigDir,
+			"CLOUDSDK_CONFIG=" + a.ConfigDir,
+			"CLOUDSDK_CORE_DISABLE_PROMPTS=1",
+			"CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true",
+			"CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true",
+			"CLOUDSDK_PYTHON_SITEPACKAGES=0",
+			"LANG=C.UTF-8",
+		}
+		cmd.Dir = a.ConfigDir
+		cmd.WaitDelay = time.Second
+		cleanup, err := gcloudexec.Bound(cmd)
+		if err != nil {
+			return "", 0, googleFailure("runtime_unavailable", "command_start", "runtime_start_failed")
+		}
+		defer cleanup()
+		stdout, stderr := &limitedOutput{}, &limitedOutput{}
+		defer func() {
+			clear(stdout.buf.Bytes())
+			clear(stderr.buf.Bytes())
+		}()
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		if err := cmd.Run(); err != nil {
+			return "", 0, classifyGoogleCommand(ctx, err, stderr.buf.Bytes(), stdout.exceeded || stderr.exceeded)
+		}
+		token = strings.TrimSpace(stdout.buf.String())
 	}
-	if info.Mode().Perm()&0077 != 0 {
-		return "", 0, googleFailure("configuration_error", "configuration", "configuration_not_private")
-	}
-	cmd := exec.CommandContext(ctx, a.Executable, "auth", "print-access-token", a.Account, "--account="+a.Account, "--configuration=default", "--quiet")
-	// Do not inherit proxy variables, CLOUDSDK_AUTH_ACCESS_TOKEN,
-	// impersonation, credential overrides, Python hooks, or an agent's HOME.
-	cmd.Env = []string{
-		"PATH=" + filepath.Dir(a.Executable) + ":/usr/bin:/bin",
-		"HOME=" + a.ConfigDir,
-		"CLOUDSDK_CONFIG=" + a.ConfigDir,
-		"CLOUDSDK_CORE_DISABLE_PROMPTS=1",
-		"CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true",
-		"CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true",
-		"CLOUDSDK_PYTHON_SITEPACKAGES=0",
-		"LANG=C.UTF-8",
-	}
-	cmd.Dir = a.ConfigDir
-	cmd.WaitDelay = time.Second
-	cleanup, err := boundGoogleCommand(cmd)
-	if err != nil {
-		return "", 0, googleFailure("runtime_unavailable", "command_start", "runtime_start_failed")
-	}
-	defer cleanup()
-	stdout, stderr := &limitedOutput{}, &limitedOutput{}
-	defer func() {
-		clear(stdout.buf.Bytes())
-		clear(stderr.buf.Bytes())
-	}()
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	if err := cmd.Run(); err != nil {
-		return "", 0, classifyGoogleCommand(ctx, err, stderr.buf.Bytes(), stdout.exceeded || stderr.exceeded)
-	}
-	token := strings.TrimSpace(stdout.buf.String())
 	if !usableAccessToken(token) {
 		return "", 0, googleFailure("unknown", "command", "unusable_token_output")
 	}

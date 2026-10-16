@@ -41,6 +41,8 @@ const (
 	AuthOAuth2 = "oauth2"
 	// AuthGcloud mints a Google token using a root-configured account.
 	AuthGcloud = "gcloud"
+	// AuthGcloudLogin is the container's consent-only Drive connection.
+	AuthGcloudLogin = "gcloud-login"
 	// AuthEgressProxy opens TCP tunnels through a person's own proxy; the
 	// proxy credential stored under Key goes only to that proxy.
 	AuthEgressProxy = "egress-proxy"
@@ -714,11 +716,20 @@ func (c *Config) Validate() error {
 		if svc.Auth == AuthAppStoreConnectSign && name != "appstoreconnect" {
 			return errors.New("app-store-connect-sign requires service name appstoreconnect")
 		}
+		if svc.Auth == AuthGcloudLogin && (!c.ContainerMode || name != "drive") {
+			return errors.New("Google login is only the container drive consent service")
+		}
 		if err := svc.validate(); err != nil {
 			return fmt.Errorf("service %s: %w", name, err)
 		}
 		if svc.Auth == AuthGcloud {
-			if _, ok := c.GoogleAccounts[svc.GoogleAccount]; !ok {
+			if c.ContainerMode {
+				if !containerGoogleService(name, svc) {
+					return fmt.Errorf("service %s: container Google services require the fixed me API routes", name)
+				}
+				// A disconnected container keeps its routes, but has no credential
+				// binding. Requests fail closed until consent finishes.
+			} else if _, ok := c.GoogleAccounts[svc.GoogleAccount]; !ok {
 				return fmt.Errorf("service %s: unknown google_account", name)
 			}
 		}
@@ -850,6 +861,15 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	if s.Auth == AuthGcloudLogin {
+		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
+			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
+			s.AppleAds != nil || s.AppStoreConnect != nil || s.EgressProxy != nil {
+			return errors.New("Google login requires only the fixed me account and no proxy settings")
+		}
+		s.base = nil
+		return nil
+	}
 	if s.GoogleAccount != "" && s.Auth != AuthGcloud {
 		return errors.New("google_account requires auth gcloud")
 	}

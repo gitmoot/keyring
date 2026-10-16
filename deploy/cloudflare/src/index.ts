@@ -121,7 +121,7 @@ export default {
 				return stub(env, id).fetch(internal(request, "/_pages/connect/callback" + url.search));
 			}
 			const id = parts[2];
-			if (!ID.test(id ?? "") || parts[3] !== "c") return page(404, "Not found.");
+			if (!ID.test(id ?? "") || !["c", "g"].includes(parts[3] ?? "")) return page(404, "Not found.");
 			return stub(env, id).fetch(internal(request, "/_pages/connect/" + parts.slice(3).join("/") + url.search));
 		}
 		// Everything else is for the router only.
@@ -192,6 +192,7 @@ async function admin(request: Request, env: Env, rest: string[]): Promise<Respon
 	if (op === "" && m === "DELETE") out = await s.remove();
 	else if (op === "links" && m === "POST") out = await s.link(await request.text());
 	else if (op === "services" && m === "GET") out = await s.services();
+	else if (op === "google-drive" && m === "POST") out = await s.provisionGoogle(await request.text());
 	else if (rest[1] === "services" && rest.length === 3 && m === "PUT") out = await s.putService(rest[2], await request.text());
 	else if (rest[1] === "keys" && rest.length === 3 && m === "DELETE") out = await s.deleteKey(rest[2]);
 	else if (op === "role-token" && m === "POST") out = await s.rotateRoleToken();
@@ -212,7 +213,8 @@ interface Reply {
 	expires_at?: string;
 	unlocked?: boolean;
 	keys?: string[];
-	services?: Record<string, { key: string }>;
+	services?: Record<string, { key: string; auth?: string; google_account?: string }>;
+	google?: { phase: string; busy: boolean; error?: string };
 	failing?: Record<string, string>;
 	roles?: Record<string, { access?: Record<string, unknown>; expires?: string }>;
 }
@@ -448,6 +450,9 @@ export class KeyringInstance extends DurableObject<Env> {
 				await this.adminJSON(m, "PUT", `/services/${name}`, svc);
 			}
 			const role = await this.adminJSON(m, "PUT", `/roles/${ROLE}`, { access: template.access });
+			if (template.services.drive?.auth === "gcloud-login") {
+				await this.adminJSON(m, "POST", "/google-drive", {});
+			}
 			await this.pushClientSecrets(m);
 			await this.sync(m);
 			if (!role.token) throw new KeyringError(502, "the keyring returned no role token");
@@ -483,12 +488,31 @@ export class KeyringInstance extends DurableObject<Env> {
 		});
 	}
 
+	async provisionGoogle(body: string): Promise<Result> {
+		return this.withInstance(async (m) => {
+			const r = await this.port(PORT_ADMIN).fetch("http://keyring/google-drive", {
+				method: "POST",
+				headers: { authorization: "Bearer " + m.adminToken, "content-type": "application/json" },
+				body,
+				signal: AbortSignal.timeout(30_000),
+			});
+			const out = await reply(r);
+			if (!r.ok) return { status: r.status, error: out.error ?? "Google provisioning refused" };
+			await this.sync(m);
+			return { body: { version: out.version } };
+		});
+	}
+
 	async services(): Promise<Result> {
 		return this.withInstance(async (m) => {
 			const s = await this.adminJSON(m, "GET", "/status");
 			const keys = new Set<string>(s.keys ?? []);
 			const list = Object.entries(s.services ?? {})
-				.map(([name, svc]) => ({ name, connected: keys.has(svc.key), failing: s.failing?.[name] ?? null }))
+				.map(([name, svc]) => {
+					const google = svc.google_account === "me" && (svc.auth === "gcloud" || svc.auth === "gcloud-login");
+					return { name, connected: google ? s.google?.phase === "connected" : keys.has(svc.key),
+						failing: google ? s.google?.error ?? s.failing?.[name] ?? (s.google?.phase === "connected" ? null : "Google connection is not ready") : s.failing?.[name] ?? null };
+				})
 				.sort((a, b) => a.name.localeCompare(b.name));
 			return { body: { services: list } };
 		});
@@ -580,9 +604,13 @@ export class KeyringInstance extends DurableObject<Env> {
 				const path = "/" + url.pathname.slice("/_proxy/".length) + url.search;
 				const headers = new Headers(request.headers);
 				headers.delete(CALLER_HEADER);
-				return await this.port(PORT_PROXY).fetch("http://keyring" + path, {
+				const response = await this.port(PORT_PROXY).fetch("http://keyring" + path, {
 					method: request.method, headers, body: request.body, redirect: "manual",
 				});
+				// A Google token refresh can change the encrypted SDK state.
+				// Do not acknowledge the proxy result before preserving it.
+				await this.sync(m);
+				return response;
 			} catch (e) {
 				const f = failure(e);
 				return json(f.status, { error: f.error });
@@ -606,8 +634,13 @@ export class KeyringInstance extends DurableObject<Env> {
 					method: request.method, headers: request.headers, body: request.body, redirect: "manual",
 				});
 				// A link or callback may have stored a key.
-				await this.sync(m).catch(() => {});
+				await this.sync(m);
 				const out = new Response(resp.body, resp);
+				const googlePrefix = `${this.env.PUBLIC_BASE}/connect/g/`;
+				const location = out.headers.get("location");
+				if (resp.status === 303 && location?.startsWith(googlePrefix)) {
+					out.headers.set("location", `${this.env.PUBLIC_BASE}/connect/${m.id}/g/${location.slice(googlePrefix.length)}`);
+				}
 				if (resp.status === 303 && path.startsWith("/connect/c/")) {
 					// Off to the provider: the shared callback URL needs to find
 					// this keyring again. The keyring still checks its own state
@@ -658,7 +691,19 @@ export class KeyringInstance extends DurableObject<Env> {
 		const last = Math.max(this.lastUsed, stored);
 		const idle = this.inFlight === 0 && Date.now() - last > IDLE_MS && openUntil < Date.now();
 		if (idle) {
-			await this.sync(m).catch(() => {});
+			// Preserve background login/project changes even when its browser
+			// vanished. A failed save must never lead to discarding credentials.
+			try {
+				const status = await this.adminJSON(m, "GET", "/status");
+				await this.sync(m);
+				if (status.google?.busy) {
+					await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+					return;
+				}
+			} catch {
+				if (!this.deleted) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+				return;
+			}
 			console.log(`keyring container stopped (idle) (${m.id})`);
 			c.signal(15);
 			this.ready = null;

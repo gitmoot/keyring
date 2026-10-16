@@ -66,8 +66,16 @@ type Handler struct {
 	oauth         oauthCache
 	google        googleCache
 	googleHistory googleHistory
+	// Set before serving: the container seals SDK changes before token use.
+	googleCommand func(context.Context, policy.GoogleAccount) (string, error)
 
 	auditMu sync.Mutex
+}
+
+// SetGoogleCommand installs the container credential boundary before serving.
+// File-mode hosts keep the existing isolated subprocess path.
+func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAccount) (string, error)) {
+	h.googleCommand = command
 }
 
 type snapshot struct {
@@ -321,6 +329,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "sign-only service cannot proxy requests")
 		return
 	}
+	if svc.Auth == policy.AuthGcloudLogin {
+		fail(http.StatusForbidden, "Google login is a consent-only service")
+		return
+	}
+	if snap.config.ContainerMode && svc.Auth == policy.AuthGcloud {
+		var prefixes []string
+		methodAllowed := r.Method == http.MethodGet || r.Method == http.MethodPost
+		switch service {
+		case "google-me-drive":
+			prefixes = []string{"/about", "/files", "/changes", "/drives"}
+		case "google-me-upload":
+			prefixes = []string{"/files"}
+			methodAllowed = r.Method == http.MethodPost || r.Method == http.MethodPatch
+		case "google-me-sheets":
+			prefixes = []string{"/spreadsheets"}
+		}
+		pathAllowed := false
+		for _, prefix := range prefixes {
+			if rest == prefix || strings.HasPrefix(rest, prefix+"/") {
+				pathAllowed = true
+				break
+			}
+		}
+		if !methodAllowed || !pathAllowed {
+			fail(http.StatusForbidden, "request is outside the container Google API boundary")
+			return
+		}
+		if _, connected := snap.config.GoogleAccounts[svc.GoogleAccount]; !connected {
+			fail(http.StatusServiceUnavailable, "Google account is not connected; use its private connection page")
+			return
+		}
+		for _, segment := range strings.Split(rest, "/") {
+			if segment == "permissions" {
+				fail(http.StatusForbidden, "Google permission-management endpoints are not allowed")
+				return
+			}
+		}
+		if service == "google-me-upload" {
+			const uploadLimit = 17 << 20
+			if r.ContentLength > uploadLimit {
+				fail(http.StatusRequestEntityTooLarge, "Google upload exceeds the request limit")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, uploadLimit)
+		}
+	}
 	// Other services keep forwarding every path, /_tunnel included.
 	tunnel := svc.Auth == policy.AuthEgressProxy
 	if tunnel && rest != TunnelPath {
@@ -416,6 +470,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(GoogleStageHeader, failure.Stage)
 			w.Header().Set(GoogleRecoveryHeader, failure.Recovery())
 			fail(http.StatusBadGateway, failure.Error())
+			return
+		}
+		if snap.config.ContainerMode && h.snap.Load().config.GoogleAccounts[svc.GoogleAccount] != account {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "Google connection changed during renewal")
 			return
 		}
 		upstreamKey = token
@@ -517,6 +576,9 @@ var errBadQuery = errors.New("malformed query string")
 func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, rawQuery string, header http.Header, body io.Reader, length int64) (*http.Request, error) {
 	if svc.SignOnly() {
 		return nil, errors.New("sign-only service cannot proxy requests")
+	}
+	if svc.Auth == policy.AuthGcloudLogin {
+		return nil, errors.New("Google login is a consent-only service")
 	}
 	target := svc.BaseURL()
 	target.Path = strings.TrimSuffix(target.Path, "/") + rest
