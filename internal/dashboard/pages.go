@@ -43,7 +43,16 @@ var pages = template.Must(template.New("pages").Parse(`
 {{if .GoogleAccounts}}<h2>Host Google accounts</h2>
 <p class="hint">Managed on the keyring host with gcloud, not stored keys. Status is from the last token check, not a live permission test. Manage each service's grants under Agents; signing in grants no agent access.</p>
 <div class="tablewrap"><table class="t"><thead><tr><th>Binding</th><th>Google account</th><th>Services</th><th>Credential status</th><th>Token expires (UTC)</th></tr></thead><tbody>
-{{range .GoogleAccounts}}<tr><td>{{.Name}}</td><td>{{.Account}}</td><td>{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</td><td>{{.Status}}</td><td>{{.Expires}}</td></tr>{{end}}
+{{range .GoogleAccounts}}<tr><td>{{.Name}}</td><td>{{.Account}}</td><td>{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</td><td class="google-status">{{.Status}}
+{{if .HistoryUnavailable}}<p class="error">Protected renewal history is unavailable. Inspect host storage; new failures may not survive restart.</p>{{end}}
+{{with .LastSuccess}}<p class="hint">Last successful renewal (UTC): {{.}}</p>{{end}}
+{{if .History}}<details><summary>Recent renewal incidents ({{len .History}})</summary>
+{{range .History}}<p><strong>{{.Outcome}}</strong> — {{.Failure.Category}} / {{.Failure.Stage}}<br>
+First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure: {{.LastFailure.UTC.Format "2006-01-02T15:04:05Z"}}; attempts: {{.Attempts}}.
+{{if not .RecoveredAt.IsZero}}Recovered: {{.RecoveredAt.UTC.Format "2006-01-02T15:04:05Z"}}.{{end}}<br>
+{{.Failure.Error}} Action: <code>{{.Failure.Recovery}}</code>.
+{{with .Failure.Evidence}} Evidence: {{range $i, $e := .}}{{if $i}}, {{end}}{{$e}}{{end}}.{{end}}</p>{{end}}
+</details>{{end}}</td><td>{{.Expires}}</td></tr>{{end}}
 </tbody></table></div>{{end}}
 {{template "bottom"}}{{end}}
 

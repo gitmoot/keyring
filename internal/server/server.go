@@ -63,8 +63,9 @@ type Handler struct {
 
 	usage usageBook
 
-	oauth  oauthCache
-	google googleCache
+	oauth         oauthCache
+	google        googleCache
+	googleHistory googleHistory
 
 	auditMu sync.Mutex
 }
@@ -404,10 +405,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header := outboundHeader(r.Header, svc)
 	if svc.Auth == policy.AuthGcloud {
 		account := snap.config.GoogleAccounts[svc.GoogleAccount]
-		token, err := h.googleToken(r.Context(), account)
+		token, err := h.googleToken(r.Context(), svc.GoogleAccount, account)
 		if err != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
-			fail(http.StatusBadGateway, err.Error())
+			var failure *GoogleFailure
+			if !errors.As(err, &failure) || !failure.valid() {
+				failure = googleFailure("unknown", "command")
+			}
+			w.Header().Set(GoogleCauseHeader, failure.Category)
+			w.Header().Set(GoogleStageHeader, failure.Stage)
+			w.Header().Set(GoogleRecoveryHeader, failure.Recovery())
+			fail(http.StatusBadGateway, failure.Error())
 			return
 		}
 		upstreamKey = token
@@ -462,7 +470,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	forms := secretForms(append([]string{upstreamKey}, alsoRedact...)...)
 	for name, values := range resp.Header {
-		if hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
+		if reservedGoogleHeader(name) || hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
 			continue
 		}
 		for _, v := range values {
@@ -582,7 +590,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	var googleAccount policy.GoogleAccount
 	if svc.Auth == policy.AuthGcloud {
 		googleAccount = h.snap.Load().config.GoogleAccounts[svc.GoogleAccount]
-		token, err := h.googleToken(ctx, googleAccount)
+		token, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
 		if err != nil {
 			return 0, err
 		}

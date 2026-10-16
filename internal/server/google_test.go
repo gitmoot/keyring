@@ -207,7 +207,7 @@ func TestGoogleCommandOutputAndTimeout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dirs["personal"], "token"), bytes.Repeat([]byte("x"), 20000), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 {
+	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || w.Header().Get("X-Keyring-Google-Cause") != "output_limit" || w.Header().Get("X-Keyring-Google-Recovery") != "repair_host" {
 		t.Fatalf("oversized command output: %d", w.Code)
 	}
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0700); err != nil {
@@ -215,14 +215,14 @@ func TestGoogleCommandOutputAndTimeout(t *testing.T) {
 	}
 	clock = clock.Add(11 * time.Second)
 	start := time.Now()
-	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || time.Since(start) > 35*time.Second {
+	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || w.Header().Get("X-Keyring-Google-Cause") != "timeout" || w.Header().Get("X-Keyring-Google-Stage") != "command" || time.Since(start) > 35*time.Second {
 		t.Fatal("command process group was not bounded")
 	}
 	clock = clock.Add(11 * time.Second)
 	if err := os.Chmod(dirs["personal"], 0755); err != nil {
 		t.Fatal(err)
 	}
-	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || !strings.Contains(w.Body.String(), "private configuration") {
+	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 502 || w.Header().Get("X-Keyring-Google-Cause") != "configuration_error" {
 		t.Fatal("public gcloud directory was accepted")
 	}
 }

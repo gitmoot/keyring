@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// GoogleAccountNameLimit bounds labels stored in protected renewal history.
+const GoogleAccountNameLimit = 128
+
 // GoogleAccount binds one host-side gcloud login. All fields participate in
 // the credential cache identity. It is configured only in root-owned rules.
 type GoogleAccount struct {
@@ -23,8 +26,8 @@ func (c *Config) validateGoogleAccounts() error {
 	}
 	dirs := map[string]bool{}
 	for name, a := range c.GoogleAccounts {
-		if !serviceName.MatchString(name) {
-			return errors.New("google_accounts names must use lowercase letters, digits and -")
+		if len(name) > GoogleAccountNameLimit || !serviceName.MatchString(name) {
+			return fmt.Errorf("google_accounts names must use lowercase letters, digits and - and be at most %d characters", GoogleAccountNameLimit)
 		}
 		for _, p := range []string{a.Executable, a.ConfigDir} {
 			if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "\x00\r\n") {
