@@ -783,35 +783,77 @@ type pageData struct {
 	// Proxy: an egress-proxy form; it asks for the address (and the type)
 	// when the service's config leaves them to the person.
 	Proxy, ProxyAsksAddress, ProxyAsksType bool
+	// Status is the HTTP status, set by render: it picks how a message
+	// looks (done, or a problem).
+	Status int
 }
 
+// page is plain HTML and inline CSS: the pages' CSP allows inline styles
+// only, no scripts, images or fonts. The look follows the site that sends
+// people here (system font, light grey, thin lines, rounded buttons); it
+// names no product, since one keyring host can serve several.
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Connect{{if .Service}} {{.Service}}{{end}}</title>
-<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}input,button{font:inherit;padding:.5rem;width:100%;box-sizing:border-box;margin:.5rem 0}</style>
+<meta name="robots" content="noindex">
+<title>{{if .Label}}Connect {{.Label}}{{else if .Service}}Connect {{.Service}}{{else}}Private connection page{{end}}</title>
+<style>
+:root{--bg:#f7f8fa;--card:#fff;--ink:#16181d;--mut:#5f6670;--line:#e6e9ee;--blue:#2466e0;--green:#1f7d5a;--red:#b42318;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Helvetica Neue",Arial,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:400 17px/1.5 var(--font);-webkit-font-smoothing:antialiased;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:28px 18px 40px}
+.top{width:100%;max-width:480px;display:flex;align-items:center;gap:10px;font:500 11px/1 var(--font);letter-spacing:.22em;text-transform:uppercase;color:var(--mut)}
+.top svg{flex:none}
+.card{width:100%;max-width:480px;margin-top:22px;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:32px 28px 30px;box-shadow:0 1px 2px rgba(22,24,29,.04),0 20px 40px -24px rgba(22,24,29,.18)}
+h1{font:500 32px/1.12 var(--font);letter-spacing:-.03em}
+.for{margin-top:10px;color:var(--mut)}
+.for b{color:var(--ink);font-weight:600}
+p{margin-top:16px}
+.msg{display:flex;gap:12px;align-items:flex-start;margin-top:20px;padding:16px 18px;border-radius:14px;background:var(--bg);border:1px solid var(--line)}
+.msg svg{flex:none;margin-top:2px}
+.msg.ok{background:#eefaf4;border-color:#c9ebd9;color:#14513b}
+.msg.err{background:#fef3f2;border-color:#f8d4d0;color:#7a271a}
+.msg.only{margin-top:0}
+form{margin-top:22px}
+label{display:block;font:500 15px/1.3 var(--font);margin:18px 0 8px}
+input,select{width:100%;font:400 17px/1.3 var(--font);color:var(--ink);background:var(--card);border:1px solid #d6dae1;border-radius:14px;padding:15px 16px;outline:none;-webkit-appearance:none;appearance:none}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--mut) 50%),linear-gradient(135deg,var(--mut) 50%,transparent 50%);background-position:calc(100% - 22px) 50%,calc(100% - 16px) 50%;background-size:6px 6px;background-repeat:no-repeat;padding-right:42px}
+input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,102,224,.18)}
+.btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin-top:22px;font:500 17px/1 var(--font);color:#fff;background:var(--ink);border:0;border-radius:999px;padding:18px 24px;cursor:pointer;box-shadow:0 8px 20px -8px rgba(22,24,29,.45)}
+.btn:hover{background:#000}
+.btn:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+.hint{margin-top:10px;font-size:14px;color:var(--mut)}
+.note{display:flex;gap:10px;align-items:flex-start;margin-top:24px;padding-top:20px;border-top:1px solid var(--line);font-size:14px;color:var(--mut)}
+.note svg{flex:none;margin-top:1px}
+.foot{max-width:480px;margin-top:22px;text-align:center;font-size:13px;color:var(--mut)}
+@media (max-width:480px){body{padding:20px 14px 32px}.card{padding:26px 20px 24px;border-radius:20px}h1{font-size:27px}}
+</style>
 </head><body>
-{{if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
-{{if .Label}}<p>For: <strong>{{.Label}}</strong></p>{{end}}
-{{if .Message}}<p>{{.Message}}</p>{{end}}
+<div class="top"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Private connection page</div>
+<main class="card">
+{{if .Label}}<h1>Connect {{.Label}}</h1>{{else if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
+{{if .Message}}<div class="msg{{if ge .Status 400}} err{{else if not .Form}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if ge .Status 400}}alert{{else}}status{{end}}">
+{{if ge .Status 400}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not .Form}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
 {{if .Form}}<form method="post" autocomplete="off">
-{{if .SignIn}}<p>You will sign in with the provider. Your password is never seen here.</p>
-<button type="submit">Sign in and connect</button>
-{{else if .Proxy}}<p>Your proxy's details. They are stored on the keyring and never shown again; the password is only ever sent to the proxy address saved with it.</p>
-{{if .ProxyAsksType}}<label>Type <select name="type"><option value="http-connect">HTTP</option><option value="socks5">SOCKS5</option></select></label>{{end}}
-{{if .ProxyAsksAddress}}<input type="password" name="proxy" required autocomplete="off" spellcheck="false" placeholder="username:password@host:port" aria-label="Proxy URL or username:password@host:port">
-<p><small>Paste the whole proxy. An optional http://, https:// or socks5:// prefix selects its type. Credentials are required. Passwords may contain @ and :; paste them literally, not URL-encoded.</small></p>
-{{else}}<input name="username" required autocomplete="off" spellcheck="false" placeholder="username" aria-label="Proxy username">
-<input type="password" name="password" autocomplete="off" spellcheck="false" placeholder="password" aria-label="Proxy password">{{end}}
-<button type="submit">Save</button>
-{{else}}<p>Paste the key. It is stored on the keyring and never shown again.</p>
-<input type="password" name="value" required autocomplete="off" spellcheck="false" aria-label="Key">
-<button type="submit">Save</button>
+{{if .SignIn}}<p>You will sign in on the provider's own page. Your password is never seen here.</p>
+<button class="btn" type="submit">Sign in and connect</button>
+{{else if .Proxy}}<p>Your proxy's details are stored only in your own keyring and never shown again. The password is only ever sent to the proxy address saved with it.</p>
+{{if .ProxyAsksType}}<label for="type">Type</label><select id="type" name="type"><option value="http-connect">HTTP</option><option value="socks5">SOCKS5</option></select>{{end}}
+{{if .ProxyAsksAddress}}<label for="proxy">Your proxy</label><input id="proxy" type="password" name="proxy" required autocomplete="off" spellcheck="false" placeholder="username:password@host:port">
+<p class="hint">Paste the whole proxy, as your provider gave it. An optional http://, https:// or socks5:// at the start sets its type. Username and password are needed. Passwords may contain @ and :, paste them as they are.</p>
+{{else}}<label for="username">Username</label><input id="username" name="username" required autocomplete="off" spellcheck="false">
+<label for="password">Password</label><input id="password" type="password" name="password" autocomplete="off" spellcheck="false">{{end}}
+<button class="btn" type="submit">Save</button>
+{{else}}<p>Paste the key. It is stored only in your own keyring and never shown again.</p>
+<label for="value">Key</label><input id="value" type="password" name="value" required autocomplete="off" spellcheck="false">
+<button class="btn" type="submit">Save</button>
 {{end}}</form>
-<p><small>This link works once and expires soon. Do not forward it.</small></p>{{end}}
+<div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>This link works once and expires soon. Don't forward it to anyone.</span></div>{{end}}
+</main>
+<p class="foot">Never type a password into the chat. Only on a page like this one.</p>
 </body></html>
 `))
 
 func render(w http.ResponseWriter, status int, data pageData) {
+	data.Status = status
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = page.Execute(w, data)
