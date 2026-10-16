@@ -320,10 +320,10 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 	}
 	if !linkable(svc) {
 		apiError(w, http.StatusBadRequest, "this service cannot be connected by a link (an oauth2 service needs auth_url; signing keys are set by the owner)")
-		if svc.Auth == policy.AuthGcloudLogin && s.google == nil {
-			apiError(w, http.StatusServiceUnavailable, "Google connection is unavailable")
-			return
-		}
+		return
+	}
+	if svc.Auth == policy.AuthGcloudLogin && s.google == nil {
+		apiError(w, http.StatusServiceUnavailable, "Google connection is unavailable")
 		return
 	}
 	ttl := DefaultLinkTTL

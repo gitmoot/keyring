@@ -753,10 +753,6 @@ func (in *Instance) putKey(w http.ResponseWriter, r *http.Request) {
 
 func (in *Instance) deleteKey(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if name == "drive" && in.google != nil {
-		in.disconnectGoogle(w, r)
-		return
-	}
 	v, err := in.change(func(s *State) error {
 		if _, ok := s.Keys[name]; !ok {
 			return &httpError{http.StatusNotFound, "no such key"}

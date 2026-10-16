@@ -123,6 +123,18 @@ returns `502` explicitly even though local access remains disabled; it never
 restores the deleted login. The supervisor saves that denial on error responses
 too. A new login is blocked until cleanup finishes. Disconnect does not delete
 the person's Google Cloud project or files.
+This Worker route uses the consent API's service namespace. The container admin
+API's `/keys/<name>` remains a raw-key namespace: a stored key named `drive` is
+unrelated and can still be deleted normally.
+
+Deploy the compatible Worker and image before enabling caller provisioning.
+No instance-size, instance-count, migration, or additional secret change is
+required. After provisioning, the older pre-feature image cannot load that
+person's new Google configuration. Retain current sealed state and a compatible
+image; pause new connections and disconnect affected accounts if a repair is
+needed. Do not restore old snapshots over newer unrelated credentials or grants.
+Old-image rollback is limited to never-provisioned instances. The caller can be
+rolled back independently while the compatible Keyring image remains deployed.
 
 ## Container image runtime
 

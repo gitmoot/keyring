@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 
 	"github.com/gitmoot/keyring/internal/googlelogin"
@@ -34,17 +35,6 @@ func (in *Instance) saveGoogle(ctx context.Context, expected string, next *googl
 		in.writeAudit("google_state_changed", map[string]any{"version": version, "connected": next != nil && next.Ready})
 	}
 	return err
-}
-
-func (in *Instance) disconnectGoogle(w http.ResponseWriter, r *http.Request) {
-	if err := in.google.Disconnect(r.Context()); err != nil {
-		writeError(w, &httpError{http.StatusBadGateway, err.Error()})
-		return
-	}
-	in.mu.Lock()
-	version := in.state.Version
-	in.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"version": version})
 }
 
 // provisionGoogle is an atomic extension of an existing router role, never a
@@ -98,6 +88,10 @@ func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 		}
 		if role.Access == nil {
 			role.Access = make(map[string]policy.Access, len(access))
+		} else {
+			// The transaction clone shares immutable role grants. Copy only
+			// the map this operation changes, before any fallible commit.
+			role.Access = maps.Clone(role.Access)
 		}
 		for name, desired := range access {
 			role.Access[name] = desired

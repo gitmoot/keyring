@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -22,8 +23,43 @@ func TestContainerGoogleProvisioning(t *testing.T) {
 	x.must("PUT", "/services/other", map[string]any{"base": "https://example.com", "key": "OTHER", "auth": "bearer"})
 	role := x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{"other": map[string]any{"paths": []string{"/"}}}})
 	token := role["token"].(string)
+	// A real atomic-file commit failure must leave both live and sealed
+	// grants unchanged, even when the router already has unrelated access.
+	before := x.must("GET", "/state", nil)
+	if err := os.Rename(in.opt.StatePath, in.opt.StatePath+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(in.opt.StatePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	failed, _ := x.call("POST", "/google-drive", map[string]any{})
+	if err := os.Remove(in.opt.StatePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(in.opt.StatePath+".saved", in.opt.StatePath); err != nil {
+		t.Fatal(err)
+	}
+	if failed != http.StatusInternalServerError {
+		t.Fatalf("provisioning commit failure: %d", failed)
+	}
+	failedStatus := x.must("GET", "/status", nil)
+	grants := failedStatus["roles"].(map[string]any)["router"].(map[string]any)["access"].(map[string]any)
+	if len(grants) != 1 || grants["other"] == nil {
+		t.Fatalf("failed provisioning mutated live grants: %v", grants)
+	}
+	unchanged := x.must("GET", "/state", nil)
+	if before["state"] != unchanged["state"] || before["version"] != unchanged["version"] {
+		t.Fatal("failed provisioning changed sealed state")
+	}
+	x.must("PUT", "/keys/other_fixture", map[string]any{"value": "fixture"})
 	x.must("POST", "/google-drive", map[string]any{})
 	x.must("POST", "/google-drive", map[string]any{})
+	// The admin key namespace is independent of consent service names.
+	x.must("PUT", "/keys/drive", map[string]any{"value": "unrelated-fixture-key"})
+	x.must("DELETE", "/keys/drive", nil)
+	if code, _ := x.call("DELETE", "/keys/drive", nil); code != http.StatusNotFound {
+		t.Fatalf("raw key named drive was shadowed by Google disconnect: %d", code)
+	}
 	status := x.must("GET", "/status", nil)
 	services := status["services"].(map[string]any)
 	if services["other"] == nil || services["drive"] == nil {
