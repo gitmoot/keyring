@@ -533,7 +533,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
 		return
 	}
-	service := l.service
+	service, label := l.service, l.label
 	if svc.Auth != policy.AuthOAuth2 {
 		var value string
 		var err error
@@ -563,7 +563,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 			return
 		}
 		s.writeAudit("connected", map[string]any{"service": service, "key": svc.Key, "link": ref(h), "kind": "value"})
-		render(w, http.StatusOK, pageData{Service: service, Message: "Saved. You can close this page."})
+		render(w, http.StatusOK, pageData{Service: service, Label: label, Message: "Saved. You can close this page."})
 		return
 	}
 	if len(s.signIns) >= maxPending {
