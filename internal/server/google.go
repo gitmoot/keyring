@@ -57,7 +57,7 @@ func (h *Handler) GoogleStatus(name string) (state string, expires time.Time) {
 	return "ready", e.expires
 }
 
-func (h *Handler) googleToken(ctx context.Context, a policy.GoogleAccount) (string, error) {
+func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleAccount) (string, error) {
 	c := &h.google
 	for {
 		c.mu.Lock()
@@ -97,6 +97,7 @@ func (h *Handler) googleToken(ctx context.Context, a policy.GoogleAccount) (stri
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), googleTimeout)
 		token, lifetime, err := h.fetchGoogleToken(fetchCtx, a)
 		cancel()
+		h.recordGoogleAttempt(name, a, h.now(), err)
 		c.mu.Lock()
 		now = h.now()
 		if err != nil {
@@ -140,29 +141,33 @@ func (h *Handler) retainGoogle(config *policy.Config) {
 	}
 }
 
-// limitedOutput refuses oversized stdout/stderr, rather than collecting
-// unbounded command output. Stderr is counted but never retained.
+// limitedOutput retains at most 16 KiB transiently. Only fixed classifications
+// may escape stderr; neither stream is retained in an incident.
 type limitedOutput struct {
-	buf     bytes.Buffer
-	n       int
-	discard bool
+	buf      bytes.Buffer
+	n        int
+	exceeded bool
 }
 
 func (w *limitedOutput) Write(p []byte) (int, error) {
 	if len(p) > (16<<10)-w.n {
+		w.exceeded = true
 		return 0, errors.New("command output limit")
 	}
 	w.n += len(p)
-	if w.discard {
-		return len(p), nil
-	}
 	return w.buf.Write(p)
 }
 
 func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) (string, time.Duration, error) {
 	info, err := os.Stat(a.ConfigDir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return "", 0, errors.New("gcloud private configuration unavailable; set up the account on the keyring host")
+	if err != nil || !info.IsDir() {
+		if os.IsPermission(err) {
+			return "", 0, googleFailure("permission_denied", "configuration", "permission_denied")
+		}
+		return "", 0, googleFailure("configuration_error", "configuration", "configuration_unavailable")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return "", 0, googleFailure("configuration_error", "configuration", "configuration_not_private")
 	}
 	cmd := exec.CommandContext(ctx, a.Executable, "auth", "print-access-token", a.Account, "--account="+a.Account, "--configuration=default", "--quiet")
 	// Do not inherit proxy variables, CLOUDSDK_AUTH_ACCESS_TOKEN,
@@ -181,41 +186,55 @@ func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) 
 	cmd.WaitDelay = time.Second
 	cleanup, err := boundGoogleCommand(cmd)
 	if err != nil {
-		return "", 0, err
+		return "", 0, googleFailure("runtime_unavailable", "command_start", "runtime_start_failed")
 	}
 	defer cleanup()
-	stdout, stderr := &limitedOutput{}, &limitedOutput{discard: true}
+	stdout, stderr := &limitedOutput{}, &limitedOutput{}
+	defer func() {
+		clear(stdout.buf.Bytes())
+		clear(stderr.buf.Bytes())
+	}()
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
-		return "", 0, errors.New("gcloud token command failed; sign in again on the keyring host")
+		return "", 0, classifyGoogleCommand(ctx, err, stderr.buf.Bytes(), stdout.exceeded || stderr.exceeded)
 	}
 	token := strings.TrimSpace(stdout.buf.String())
 	if !usableAccessToken(token) {
-		return "", 0, errors.New("gcloud returned no usable token; sign in again on the keyring host")
+		return "", 0, googleFailure("unknown", "command", "unusable_token_output")
 	}
 	// print-access-token may return a previously cached token. Never invent
 	// a new one-hour expiry for it. Check remaining life AND account identity
 	// at Google's fixed endpoint; a config's impersonation cannot cross accounts.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://oauth2.googleapis.com/tokeninfo?access_token="+url.QueryEscape(token), nil)
 	if err != nil {
-		return "", 0, errors.New("Google token check unavailable")
+		return "", 0, googleFailure("unknown", "token_validation", "invalid_token_response")
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return "", 0, errors.New("Google token check unavailable")
+		return "", 0, classifyGoogleValidation(ctx, err)
 	}
 	defer resp.Body.Close()
 	var result struct {
 		Email     string          `json:"email"`
 		ExpiresIn json.RawMessage `json:"expires_in"`
+		Error     string          `json:"error"`
 	}
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result)
+	if decodeErr == nil && result.Error == "invalid_token" {
+		return "", 0, googleFailure("credentials_invalid", "token_validation", "invalid_token")
+	}
 	if resp.StatusCode != http.StatusOK || decodeErr != nil {
-		return "", 0, errors.New("Google rejected the token; sign in again on the keyring host")
+		return "", 0, googleFailure("provider_error", "token_validation", "invalid_token_response")
 	}
 	seconds, err := strconv.ParseInt(strings.Trim(string(result.ExpiresIn), `"`), 10, 64)
-	if err != nil || seconds <= 1 || seconds > 3600 || !strings.EqualFold(result.Email, a.Account) {
-		return "", 0, errors.New("Google token identity or expiry mismatch; check the host account login")
+	if err != nil || seconds > 3600 {
+		return "", 0, googleFailure("provider_error", "token_validation", "invalid_token_response")
+	}
+	if !strings.EqualFold(result.Email, a.Account) {
+		return "", 0, googleFailure("credentials_invalid", "token_validation", "identity_mismatch")
+	}
+	if seconds <= 1 {
+		return "", 0, googleFailure("credentials_invalid", "token_validation", "expired_access_token")
 	}
 	return token, time.Duration(seconds) * time.Second, nil
 }

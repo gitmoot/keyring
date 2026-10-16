@@ -278,6 +278,11 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		return err
 	}
 	handler := server.New(cfg, keys, audit)
+	if err := handler.OpenGoogleHistory(filepath.Join(filepath.Dir(storePath), "google-renewals.json")); err != nil {
+		// Keep unrelated services available, but make lost persistence visible.
+		// The unsafe/corrupt file is never replaced by an empty history.
+		fmt.Fprintf(stderr, "Google renewal history unavailable: %v\n", err)
+	}
 	usageFile := usagePath(storePath)
 	if rows, err := loadUsage(usageFile); err != nil {
 		// Usage is only statistics: start without it rather than not start.
