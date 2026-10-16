@@ -14,7 +14,7 @@ const GoogleAccountNameLimit = 128
 // Container Google paths are image-owned, never chosen by the admin API.
 const (
 	ContainerGoogleExecutable = "/opt/google-cloud-sdk/bin/gcloud"
-	ContainerGoogleRoot       = "/run/keyring/google"
+	ContainerGoogleRoot       = "/var/lib/keyring/google"
 )
 
 func containerGoogleDir(dir string) bool {

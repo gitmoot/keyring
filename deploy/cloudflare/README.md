@@ -24,7 +24,7 @@ The DO keeps each item under its own storage key, so writers of different items 
 | Daily counts | the container; the DO saves `GET /usage` every minute and before stopping the container, and passes it back on unlock | a restart does not reset a daily limit |
 | Consent links | the container's memory | the DO keeps the container running until the last link and its sign-in have expired (#50) |
 | Audit | the container's stdout (Workers logs) | never a key value or token |
-| Container disk | transient Google CLI configuration under private `/run/keyring/google` | never a durable credential store; persisted credentials belong in sealed state |
+| Container disk | transient Google CLI configuration under private `/var/lib/keyring/google` | never a durable credential store; persisted credentials belong in sealed state |
 
 ## Routes
 
@@ -110,7 +110,7 @@ it exposes no Google account, project, authorization URL, code, or credential.
 SDK credentials are bounded opaque database snapshots (256 KiB total), in a
 dedicated field of the instance's encrypted state, never in forwarded keys.
 Only the fixed image executable and a generated private directory beneath
-`/run/keyring/google` are allowed. SDK writers are serialized; a refresh is sealed
+`/var/lib/keyring/google` are allowed. SDK writers are serialized; a refresh is sealed
 before its access token is returned. The supervisor syncs proxy/consent changes
 and checks active setup before idle shutdown. A platform kill during an unfinished
 browser flow expires that flow; saved login/project progress can be retried
@@ -142,7 +142,7 @@ rolled back independently while the compatible Keyring image remains deployed.
 
 The Linux amd64 image installs the official [Google Cloud CLI 589.0.0 archive](https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-589.0.0-linux-x86_64.tar.gz) at `/opt/google-cloud-sdk`. The download must match SHA256 `f865da648f6fdae2015abb5b32eaa0eb10520e88f0ca735cfb33795868c8d26f` before extraction; a mismatch fails the build. This checksum is from the preserved versioned archive whose extracted payload was previously compared with the documented archive. The preserved version smoke reported SDK `589.0.0` and bundled Python `3.14.8`; it was not a smoke of this image.
 
-The executable is fixed at `/opt/google-cloud-sdk/bin/gcloud`, with `CLOUDSDK_PYTHON` selecting the bundled interpreter. The root-owned SDK is not writable by the keyring process. `/run/keyring` and `/run/keyring/google` are created with mode `0700`, owned by the runtime UID/GID. Linux process groups are available for the keyring process to manage CLI children. The recipe copies only application source/build output and the public SDK: no credentials, login, or OAuth app setup belongs in an image layer.
+The executable is fixed at `/opt/google-cloud-sdk/bin/gcloud`, with `CLOUDSDK_PYTHON` selecting the bundled interpreter. The root-owned SDK is not writable by the keyring process. `/var/lib/keyring` and `/var/lib/keyring/google` are created with mode `0700`, owned by the runtime UID/GID. The application-owned directory must not live under `/run`: a runtime mount can hide image-created parents there before the non-root process starts. Runtime files remain disposable; the sealed snapshot restores them after a restart. Linux process groups are available for the keyring process to manage CLI children. The recipe copies only application source/build output and the public SDK: no credentials, login, or OAuth app setup belongs in an image layer.
 
 After building locally for `linux/amd64`, these offline smoke commands check the real image without credentials or Google traffic (replace `keyring-container-google` with the local image tag):
 
@@ -160,6 +160,19 @@ These commands require a local container engine and the built image. Building fe
 The offline check explicitly loads the installed CA bundle. The default context
 uses `/etc/ssl/certs` lazily; zero certificates before a handshake does not mean
 its trust store is missing.
+
+The runtime-mount regression builds an isolated image and drives the real
+instance, consent handler, and SDK as the non-root image user, with an empty
+`/run` tmpfs and networking disabled:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v deploy.cloudflare.smoke.test_google_runtime
+```
+
+Run it from the repository root with Docker and Python 3 available. It requires
+the Google authorization link and code-entry form to appear; it never submits a
+code or prints the URL, cookies, or SDK output. Its containers and image tags are
+removed afterward. This checks startup, not a real-person Google authorization.
 
 ## Checking it without Cloudflare
 
