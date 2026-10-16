@@ -38,7 +38,7 @@ func classifyCommand(data []byte) error {
 		return errTerms
 	case has("invalid_grant: token has been expired or revoked"),
 		has("'error': 'invalid_grant'"), has(`"error":"invalid_grant"`), has(`"error": "invalid_grant"`),
-		has("reauthentication failed. cannot prompt during non-interactive execution."),
+		gcloudexec.ClassifyReauth(text).Required,
 		has("you do not currently have an active account selected"):
 		return errLogin
 	case has("resource_exhausted"), has("quota exceeded"), has("'status': 429"):

@@ -63,6 +63,10 @@ case "$1 $2" in
    touch "$CLOUDSDK_CONFIG/../started"
    sleep 60
   fi
+  if [ -f "$CLOUDSDK_CONFIG/../failure" ]; then
+   cat "$CLOUDSDK_CONFIG/../failure" >&2
+   exit 1
+  fi
   printf 'r' >> "$CLOUDSDK_CONFIG/credentials.db"
   printf 'fixture-access-token\n' ;;
  "auth revoke") exit 1 ;;
@@ -162,6 +166,19 @@ func TestLoginTermsRetryRefreshAndRestore(t *testing.T) {
 	disk, err := os.ReadFile(filepath.Join(restored.root, refreshed.Generation, "credentials.db"))
 	if err != nil || string(disk) != string(refreshed.Files["credentials.db"]) || restored.Status().Phase != "connected" {
 		t.Fatal("restart failed to restore the committed credential")
+	}
+	failure := filepath.Join(c.root, "failure")
+	if err := os.WriteFile(failure, []byte("Try signing in again: https://accounts.google.com/?error_subtype=rapt_required SECRET-CANARY"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := c.Token(context.Background(), refreshed.Binding()); token != "" || !errors.Is(err, errCommand) || !saved().Ready {
+		t.Fatalf("ambiguous advice invented a login requirement: %v", err)
+	}
+	if err := os.WriteFile(failure, []byte(`{"error_subtype":"invalid_rapt"} SECRET-CANARY`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := c.Token(context.Background(), refreshed.Binding()); token != "" || !errors.Is(err, errLogin) || saved().Ready || !saved().NeedsLogin {
+		t.Fatalf("proven reauthentication did not disable the binding: %v", err)
 	}
 }
 
