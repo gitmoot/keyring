@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gitmoot/keyring/internal/googlelogin"
 	"html/template"
 	"io"
 	"net"
@@ -60,6 +61,7 @@ type Server struct {
 	audit  io.Writer
 	client *http.Client
 	now    func() time.Time
+	google *googlelogin.Controller // container-only, set before serving
 
 	auditMu sync.Mutex
 
@@ -69,9 +71,11 @@ type Server struct {
 }
 
 type link struct {
-	service string
-	label   string
-	expires time.Time
+	service     string
+	label       string
+	expires     time.Time
+	google      bool
+	googleEpoch uint64
 }
 
 type signIn struct {
@@ -80,8 +84,10 @@ type signIn struct {
 	verifier string
 	// browser is the hash of the cookie set on the browser that pressed
 	// Connect; the callback must come from that browser.
-	browser [sha256.Size]byte
-	expires time.Time
+	browser     [sha256.Size]byte
+	expires     time.Time
+	google      bool
+	googleEpoch uint64
 }
 
 // New builds a consent server. config returns the settings in use (the
@@ -136,6 +142,8 @@ func (s *Server) writeAudit(event string, fields map[string]any) {
 // sign-in, or a service that sends a fixed key.
 func linkable(svc policy.Service) bool {
 	switch svc.Auth {
+	case policy.AuthGcloudLogin:
+		return true
 	case policy.AuthOAuth2:
 		return svc.OAuth2.CanSignIn()
 	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery, policy.AuthEgressProxy:
@@ -314,6 +322,10 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "this service cannot be connected by a link (an oauth2 service needs auth_url; signing keys are set by the owner)")
 		return
 	}
+	if svc.Auth == policy.AuthGcloudLogin && s.google == nil {
+		apiError(w, http.StatusServiceUnavailable, "Google connection is unavailable")
+		return
+	}
 	ttl := DefaultLinkTTL
 	if req.TTLSeconds != 0 {
 		// Bounds first: a huge number would overflow the Duration.
@@ -339,6 +351,10 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.links[h] = &link{service: req.Service, label: req.Label, expires: expires}
+	if svc.Auth == policy.AuthGcloudLogin {
+		s.links[h].google = true
+		s.links[h].googleEpoch = s.google.Epoch()
+	}
 	s.mu.Unlock()
 	u := cfg.Consent.PublicBase()
 	u.Path += "/c/" + id
@@ -354,6 +370,14 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 	svc, ok := s.config().Services[name]
 	if !ok {
 		apiError(w, http.StatusNotFound, "unknown service")
+		return
+	}
+	if svc.Auth == policy.AuthGcloudLogin && s.google != nil {
+		if err := s.google.Disconnect(r.Context()); err != nil {
+			apiError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 		return
 	}
 	if svc.SignOnly() {
@@ -439,7 +463,10 @@ func (s *Server) PagesHandler() http.Handler {
 			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		rest, ok := strings.CutPrefix(r.URL.Path, public.Path)
+		googleID, googlePage := googlePagePath(rest)
 		switch {
+		case ok && googlePage:
+			s.googlePage(w, r, googleID, public)
 		case ok && rest == "/callback" && r.Method == http.MethodGet:
 			s.callback(w, r, public)
 		case ok && strings.HasPrefix(rest, "/c/") && !strings.Contains(rest[3:], "/") && rest != "/c/":
@@ -465,6 +492,9 @@ func (s *Server) openLink(id string, now time.Time) (*link, [sha256.Size]byte, b
 	if !ok || !now.Before(l.expires) {
 		return nil, h, false
 	}
+	if l.google && (s.google == nil || l.googleEpoch != s.google.Epoch()) {
+		return nil, h, false
+	}
 	return l, h, true
 }
 
@@ -488,7 +518,8 @@ func (s *Server) linkPage(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	data.Form = true
-	data.SignIn = svc.Auth == policy.AuthOAuth2
+	data.SignIn = svc.Auth == policy.AuthOAuth2 || svc.Auth == policy.AuthGcloudLogin
+	data.Google = svc.Auth == policy.AuthGcloudLogin
 	if svc.Auth == policy.AuthEgressProxy {
 		proxyForm(&data, svc)
 	}
@@ -531,6 +562,10 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 	if !known || !linkable(svc) {
 		s.mu.Unlock()
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
+		return
+	}
+	if svc.Auth == policy.AuthGcloudLogin {
+		s.startGoogle(w, r, l, h, public)
 		return
 	}
 	service, label := l.service, l.label
@@ -786,8 +821,10 @@ type pageData struct {
 	// Status is the HTTP status, set by render: it picks how a message
 	// looks (done, or a problem). Problem marks a failure shown with 200
 	// (the provider refused the sign-in) so it does not look like success.
-	Status  int
-	Problem bool
+	Status                                                int
+	Problem                                               bool
+	Google, GoogleCode, GoogleRetry, GoogleTerms, Refresh bool
+	GoogleURL, GoogleAccount, GoogleProject               string
 }
 
 // page is plain HTML and inline CSS: the pages' CSP allows inline styles
@@ -797,6 +834,7 @@ type pageData struct {
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+{{if .Refresh}}<meta http-equiv="refresh" content="2">{{end}}
 <title>{{if .Label}}Connect {{.Label}}{{else if .Service}}Connect {{.Service}}{{else}}Private connection page{{end}}</title>
 <style>
 :root{--bg:#f7f8fa;--card:#fff;--ink:#16181d;--mut:#5f6670;--line:#e6e9ee;--blue:#2466e0;--green:#1f7d5a;--red:#b42318;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Helvetica Neue",Arial,sans-serif}
@@ -832,10 +870,22 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 <div class="top"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Private connection page</div>
 <main class="card">
 {{if .Label}}<h1>Connect {{.Label}}</h1>{{else if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
-{{if .Message}}<div class="msg{{if or .Problem (ge .Status 400)}} err{{else if not .Form}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if or .Problem (ge .Status 400)}}alert{{else}}status{{end}}">
-{{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not .Form}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{if .Message}}<div class="msg{{if or .Problem (ge .Status 400)}} err{{else if not (or .Form .Refresh)}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if or .Problem (ge .Status 400)}}alert{{else}}status{{end}}">
+{{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not (or .Form .Refresh)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{if .Google}}
+{{if .SignIn}}<p class="hint">Connect your own Google Drive and Sheets. After sign-in, this creates a Google Cloud project in your account and enables their APIs. No billing account is attached. Your Google credentials stay in your private keyring, not with the assistant.</p>{{end}}
+{{with .GoogleAccount}}<p class="hint">Google account: {{.}}</p>{{end}}
+{{with .GoogleProject}}<p class="hint">Your Google Cloud project: {{.}}</p>{{end}}
+{{if .GoogleURL}}<a class="btn" href="{{.GoogleURL}}" target="_blank" rel="noopener noreferrer">Open Google sign-in</a>{{end}}
+{{if .GoogleTerms}}<p class="hint">Open <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">Google Cloud Console</a> with the same Google account and accept its terms. Then return here and retry.</p>{{end}}
+{{end}}
 {{if .Form}}<form method="post" autocomplete="off">
-{{if .SignIn}}<p>You will sign in on the provider's own page. Your password is never seen here.</p>
+{{if .GoogleCode}}<label for="code">Google verification code</label>
+<input id="code" type="password" name="code" required maxlength="4096" autocomplete="off" spellcheck="false">
+<button class="btn" type="submit">Finish Google sign-in</button>
+{{else if .GoogleRetry}}<input type="hidden" name="action" value="retry">
+<button class="btn" type="submit">Retry connection</button>
+{{else if .SignIn}}<p>You will sign in on the provider's own page. Your password is never seen here.</p>
 <button class="btn" type="submit">Sign in and connect</button>
 {{else if .Proxy}}<p>Your proxy's details are stored only in your own keyring and never shown again. The password is only ever sent to the proxy address saved with it.</p>
 {{if .ProxyAsksType}}<label for="type">Type</label><select id="type" name="type"><option value="http-connect">HTTP</option><option value="socks5">SOCKS5</option></select>{{end}}

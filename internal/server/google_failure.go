@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+
+	"github.com/gitmoot/keyring/internal/gcloudexec"
 )
 
 const (
@@ -146,27 +148,17 @@ func classifyGoogleCommand(ctx context.Context, err error, stderr []byte, output
 	lower := bytes.ToLower(stderr)
 	defer clear(lower)
 	has := func(text string) bool { return bytes.Contains(lower, []byte(text)) }
-	prompt := has("cannot prompt during non-interactive execution") || has("cannot prompt during noninteractive execution")
-	// Match SDK/OAuth error evidence, not a code embedded in an auth URL,
-	// bearer token or an unrelated advisory to sign in.
-	invalidRAPT := has("reauth related error (invalid_rapt)") || has("'error_subtype': 'invalid_rapt'") ||
-		has("\"error_subtype\": \"invalid_rapt\"") || has("\"error_subtype\":\"invalid_rapt\"")
-	raptRequired := has("'error_subtype': 'rapt_required'") ||
-		has("\"error_subtype\": \"rapt_required\"") || has("\"error_subtype\":\"rapt_required\"")
-	reauth := has(": reauth is required.") || has(") reauth is required.") ||
-		bytes.Equal(bytes.TrimSpace(lower), []byte("reauth is required.")) ||
-		(has("please run:") && has("gcloud auth login") && has("to complete reauthentication.")) ||
-		(prompt && (has("reauthentication failed.") || has("problem reauthenticating while refreshing")))
+	reauth := gcloudexec.ClassifyReauth(lower)
 	switch {
-	case invalidRAPT, raptRequired, reauth:
+	case reauth.Required:
 		failure.Category, failure.Evidence = "reauth_required", []string{"reauthentication_required"}
-		if invalidRAPT {
+		if reauth.InvalidRAPT {
 			failure.Evidence = append(failure.Evidence, "invalid_rapt")
 		}
-		if raptRequired {
+		if reauth.RAPTRequired {
 			failure.Evidence = append(failure.Evidence, "rapt_required")
 		}
-		if prompt {
+		if reauth.PromptRefused {
 			failure.Evidence = append(failure.Evidence, "noninteractive_prompt_refused")
 		}
 	case has("'error': 'invalid_grant'"), has("\"error\": \"invalid_grant\""), has("\"error\":\"invalid_grant\""),

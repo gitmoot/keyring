@@ -200,6 +200,15 @@ try {
 
 	r = await call("GET", `/admin/instances/${id}/services`, ADMIN);
 	expect("services", await r.json(), { services: [{ name: "echo", connected: false, failing: null }, { name: "gmail", connected: false, failing: null }] });
+
+	expect("provision Drive on an existing instance", (await call("POST", `/admin/instances/${id}/google-drive`, ADMIN, "{}")).status, 200);
+	expect("repeat Drive provisioning", (await call("POST", `/admin/instances/${id}/google-drive`, ADMIN, "{}")).status, 200);
+	expect("reject caller-selected Google provisioning", (await call("POST", `/admin/instances/${id}/google-drive`, ADMIN, '{"executable":"/tmp/gcloud"}')).status, 400);
+	expect("same token authorizes disconnected Drive", (await call("GET", `/p/${id}/google-me-drive/about`, P)).status, 503);
+	const driveServices = (await (await call("GET", `/admin/instances/${id}/services`, ADMIN)).json()) as { services: { name: string; connected: boolean; failing: string | null }[] };
+	const driveNames = ["drive", "google-me-drive", "google-me-sheets", "google-me-upload"];
+	expect("all provisioned Google services start disconnected", driveServices.services.filter(s => driveNames.includes(s.name)).map(s => [s.name, s.connected]), driveNames.map(name => [name, false]));
+	expect("Drive status contains no identity or credentials", driveServices.services.filter(s => driveNames.includes(s.name)).every(s => Object.keys(s).sort().join() === "connected,failing,name"), true);
 	expect("call before connect", (await call("GET", `/p/${id}/echo/x`, P)).status, 503);
 	expect("call without caller proof", (await call("GET", `/p/${id}/echo/x`, { "x-keyring-token": created.role_token })).status, 401);
 
@@ -237,6 +246,7 @@ try {
 
 	r = await call("POST", `/admin/instances/${id}/role-token`, ADMIN);
 	const token2 = ((await r.json()) as { role_token: string }).role_token;
+	expect("rotated token retains provisioned Drive grant", (await call("GET", `/p/${id}/google-me-drive/about`, { ...P, "x-keyring-token": token2 })).status, 503);
 	expect("old role token after rotation", (await call("GET", `/p/${id}/echo/y`, P)).status, 401);
 	expect("gmail not connected", (await call("GET", `/p/${id}/gmail/x`, { ...P, "x-keyring-token": token2 })).status, 503);
 
