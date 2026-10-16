@@ -654,7 +654,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 			code = "error"
 		}
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": "provider " + code})
-		render(w, http.StatusOK, pageData{Service: f.service, Message: "Sign-in was not completed (" + code + "). Ask for a new link to try again."})
+		render(w, http.StatusOK, pageData{Service: f.service, Message: "Sign-in was not completed (" + code + "). Ask for a new link to try again.", Problem: true})
 		return
 	}
 	svc, known := s.config().Services[f.service]
@@ -784,8 +784,10 @@ type pageData struct {
 	// when the service's config leaves them to the person.
 	Proxy, ProxyAsksAddress, ProxyAsksType bool
 	// Status is the HTTP status, set by render: it picks how a message
-	// looks (done, or a problem).
-	Status int
+	// looks (done, or a problem). Problem marks a failure shown with 200
+	// (the provider refused the sign-in) so it does not look like success.
+	Status  int
+	Problem bool
 }
 
 // page is plain HTML and inline CSS: the pages' CSP allows inline styles
@@ -830,8 +832,8 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 <div class="top"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Private connection page</div>
 <main class="card">
 {{if .Label}}<h1>Connect {{.Label}}</h1>{{else if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
-{{if .Message}}<div class="msg{{if ge .Status 400}} err{{else if not .Form}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if ge .Status 400}}alert{{else}}status{{end}}">
-{{if ge .Status 400}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not .Form}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{if .Message}}<div class="msg{{if or .Problem (ge .Status 400)}} err{{else if not .Form}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if or .Problem (ge .Status 400)}}alert{{else}}status{{end}}">
+{{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not .Form}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
 {{if .Form}}<form method="post" autocomplete="off">
 {{if .SignIn}}<p>You will sign in on the provider's own page. Your password is never seen here.</p>
 <button class="btn" type="submit">Sign in and connect</button>

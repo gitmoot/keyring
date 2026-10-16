@@ -438,7 +438,9 @@ func TestOAuthFailuresStoreNothing(t *testing.T) {
 	// The person cancels at the provider.
 	to, cookie = e.startSignIn()
 	w = e.page("GET", callbackPath(url.Values{"error": {"access_denied"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
-	if !strings.Contains(w.Body.String(), "access_denied") {
+	// It is a failure even though the page answers 200: shown and announced
+	// as a problem, never with the success look.
+	if !strings.Contains(w.Body.String(), "access_denied") || !strings.Contains(w.Body.String(), `role="alert"`) {
 		t.Fatalf("cancelled: %d %s", w.Code, w.Body)
 	}
 	// No refresh token in the reply.
