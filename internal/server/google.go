@@ -95,7 +95,14 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 		c.mu.Unlock()
 
 		// Other callers may still need this renewal if the first disconnects.
-		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), googleTimeout)
+		timeout := googleTimeout
+		if h.snap.Load().config.ContainerMode {
+			// The lite container's 1/16 CPU can spend over 30s starting
+			// the SDK. Leave 15s of the caller's 60s header budget for
+			// forwarding; host renewal keeps its existing 30s bound.
+			timeout = 45 * time.Second
+		}
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		token, lifetime, err := h.fetchGoogleToken(fetchCtx, a)
 		cancel()
 		h.recordGoogleAttempt(name, a, h.now(), err)
