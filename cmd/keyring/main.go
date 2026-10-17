@@ -33,6 +33,8 @@ import (
 )
 
 const usage = `Usage:
+  keyring cloudflare-import-client --relay-base URL --account ID --worker NAME --keyring-id ID
+                                             preflight with --check-only; initial opaque pipe import with --exclusive-writer
   keyring serve --config FILE --store FILE   run the keyring
   keyring instance --admin-listen ADDR --admin-token-sha256 HEX [--state FILE] [--audit FILE] [--container]
                                              run one person's keyring, configured only through its admin
@@ -66,6 +68,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 	cmd, rest := args[0], args[1:]
+	if cmd == "cloudflare-import-client" {
+		return runCloudflareClientImport(rest, stdin, stdout, stderr)
+	}
 	fs := flag.NewFlagSet("keyring "+cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "rules file")
