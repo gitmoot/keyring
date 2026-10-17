@@ -182,6 +182,61 @@ URI, the target keyring ID and an operator-reported protected-import receipt.
 Review, deployment and service-grant approval gates must pass before sending
 a real consent link.
 
+#### Initial opaque pipe import
+
+`keyring cloudflare-import-client` is a Linux/macOS **sink**, not a Google
+console credential extractor. Before generating a client secret, the operator
+must have an approved producer that can connect the value directly to this
+command's inherited anonymous stdin pipe, without returning it to agent tools,
+screenshots, DOM dumps, logs, environment variables or files. Do not ask the
+connecting person to copy the secret.
+
+Confirm the pilot ID from the authenticated person's canonical contact/keyring
+mapping. Confirm the existing Cloudflare account, Worker and loopback Keyring
+relay service, using only non-secret metadata. Preflight needs no secret input:
+
+```sh
+keyring cloudflare-import-client \
+  --relay-base "$CLOUDFLARE_RELAY_BASE" \
+  --account "$CLOUDFLARE_ACCOUNT_ID" \
+  --worker "$KEYRING_WORKER" \
+  --keyring-id "$PILOT_KEYRING_ID" \
+  --check-only
+```
+
+`CLOUDFLARE_RELAY_BASE` is the existing numeric-loopback relay URL ending in the
+Cloudflare API prefix, for example the approved role/service route ending in
+`/client/v4`. Authentication stays in that relay; this command neither reads
+an API key nor grants permissions. A failed preflight must stop provisioning.
+
+For the import, the operator's producer launches the same command with
+`--exclusive-writer` instead of `--check-only`. Its pipe must contain the exact
+UTF-8 client-secret value, with no trailing newline or JSON wrapper. The command
+does not accept a secret argument, regular file, named FIFO or terminal input.
+It creates only `{"<confirmed keyring_id>":{"GOOGLE_CLIENT_SECRET":"..."}}`
+inside `OAUTH_CLIENT_SECRETS_BY_INSTANCE`; both pilot services must use
+`GOOGLE_CLIENT_SECRET` as their configured `client_secret_key`.
+
+This is an **initial import only**. It refuses an existing binding of any type
+with that name, rather than overwriting unknown per-instance entries. It checks
+binding metadata again immediately before one
+[Cloudflare single-secret PUT](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/update/)
+and verifies the returned name/type plus unchanged unrelated binding names/types.
+It never replaces bulk Worker settings or the global OAuth secret binding.
+Cloudflare supplies no compare-and-set here: `--exclusive-writer` attests that
+the operator has excluded other deployment/secret writers for the entire import;
+the flag is not a distributed lock. This command is not an existing-map merge
+or credential-rotation interface.
+
+Redirects and environment proxies are disabled, provider response/error bodies
+are not printed, and ambiguous writes are not retried. On failure after
+submission, stop and reconcile with the deployment owner; do not blindly repeat
+or delete an existing binding. The non-secret JSON receipt reports metadata
+acknowledgment only: `value_readback` and `runtime_import_verified` remain false.
+Compatible Worker/container deployment, instance startup/import and real-account
+acceptance are separate gates. No public receiver or additional permission is
+introduced by this command.
+
 
 ### Pilot authorization is not public-launch approval
 
