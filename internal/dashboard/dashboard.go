@@ -277,7 +277,7 @@ func (b *Backend) rows() ([]keyRow, error) {
 			row.Updated = at.UTC().Format("2 Jan 2006")
 		}
 		m := meta[name]
-		if failure := b.Proxy.OAuthFailure(name); failure != "" {
+		if failure, _ := b.Proxy.OAuthFailure(name); failure != "" {
 			// A live refresh failure outranks an older test result.
 			m.Status, m.Reason = "failing", failure
 		}

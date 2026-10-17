@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const adminToken = "supervisor-admin-token"
@@ -575,6 +576,11 @@ func TestDailyLimitSurvivesRestart(t *testing.T) {
 func TestStatusShowsOAuthRefreshFailure(t *testing.T) {
 	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		_ = r.ParseForm()
+		if r.PostForm.Get("refresh_token") == "replacement-refresh" {
+			io.WriteString(w, `{"access_token":"replacement-access","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, `{"error":"invalid_grant"}`)
 	}))
@@ -584,6 +590,7 @@ func TestStatusShowsOAuthRefreshFailure(t *testing.T) {
 	listen := freeAddr(t)
 	x.must("POST", "/create", map[string]any{"id": "gina", "data_key": newKey(t), "listen": listen, "allow_sources": []string{"127.0.0.1"}})
 	x.must("PUT", "/services/gmail", map[string]any{"base": up.URL, "key": "GMAIL_REFRESH", "auth": "oauth2", "oauth2": map[string]any{"token_url": tokens.URL, "client_id": "c"}})
+	x.must("PUT", "/services/calendar", map[string]any{"base": up.URL, "key": "GMAIL_REFRESH", "auth": "oauth2", "oauth2": map[string]any{"token_url": tokens.URL, "client_id": "c"}})
 	x.must("PUT", "/keys/GMAIL_REFRESH", map[string]any{"value": "1//revoked-refresh"})
 	token := x.must("PUT", "/roles/agent", map[string]any{"access": map[string]any{"gmail": map[string]any{"paths": []string{"/"}}}})["token"].(string)
 	if failing, _ := x.must("GET", "/status", nil)["failing"].(map[string]any); len(failing) != 0 {
@@ -597,7 +604,69 @@ func TestStatusShowsOAuthRefreshFailure(t *testing.T) {
 	if why, _ := failing["gmail"].(string); !strings.Contains(why, "invalid_grant") {
 		t.Fatalf("status failing = %v", status["failing"])
 	}
+	reconnect, _ := status["reconnect_required"].(map[string]any)
+	if reconnect["gmail"] != true || reconnect["calendar"] != true {
+		t.Fatalf("shared grant rejection not reported for both services: %v", reconnect)
+	}
 	if strings.Contains(mustJSON(status), "1//revoked-refresh") {
 		t.Fatal("status shows the refresh token")
+	}
+	x.must("PUT", "/keys/GMAIL_REFRESH", map[string]any{"value": "replacement-refresh"})
+	if code, _ := proxyGet(t, listen, token, "/gmail/x"); code != http.StatusOK {
+		t.Fatalf("replacement grant did not recover: %d", code)
+	}
+	status = x.must("GET", "/status", nil)
+	reconnect, _ = status["reconnect_required"].(map[string]any)
+	failing, _ = status["failing"].(map[string]any)
+	if len(reconnect) != 0 || len(failing) != 0 {
+		t.Fatalf("replacement grant retained stale failure: %v %v", reconnect, failing)
+	}
+}
+
+func TestOAuthDisconnectDuringRenewalDoesNotForward(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	// Release before fixture cleanup, even when an assertion aborts.
+	defer unblock()
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.PostForm.Get("refresh_token") == "old-refresh" {
+			close(entered)
+			<-release
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"access_token":"synthetic-access","token_type":"Bearer","expires_in":3600}`)
+	}))
+	t.Cleanup(tokens.Close)
+	forwarded := make(chan struct{}, 2)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(up.Close)
+	x := newInst(t, "")
+	listen := freeAddr(t)
+	x.must("POST", "/create", map[string]any{"id": "renewal", "data_key": newKey(t), "listen": listen, "allow_sources": []string{"127.0.0.1"}})
+	x.must("PUT", "/services/gmail", map[string]any{"base": up.URL, "key": "GMAIL_REFRESH", "auth": "oauth2", "oauth2": map[string]any{"token_url": tokens.URL, "client_id": "c"}})
+	x.must("PUT", "/keys/GMAIL_REFRESH", map[string]any{"value": "old-refresh"})
+	token := x.must("PUT", "/roles/agent", map[string]any{"access": map[string]any{"gmail": map[string]any{"paths": []string{"/"}}}})["token"].(string)
+	done := make(chan int, 1)
+	go func() {
+		code, _ := proxyGet(t, listen, token, "/gmail/x")
+		done <- code
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal did not start")
+	}
+	x.must("DELETE", "/keys/GMAIL_REFRESH", nil)
+	unblock()
+	if code := <-done; code != http.StatusServiceUnavailable || len(forwarded) != 0 {
+		t.Fatalf("removed grant forwarded after renewal: status %d, calls %d", code, len(forwarded))
+	}
+	x.must("PUT", "/keys/GMAIL_REFRESH", map[string]any{"value": "new-refresh"})
+	if code, _ := proxyGet(t, listen, token, "/gmail/x"); code != http.StatusOK || len(forwarded) != 1 {
+		t.Fatalf("new grant cannot reach upstream: status %d, calls %d", code, len(forwarded))
 	}
 }

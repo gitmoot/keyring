@@ -73,6 +73,7 @@ type provider struct {
 	revoked   []url.Values
 	noRefresh bool
 	revokeErr bool
+	scope     *string
 }
 
 func newProvider(t *testing.T) *provider {
@@ -94,7 +95,12 @@ func newProvider(t *testing.T) *provider {
 			if p.noRefresh {
 				refresh = ""
 			}
-			io.WriteString(w, `{`+refresh+`"access_token":"ya29.x","token_type":"Bearer","expires_in":3599}`)
+			scope := ""
+			if p.scope != nil {
+				value, _ := json.Marshal(*p.scope)
+				scope = `,"scope":` + string(value)
+			}
+			io.WriteString(w, `{`+refresh+`"access_token":"ya29.x","token_type":"Bearer","expires_in":3599`+scope+`}`)
 		case "/revoke":
 			p.revoked = append(p.revoked, r.PostForm)
 			if p.revokeErr {
@@ -639,5 +645,162 @@ func TestProxyPasteCannotOverrideConfiguredTypeOrTLS(t *testing.T) {
 	got, _, err := e.cfg.Services["myproxy"].EgressProxy.Resolve(e.keys.get("MY_PROXY"))
 	if err != nil || got.Type != policy.ProxyHTTPConnect || !got.TLS {
 		t.Fatalf("configured TLS lost: %+v %v", got, err)
+	}
+}
+
+type consentTransportFunc func(*http.Request) (*http.Response, error)
+
+func (f consentTransportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestOAuthGrantedScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope string
+		omitted     bool
+		accepted    bool
+	}{
+		{name: "complete", scope: "calendar.events gmail.modify", accepted: true},
+		{name: "partial", scope: "gmail.modify"},
+		{name: "empty"},
+		// RFC 6749 section 5.1 permits omission only for unchanged scopes.
+		{name: "unchanged omitted", omitted: true, accepted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.cfg.Services["gmail"].OAuth2.Scopes = []string{"gmail.modify", "calendar.events"}
+			if !tc.omitted {
+				e.prov.scope = &tc.scope
+			}
+			e.keys.Set("GMAIL_REFRESH", "previous-grant")
+			to, cookie := e.startSignIn()
+			w := e.page("GET", callbackPath(url.Values{"code": {"good-code"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
+			if tc.accepted {
+				if w.Code != http.StatusOK || e.keys.get("GMAIL_REFRESH") != "1//person-refresh" {
+					t.Fatalf("complete grant not saved: status %d", w.Code)
+				}
+			} else if w.Code != http.StatusBadGateway || e.keys.get("GMAIL_REFRESH") != "previous-grant" {
+				t.Fatalf("partial consent replaced the saved connection: status %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestOAuthDisconnectInvalidatesSharedConsent(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending only", true: "saved grant"}[stored], func(t *testing.T) {
+			e := newEnv(t)
+			e.cfg.Services["calendar"] = e.cfg.Services["gmail"]
+			if stored {
+				e.keys.Set("GMAIL_REFRESH", "old-grant")
+			}
+			unopened := e.link("calendar")
+			to, cookie := e.startSignIn()
+			entered, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			e.s.client.Transport = consentTransportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/token" {
+					close(entered)
+					<-release
+				}
+				return http.DefaultTransport.RoundTrip(r)
+			})
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				done <- e.page("GET", callbackPath(url.Values{"code": {"good-code"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("code exchange did not start")
+			}
+			if w := e.api("DELETE", "/keys/calendar", apiToken, ""); w.Code != http.StatusOK {
+				t.Fatalf("shared disconnect: %d", w.Code)
+			}
+			unblock()
+			w := <-done
+			if w.Code != http.StatusConflict || e.keys.get("GMAIL_REFRESH") != "" {
+				t.Errorf("in-flight callback restored disconnected grant: status %d", w.Code)
+			}
+			if w := e.page("POST", unopened, url.Values{}, fromPage); w.Code != http.StatusGone {
+				t.Errorf("pre-disconnect link survived: %d", w.Code)
+			}
+			if e.keys.get("OTHER_KEY") != "other-value" || e.keys.get("GOOGLE_SECRET") != "google-client-secret" {
+				t.Error("disconnect changed unrelated credentials or the client secret")
+			}
+		})
+	}
+}
+
+func TestOAuthDisconnectBlocksReconnectUntilRevocationFinishes(t *testing.T) {
+	e := newEnv(t)
+	e.keys.Set("GMAIL_REFRESH", "old-grant")
+	e.prov.revokeErr = true
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	e.s.client.Transport = consentTransportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/revoke" {
+			close(entered)
+			<-release
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- e.api("DELETE", "/keys/gmail", apiToken, "") }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revocation did not start")
+	}
+	if e.keys.get("GMAIL_REFRESH") != "" {
+		t.Error("local credential remained usable while revocation was pending")
+	}
+	if w := e.api("POST", "/links", apiToken, `{"service":"gmail"}`); w.Code != http.StatusConflict {
+		t.Errorf("reconnect raced the old remote revoke: %d", w.Code)
+	}
+	unblock()
+	w := <-done
+	var result struct {
+		Deleted     bool   `json:"deleted"`
+		Revoked     bool   `json:"revoked"`
+		RevokeError string `json:"revoke_error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || !result.Deleted || result.Revoked || result.RevokeError == "" {
+		t.Fatalf("remote failure was not distinguished from local removal: %d %+v", w.Code, result)
+	}
+	// A new connection is possible after the bounded revocation attempt.
+	e.link("gmail")
+}
+
+func TestOAuthCallbackRechecksBindingAfterExchange(t *testing.T) {
+	e := newEnv(t)
+	to, cookie := e.startSignIn()
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	e.s.client.Transport = consentTransportFunc(func(r *http.Request) (*http.Response, error) {
+		close(entered)
+		<-release
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- e.page("GET", callbackPath(url.Values{"code": {"good-code"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("code exchange did not start")
+	}
+	svc := e.cfg.Services["gmail"]
+	svc.Key = "NEW_REFRESH"
+	e.cfg.Services["gmail"] = svc
+	unblock()
+	w := <-done
+	if w.Code != http.StatusConflict || e.keys.get("GMAIL_REFRESH") != "" || e.keys.get("NEW_REFRESH") != "" {
+		t.Fatalf("callback published into a changed binding: %d", w.Code)
 	}
 }

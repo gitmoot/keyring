@@ -452,6 +452,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		current := h.snap.Load()
+		currentService, exists := current.config.Services[service]
+		if !exists || currentService.Auth != policy.AuthOAuth2 || currentService.Key != svc.Key ||
+			!currentService.OAuth2.Equal(svc.OAuth2) || current.keys[svc.Key] != refresh ||
+			current.keys[svc.OAuth2.ClientSecretKey] != secret {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "OAuth connection changed during renewal")
+			return
+		}
 		// The refresh token and client secret never go upstream; they are
 		// masked too in case a service mirrors something unexpected.
 		upstreamKey, alsoRedact = token, []string{refresh, secret}

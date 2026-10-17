@@ -26,9 +26,11 @@
         // Opt in to fixed per-person Drive/upload/Sheets provisioning after
         // the router role is created. No agent grant to the consent service.
         "drive": { "auth": "gcloud-login", "google_account": "me" },
+        // Example only until an owner-approved Workspace OAuth client and
+        // secret are provisioned. Gmail and Calendar are one connection.
         "gmail": {
           "base": "https://gmail.googleapis.com",
-          "key": "GMAIL_REFRESH_TOKEN",
+          "key": "GOOGLE_WORKSPACE_REFRESH_TOKEN",
           "auth": "oauth2",
           "test_path": "/gmail/v1/users/me/profile",
           "oauth2": {
@@ -36,7 +38,32 @@
             "client_id": "REPLACE.apps.googleusercontent.com",
             "client_secret_key": "GOOGLE_CLIENT_SECRET",
             "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
-            "scopes": ["https://mail.google.com/"],
+            "scopes": [
+              "https://www.googleapis.com/auth/gmail.modify",
+              "https://www.googleapis.com/auth/calendar.events",
+              "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+              "https://www.googleapis.com/auth/calendar.events.freebusy"
+            ],
+            "auth_params": { "access_type": "offline", "prompt": "consent" },
+            "revoke_url": "https://oauth2.googleapis.com/revoke"
+          }
+        },
+        "calendar": {
+          "base": "https://www.googleapis.com",
+          "key": "GOOGLE_WORKSPACE_REFRESH_TOKEN",
+          "auth": "oauth2",
+          "test_path": "/calendar/v3/users/me/calendarList/primary",
+          "oauth2": {
+            "token_url": "https://oauth2.googleapis.com/token",
+            "client_id": "REPLACE.apps.googleusercontent.com",
+            "client_secret_key": "GOOGLE_CLIENT_SECRET",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "scopes": [
+              "https://www.googleapis.com/auth/gmail.modify",
+              "https://www.googleapis.com/auth/calendar.events",
+              "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+              "https://www.googleapis.com/auth/calendar.events.freebusy"
+            ],
             "auth_params": { "access_type": "offline", "prompt": "consent" },
             "revoke_url": "https://oauth2.googleapis.com/revoke"
           }
@@ -45,7 +72,17 @@
         // username and password (no address here).
         "proxy": { "key": "PROXY", "auth": "egress-proxy", "egress_proxy": { "ports": [80, 443] } }
       },
-      "access": { "proxy": { "paths": ["/"] }, "gmail": { "paths": ["/"], "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] } }
+      "access": {
+        "proxy": { "paths": ["/"] },
+        "gmail": {
+          "paths": ["/gmail/v1/users/me/profile", "/gmail/v1/users/me/messages", "/gmail/v1/users/me/threads", "/gmail/v1/users/me/drafts", "/gmail/v1/users/me/labels", "/gmail/v1/users/me/settings/sendAs"],
+          "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        },
+        "calendar": {
+          "paths": ["/calendar/v3/users/me/calendarList", "/calendar/v3/calendars/", "/calendar/v3/freeBusy"],
+          "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        }
+      }
     }
   }
   // Secrets (wrangler secret put): MASTER_KEY, CALLER_SECRET, ADMIN_TOKEN, OAUTH_CLIENT_SECRETS
