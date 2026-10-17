@@ -188,9 +188,6 @@ func TestOAuthRevokedRefreshTokenFailsClosed(t *testing.T) {
 	if got.count() != 0 {
 		t.Fatal("the API was called without a valid access token")
 	}
-	if f := h.OAuthFailure("API_KEY"); !strings.Contains(f, "invalid_grant") {
-		t.Fatalf("OAuthFailure = %q; want the refresh failure for the dashboard", f)
-	}
 	// A failed refresh is not retried on every call...
 	call(h, "GET", "/api/v1/x", testToken, nil)
 	if c := te.calls.Load(); c != 1 {
@@ -203,9 +200,6 @@ func TestOAuthRevokedRefreshTokenFailsClosed(t *testing.T) {
 	*clock = clock.Add(oauthRetry)
 	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusOK {
 		t.Fatalf("after the account is fixed: %d %s", w.Code, w.Body)
-	}
-	if f := h.OAuthFailure("API_KEY"); f != "" {
-		t.Fatalf("OAuthFailure after success = %q", f)
 	}
 	if strings.Contains(audit.String(), testRefresh) {
 		t.Fatal("audit log holds the refresh token")

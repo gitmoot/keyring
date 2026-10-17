@@ -184,10 +184,10 @@ func (h *Handler) retainOAuth(config *policy.Config, keys map[string]string) {
 	}
 }
 
-// OAuthFailure returns why the last refresh of the named refresh token failed,
-// or "" if it worked or has not been tried. Values in use now are checked, so
-// a replaced token starts clean.
-func (h *Handler) OAuthFailure(keyName string) string {
+// OAuthFailure returns the last refresh failure and whether the provider
+// rejected the credential or client. Values in use now are checked, so a
+// replaced token starts clean. Neither result contains credential material.
+func (h *Handler) OAuthFailure(keyName string) (message string, reconnect bool) {
 	snap := h.snap.Load()
 	for _, svc := range snap.config.Services {
 		if svc.Auth != policy.AuthOAuth2 || svc.Key != keyName {
@@ -198,15 +198,17 @@ func (h *Handler) OAuthFailure(keyName string) string {
 		h.oauth.mu.Lock()
 		e := h.oauth.entries[k]
 		var msg string
+		var rejected bool
 		if e != nil && e.err != nil {
 			msg = e.err.Error()
+			rejected = errors.Is(e.err, errOAuthRejected)
 		}
 		h.oauth.mu.Unlock()
 		if msg != "" {
-			return msg
+			return msg, rejected
 		}
 	}
-	return ""
+	return "", false
 }
 
 var oauthErrorCode = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)

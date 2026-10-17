@@ -556,10 +556,15 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 	// Why a service's refresh failed, for oauth2 services whose last
 	// refresh failed (never a token).
 	failing := map[string]string{}
+	reconnect := map[string]bool{}
 	for name, svc := range s.Services {
 		if svc.Auth == policy.AuthOAuth2 {
-			if why := in.proxy.OAuthFailure(svc.Key); why != "" {
+			why, rejected := in.proxy.OAuthFailure(svc.Key)
+			if why != "" {
 				failing[name] = why
+			}
+			if rejected {
+				reconnect[name] = true
 			}
 		} else if svc.Auth == policy.AuthGcloud || svc.Auth == policy.AuthGcloudLogin {
 			why, _ := in.proxy.GoogleStatus(svc.GoogleAccount)
@@ -580,7 +585,8 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		"unlocked": true, "id": s.ID, "version": s.Version,
 		"listen": s.Listen, "allow_sources": s.AllowSources, "consent": consentView,
 		"services": s.Services, "roles": roles, "keys": keys, "failing": failing,
-		"google": googleView,
+		"reconnect_required": reconnect,
+		"google":             googleView,
 	})
 }
 

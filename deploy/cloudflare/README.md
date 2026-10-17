@@ -34,7 +34,7 @@ The DO keeps each item under its own storage key, so writers of different items 
   - `POST /admin/instances/<id>/links {"service", "ttl_seconds", "label"}` → `{"url", "expires_at"}`
   - `GET /admin/instances/<id>/services` → `{"services": [{"name", "connected", "failing"}]}`
   - `PUT /admin/instances/<id>/services/<name> {"service": {...}, "access": {...}}`: exceptions to the template
-  - `DELETE /admin/instances/<id>/keys/<service>`: revokes at the provider (OAuth) and deletes
+  - `DELETE /admin/instances/<id>/keys/<service>`: removes the local credential and pending OAuth consent, then attempts bounded provider revocation; inspect `revoked`/`revoke_error`, not just HTTP 200
   - `POST /admin/instances/<id>/role-token` → `{"role_token"}`; the old token stops working
   - `DELETE /admin/instances/<id>`: wipes the container and the DO's storage; repeating it returns 200
 - `/connect/<keyring_id>/c/<link>` and `/connect/callback`: public pages for the person. A link opens only while that keyring's container is running and the link is open, so a stranger cannot wake a container. The callback finds its keyring through a short-lived `__Host-` cookie; the keyring itself still checks the OAuth state, PKCE and its own browser cookie.
@@ -52,7 +52,7 @@ Inputs:
 | `ADMIN_TOKEN` | secret | the router's admin bearer token |
 | `OAUTH_CLIENT_SECRETS` | secret | JSON `{"GOOGLE_CLIENT_SECRET": "..."}`, pushed into every keyring |
 
-Gmail's OAuth flow needs a Web application client with redirect URI `<PUBLIC_BASE>/connect/callback` and its client ID in the template. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application.
+Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both template entries. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
 
 ```sh
 cd deploy/cloudflare
@@ -72,7 +72,90 @@ npx wrangler deploy \
 
 After `wrangler deploy` returns, the container image can stay "provisioning" for several minutes (seen: about 4). In that window new keyrings may start on the **old** image with the **new** template. Wait until `npx wrangler containers list` shows the application ready before creating keyrings.
 
-`--domain` adds the Worker's custom domain and its DNS record only; other records in the zone are not touched. Until a Google OAuth client exists, the template's `REPLACE` client id only breaks the Gmail sign-in; fixed-key services, consent forms, the caller check and deletes all work. Add a fixed-key service to a keyring with `PUT /admin/instances/<id>/services/<name>`.
+`--domain` adds the Worker's custom domain and its DNS record only; other records in the zone are not touched. The template's `REPLACE` client ID is not a working OAuth client. Until an approved client and secret exist, Gmail/Calendar activation is blocked; fixed-key services, consent forms, the caller check and deletes still work. Add a fixed-key service with `PUT /admin/instances/<id>/services/<name>`.
+
+## Per-person Gmail and Calendar
+
+The reference template uses one Google Workspace consent grant, separate from
+the existing Drive SDK login. `gmail` and `calendar` share
+`GOOGLE_WORKSPACE_REFRESH_TOKEN`, the same Web client and identical OAuth
+settings. A connection link for either asks for both services. An explicitly
+partial scope grant is rejected without replacing an existing credential.
+OAuth providers may omit `scope` only when it is unchanged from the request
+(RFC 6749 section 5.1).
+
+| Service | Base | Required scopes (all prefixed `https://www.googleapis.com/auth/`) |
+|---|---|---|
+| `gmail` | `https://gmail.googleapis.com` | `gmail.modify` |
+| `calendar` | `https://www.googleapis.com` | `calendar.events`, `calendar.calendarlist.readonly`, `calendar.events.freebusy` |
+
+Gmail paths retain `/gmail/v1/users/me/...`; Calendar paths retain
+`/calendar/v3/...`. Account-binding reads are Gmail `users/me/profile`
+(`emailAddress`) and Calendar `users/me/calendarList/primary` (`id`).
+Gmail signature reads at `users/me/settings/sendAs` need no settings-write
+scope. `calendar.events` alone does **not** authorize `freeBusy.query`.
+The profile does not request permanent mailbox deletion, calendar ACL/sharing,
+or full-mail/full-calendar scopes.
+
+The template grants only named API path families, but grants are not action
+approval. Phobos must keep these services out of unrestricted guest HTTP and
+enforce its own exact operation allowlist and durable confirmation before
+send, trash/delete, or attendee-changing operations. That includes the
+signature-expanded outgoing message and Calendar `If-Match`/`sendUpdates`
+controls. MCP receives API responses through Keyring, not Google credentials.
+
+### Provisioning and lifecycle
+
+1. Obtain the owner-approved client, publishing-mode decision and protected
+   `OAUTH_CLIENT_SECRETS` provisioning. Use a project separate from Drive:
+   [Google combined grants can revoke all included scopes together](https://developers.google.com/identity/protocols/oauth2/javascript-implicit-flow#incrementalAuth).
+   Two refresh-token strings under one client are not independent revocation
+   boundaries.
+2. New instances use the template. For an existing instance, PUT the `gmail`
+   and `calendar` service/access entries through the existing admin route.
+   Configure both before sending a consent link; the two PUTs are not atomic.
+   No Drive service, role token, SDK snapshot or instance size needs changing.
+   Both services must share the exact OAuth settings and refresh key.
+3. POST a normal `links` request for `gmail` or `calendar`. The browser-bound
+   code/PKCE callback stores the refresh token in the person's sealed state.
+   The client secret is a separate protected key and cannot be a service key.
+4. Verify authenticated identity reads through both proxy routes. `connected`
+   reflects a stored credential with no observed permanent provider rejection,
+   not a promise that the next API call will work. Rejected refresh/client
+   credentials make both services disconnected with a safe `failing` hint.
+   `invalid_grant` needs fresh consent; client/setup errors need operator repair.
+   Failure observations are in-memory and are re-established by actual calls
+   after restart; credentials themselves survive sealed-state restoration.
+5. DELETE `keys/gmail` **or** `keys/calendar` disconnects **both**, not Drive.
+   Local removal invalidates unopened links and in-flight callbacks before the
+   bounded remote revocation attempt. New consent for that key is refused
+   while revocation is pending. A renewal already in progress cannot forward
+   a token after its credential/binding changes; a request already sent to
+   Google cannot be recalled.
+6. HTTP 200 with `deleted:true, revoked:false, revoke_error:...` means local
+   removal succeeded but remote revocation is unconfirmed. Do not report it
+   as successful Google revocation. Wait for the completed response/sealed
+   state sync before treating disconnect as durable. A new browser-bound
+   connection may then be requested; do not restore an older sealed snapshot.
+
+### Pilot authorization is not public-launch approval
+
+[External OAuth apps in Testing receive seven-day refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration)
+for these scopes. Testing therefore requires repeat consent and cannot be
+described as durable unattended access. The owner must explicitly approve any
+change from Testing to an In Production personal-pilot project.
+[Google's personal-use verification exception](https://support.google.com/cloud/answer/13464323?hl=en)
+applies to fewer than 100 users with an unverified-app warning. It is not
+public-launch authorization or a blanket exemption from user-data policy or
+restricted-scope security-assessment requirements. Gmail scopes are restricted;
+review the [Gmail scope requirements](https://developers.google.com/workspace/gmail/api/auth/scopes)
+before expanding beyond the approved pilot.
+
+In Production removes the Testing-specific seven-day limit, not all expiry:
+user revocation, Gmail password changes, inactivity, token-count limits,
+time-limited grants and Workspace admin policy can still require consent.
+Real permitted-account consent, refresh, revocation/reconnect and both service
+reads remain release gates. Offline fixtures do not satisfy them.
 
 ## Per-person Drive and Sheets
 

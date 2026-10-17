@@ -24,6 +24,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,13 +66,15 @@ type Server struct {
 
 	auditMu sync.Mutex
 
-	mu      sync.Mutex
-	links   map[[sha256.Size]byte]*link
-	signIns map[[sha256.Size]byte]*signIn
+	mu       sync.Mutex
+	links    map[[sha256.Size]byte]*link
+	signIns  map[[sha256.Size]byte]*signIn
+	revoking map[string]bool // keys whose remote revocation is still pending
 }
 
 type link struct {
 	service     string
+	key         string
 	label       string
 	expires     time.Time
 	google      bool
@@ -81,6 +84,8 @@ type link struct {
 type signIn struct {
 	service  string
 	oauth    policy.OAuth2 // the settings the sign-in started with
+	key      string
+	used     bool // retained during exchange so disconnect can invalidate it
 	verifier string
 	// browser is the hash of the cookie set on the browser that pressed
 	// Connect; the callback must come from that browser.
@@ -345,12 +350,17 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 	expires := now.Add(ttl)
 	s.mu.Lock()
 	s.prune(now)
+	if s.revoking[svc.Key] {
+		s.mu.Unlock()
+		apiError(w, http.StatusConflict, "disconnect is still in progress")
+		return
+	}
 	if len(s.links) >= maxPending {
 		s.mu.Unlock()
 		apiError(w, http.StatusTooManyRequests, "too many open links")
 		return
 	}
-	s.links[h] = &link{service: req.Service, label: req.Label, expires: expires}
+	s.links[h] = &link{service: req.Service, key: svc.Key, label: req.Label, expires: expires}
 	if svc.Auth == policy.AuthGcloudLogin {
 		s.links[h].google = true
 		s.links[h].googleEpoch = s.google.Epoch()
@@ -362,9 +372,8 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"url": u.String(), "expires_at": expires.UTC().Format(time.RFC3339)})
 }
 
-// deleteKey deletes the service's stored key. For an oauth2 service with a
-// revoke_url the provider is told first; the key is deleted even if that
-// fails.
+// deleteKey removes the service's stored key. OAuth removal also invalidates
+// pending consent and attempts bounded remote revocation.
 func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("service")
 	svc, ok := s.config().Services[name]
@@ -384,33 +393,77 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "signing keys are deleted by the owner")
 		return
 	}
+	if svc.Auth == policy.AuthOAuth2 {
+		s.deleteOAuthKey(w, r, name, svc)
+		return
+	}
 	keys, err := s.keys.Load()
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "store unreadable")
 		return
 	}
-	value, stored := keys[svc.Key]
+	_, stored := keys[svc.Key]
 	if !stored {
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": false, "key": svc.Key})
 		return
 	}
 	result := map[string]any{"deleted": true, "key": svc.Key}
-	if svc.Auth == policy.AuthOAuth2 && svc.OAuth2.RevokeURL != "" {
-		var secret string
-		if svc.OAuth2.ClientSecretKey != "" {
-			secret = keys[svc.OAuth2.ClientSecretKey]
+	if err := s.keys.Delete(svc.Key); err != nil {
+		apiError(w, http.StatusInternalServerError, "could not delete the key")
+		return
+	}
+	s.writeAudit("key_deleted", map[string]any{"service": name, "key": svc.Key, "revoked": result["revoked"]})
+	writeJSON(w, http.StatusOK, result)
+}
+
+// deleteOAuthKey linearizes local removal against callback publication, without
+// holding the consent lock across the provider request. New consent for this
+// shared key stays blocked until the old grant's revocation attempt finishes.
+func (s *Server) deleteOAuthKey(w http.ResponseWriter, r *http.Request, name string, svc policy.Service) {
+	s.mu.Lock()
+	if s.revoking[svc.Key] {
+		s.mu.Unlock()
+		apiError(w, http.StatusConflict, "disconnect is still in progress")
+		return
+	}
+	if s.revoking == nil {
+		s.revoking = make(map[string]bool)
+	}
+	s.revoking[svc.Key] = true
+	for h, l := range s.links {
+		if l.key == svc.Key {
+			delete(s.links, h)
 		}
+	}
+	for h, f := range s.signIns {
+		if f.key == svc.Key {
+			delete(s.signIns, h)
+		}
+	}
+	keys, err := s.keys.Load()
+	value, stored := keys[svc.Key]
+	if err == nil && stored {
+		err = s.keys.Delete(svc.Key)
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.revoking, svc.Key)
+		s.mu.Unlock()
+	}()
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "could not remove the connection")
+		return
+	}
+	result := map[string]any{"deleted": stored, "key": svc.Key}
+	if stored && svc.OAuth2.RevokeURL != "" {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		revokeErr := s.revoke(ctx, *svc.OAuth2, value, secret)
+		revokeErr := s.revoke(ctx, *svc.OAuth2, value, keys[svc.OAuth2.ClientSecretKey])
 		cancel()
 		result["revoked"] = revokeErr == nil
 		if revokeErr != nil {
 			result["revoke_error"] = revokeErr.Error()
 		}
-	}
-	if err := s.keys.Delete(svc.Key); err != nil {
-		apiError(w, http.StatusInternalServerError, "could not delete the key")
-		return
 	}
 	s.writeAudit("key_deleted", map[string]any{"service": name, "key": svc.Key, "revoked": result["revoked"]})
 	writeJSON(w, http.StatusOK, result)
@@ -559,7 +612,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		return
 	}
 	svc, known := cfg.Services[l.service]
-	if !known || !linkable(svc) {
+	if !known || !linkable(svc) || svc.Key != l.key {
 		s.mu.Unlock()
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
 		return
@@ -613,6 +666,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 	state, verifier, browser := randomToken(), randomToken(), randomToken()
 	s.signIns[hashOf(state)] = &signIn{
 		service:  service,
+		key:      svc.Key,
 		oauth:    *svc.OAuth2,
 		verifier: verifier,
 		browser:  hashOf(browser),
@@ -665,13 +719,25 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 	now := s.now()
 	s.mu.Lock()
 	f, ok := s.signIns[h]
-	// One try per sign-in, whatever happens next.
-	delete(s.signIns, h)
+	// Mark used before releasing the lock, but keep the entry until publication.
+	// Disconnect removes it even while the code exchange is in flight.
+	if ok && !f.used {
+		f.used = true
+	} else {
+		ok = false
+	}
 	s.mu.Unlock()
 	if state == "" || !ok || !now.Before(f.expires) {
 		render(w, http.StatusBadRequest, pageData{Message: "This sign-in has expired or was already used. Ask for a new link."})
 		return
 	}
+	defer func() {
+		s.mu.Lock()
+		if s.signIns[h] == f {
+			delete(s.signIns, h)
+		}
+		s.mu.Unlock()
+	}()
 	expire := &http.Cookie{Name: cookieName(public), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: public.Scheme == "https", SameSite: http.SameSiteLaxMode}
 	http.SetCookie(w, expire)
 	cookie, err := r.Cookie(cookieName(public))
@@ -693,7 +759,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		return
 	}
 	svc, known := s.config().Services[f.service]
-	if !known || svc.Auth != policy.AuthOAuth2 || !svc.OAuth2.Equal(&f.oauth) {
+	if !known || svc.Key != f.key || svc.Auth != policy.AuthOAuth2 || !svc.OAuth2.Equal(&f.oauth) {
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": "service changed"})
 		render(w, http.StatusConflict, pageData{Message: "This service's settings changed during the sign-in. Ask for a new link."})
 		return
@@ -725,7 +791,17 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		render(w, http.StatusBadGateway, pageData{Service: f.service, Message: "Connecting failed: " + err.Error() + ". Ask for a new link."})
 		return
 	}
-	if err := s.keys.Set(svc.Key, refresh); err != nil {
+	s.mu.Lock()
+	current, known := s.config().Services[f.service]
+	if s.signIns[h] != f || !s.now().Before(f.expires) || !known ||
+		current.Key != f.key || current.Auth != policy.AuthOAuth2 || !current.OAuth2.Equal(&f.oauth) {
+		s.mu.Unlock()
+		render(w, http.StatusConflict, pageData{Message: "This connection was removed or changed during sign-in. Ask for a new link."})
+		return
+	}
+	err = s.keys.Set(f.key, refresh)
+	s.mu.Unlock()
+	if err != nil {
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": "store"})
 		render(w, http.StatusInternalServerError, pageData{Message: "The sign-in worked but could not be saved. Ask for a new link."})
 		return
@@ -760,8 +836,9 @@ func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier
 	}
 	defer resp.Body.Close()
 	var body struct {
-		RefreshToken string `json:"refresh_token"`
-		Error        string `json:"error"`
+		RefreshToken string  `json:"refresh_token"`
+		Error        string  `json:"error"`
+		Scope        *string `json:"scope"`
 	}
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body)
 	if resp.StatusCode != http.StatusOK {
@@ -773,6 +850,17 @@ func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier
 	}
 	if decodeErr != nil {
 		return "", errors.New("the provider sent invalid JSON")
+	}
+	// RFC 6749 section 5.1 permits omission only when the granted scopes
+	// equal those requested. An explicit partial grant must not activate
+	// services that share this credential.
+	if body.Scope != nil {
+		granted := strings.Fields(*body.Scope)
+		for _, required := range cfg.Scopes {
+			if !slices.Contains(granted, required) {
+				return "", errors.New("the provider did not grant all required permissions")
+			}
+		}
 	}
 	if !usableToken(body.RefreshToken) {
 		return "", errors.New("the provider sent no refresh token (check the service's auth_params, e.g. access_type=offline and prompt=consent for Google)")

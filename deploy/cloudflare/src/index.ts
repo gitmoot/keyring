@@ -216,6 +216,7 @@ interface Reply {
 	services?: Record<string, { key: string; auth?: string; google_account?: string }>;
 	google?: { phase: string; busy: boolean; error?: string };
 	failing?: Record<string, string>;
+	reconnect_required?: Record<string, boolean>;
 	roles?: Record<string, { access?: Record<string, unknown>; expires?: string }>;
 }
 
@@ -510,7 +511,7 @@ export class KeyringInstance extends DurableObject<Env> {
 			const list = Object.entries(s.services ?? {})
 				.map(([name, svc]) => {
 					const google = svc.google_account === "me" && (svc.auth === "gcloud" || svc.auth === "gcloud-login");
-					return { name, connected: google ? s.google?.phase === "connected" : keys.has(svc.key),
+					return { name, connected: google ? s.google?.phase === "connected" : keys.has(svc.key) && !s.reconnect_required?.[name],
 						failing: google ? s.google?.error ?? s.failing?.[name] ?? (s.google?.phase === "connected" ? null : "Google connection is not ready") : s.failing?.[name] ?? null };
 				})
 				.sort((a, b) => a.name.localeCompare(b.name));
