@@ -144,6 +144,10 @@ controls. MCP receives API responses through Keyring, not Google credentials.
 
 ### Operator-managed client provisioning
 
+The service owner authorizes the deployment operator. Delegation does not
+waive the owner's approval gates for credentials, publishing, deployment,
+spending or permissions.
+
 App/project/client creation and protected credential provisioning belong to
 the deployment operator, not the person connecting Gmail and Calendar.
 The operator uses an authorized Google Cloud console session for the approved
