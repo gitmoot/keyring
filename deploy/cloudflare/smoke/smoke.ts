@@ -145,6 +145,7 @@ const env = {
 	CALLER_SECRET: "caller-secret",
 	ADMIN_TOKEN: "admin-token",
 	OAUTH_CLIENT_SECRETS: JSON.stringify({ GOOGLE_CLIENT_SECRET: "client-secret-value" }),
+	OAUTH_CLIENT_SECRETS_BY_INSTANCE: "{}",
 	// Passed as a string when SMOKE_TEMPLATE_AS_STRING is set, as `wrangler deploy --var` does.
 	SERVICES_TEMPLATE: ((t: object) => (process.env.SMOKE_TEMPLATE_AS_STRING ? JSON.stringify(t) : t))({
 		services: {
@@ -274,6 +275,86 @@ try {
 	expect("storage and container after delete", [storages.get(id)!.m.size, containers.get(id)!.running], [0, false]);
 	expect("delete again", (await call("DELETE", `/admin/instances/${id}`, ADMIN)).status, 200);
 	expect("call after delete", (await call("GET", `/p/${id}/echo/x`, { ...P, "x-keyring-token": token2 })).status, 404);
+
+	// A pilot secret must work only in its selected keyring, including an
+	// existing keyring restarted from sealed state. Other global clients stay usable.
+	{
+		const provider = serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(req) {
+				const path = new URL(req.url).pathname;
+				if (req.method !== "POST" || !["/pilot/token", "/global/token"].includes(path)) return new Response("", { status: 404 });
+				const form = await req.formData();
+				const pilot = path === "/pilot/token";
+				if (form.get("client_id") !== (pilot ? "pilot-client" : "global-client") ||
+					form.get("client_secret") !== (pilot ? "synthetic-owner-only-secret" : "client-secret-value")) {
+					return Response.json({ error: "invalid_client" }, { status: 400 });
+				}
+				return Response.json({ refresh_token: "synthetic-refresh", access_token: "synthetic-access", token_type: "Bearer", expires_in: 3600 });
+			},
+		});
+		try {
+			const pilot = await (await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "pilot" }))).json() as { keyring_id: string; role_token: string };
+			const other = await (await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "other" }))).json() as { keyring_id: string; role_token: string };
+			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = JSON.stringify({ [pilot.keyring_id]: { GOOGLE_CLIENT_SECRET: "synthetic-owner-only-secret" } });
+			for (const person of [pilot, other]) {
+				await containers.get(person.keyring_id)!.destroy();
+				objects.delete(person.keyring_id);
+			}
+			const configure = async (id: string, mode: "pilot" | "global") => {
+				const response = await call("PUT", `/admin/instances/${id}/services/gmail`, ADMIN, JSON.stringify({
+					service: {
+						base: `http://127.0.0.1:${api.port}`, key: "GMAIL_REFRESH", auth: "oauth2",
+						oauth2: {
+							token_url: `http://127.0.0.1:${provider.port}/${mode}/token`,
+							client_id: `${mode}-client`, client_secret_key: "GOOGLE_CLIENT_SECRET",
+							auth_url: "https://accounts.example.com/auth", scopes: ["read"],
+						},
+					},
+				}));
+				expect(`${mode} OAuth service configured`, response.status, 200);
+			};
+			const connect = async (id: string) => {
+				const link = await (await call("POST", `/admin/instances/${id}/links`, ADMIN, JSON.stringify({ service: "gmail" }))).json() as { url: string };
+				const start = await call("POST", new URL(link.url).pathname, FORM, "");
+				const redirect = new URL(start.headers.get("location")!);
+				const cookie = start.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+				const query = new URLSearchParams({ state: redirect.searchParams.get("state")!, code: "synthetic-code" });
+				return call("GET", `/connect/callback?${query}`, { cookie });
+			};
+			const read = (person: typeof pilot) => call("GET", `/p/${person.keyring_id}/gmail/read`, {
+				"x-keyring-caller": "caller-secret", "x-keyring-token": person.role_token,
+			});
+			await configure(pilot.keyring_id, "pilot");
+			await configure(other.keyring_id, "global");
+			expect("selected keyring can consent with its private pilot client", (await connect(pilot.keyring_id)).status, 200);
+			expect("selected keyring can refresh and use the pilot grant", (await read(pilot)).status, 200);
+			expect("other keyring retains its existing global client", (await connect(other.keyring_id)).status, 200);
+			expect("other keyring can use its global grant", (await read(other)).status, 200);
+			await containers.get(pilot.keyring_id)!.destroy();
+			objects.delete(pilot.keyring_id);
+			expect("pilot secret and grant survive sealed cold restore", (await read(pilot)).status, 200);
+			// Even copying the pilot's service settings must not copy its secret.
+			await configure(other.keyring_id, "pilot");
+			expect("unselected keyring cannot consent with the pilot client", (await connect(other.keyring_id)).status, 502);
+			expect("unselected keyring cannot reuse its old grant as the pilot", (await read(other)).status, 503);
+			const savedSettings = env.OAUTH_CLIENT_SECRETS_BY_INSTANCE;
+			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = "synthetic-private-secret-not-json";
+			await containers.get(pilot.keyring_id)!.destroy();
+			objects.delete(pilot.keyring_id);
+			const settingsFailure = await call("GET", `/admin/instances/${pilot.keyring_id}/services`, ADMIN);
+			expect("malformed secret settings fail without quoting secret text",
+				[settingsFailure.status, (await settingsFailure.text()).includes("synthetic-private-secret")], [502, false]);
+			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = savedSettings;
+			objects.delete(pilot.keyring_id);
+			expect("corrected protected settings restore pilot access", (await read(pilot)).status, 200);
+			for (const person of [pilot, other]) await call("DELETE", `/admin/instances/${person.keyring_id}`, ADMIN);
+		} finally {
+			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = "{}";
+			provider.stop(true);
+		}
+	}
 
 	// Review of e61b020: a fresh object (evicted, redeployed) must not stop a
 	// running container on its first alarm, and an alarm during a start must

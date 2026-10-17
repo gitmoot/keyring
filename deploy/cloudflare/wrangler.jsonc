@@ -85,5 +85,6 @@
       }
     }
   }
-  // Secrets (wrangler secret put): MASTER_KEY, CALLER_SECRET, ADMIN_TOKEN, OAUTH_CLIENT_SECRETS
+  // Secrets: MASTER_KEY, CALLER_SECRET, ADMIN_TOKEN; approved OAuth clients use
+  // OAUTH_CLIENT_SECRETS (global) or OAUTH_CLIENT_SECRETS_BY_INSTANCE (targeted).
 }
