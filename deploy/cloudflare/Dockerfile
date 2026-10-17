@@ -22,6 +22,11 @@ RUN curl --fail --show-error --silent --location \
     && echo 'f865da648f6fdae2015abb5b32eaa0eb10520e88f0ca735cfb33795868c8d26f  /tmp/google-cloud-cli.tar.gz' | sha256sum --check --strict - \
     && tar -xzf /tmp/google-cloud-cli.tar.gz -C /opt \
     && rm /tmp/google-cloud-cli.tar.gz
+# The archive has no bytecode cache, and the non-root runtime cannot create one.
+# Pay compilation once at build time, not on every constrained token renewal.
+# These legacy Python 2 trees cannot be imported by the bundled Python 3 runtime.
+RUN /opt/google-cloud-sdk/platform/bundledpythonunix/bin/python3 -m compileall -q \
+    -x '/(python2|third_party/yaml)/' /opt/google-cloud-sdk/lib
 
 FROM debian:bookworm-slim
 RUN apt-get update \
