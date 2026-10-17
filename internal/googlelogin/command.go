@@ -98,7 +98,7 @@ func (c *Controller) command(ctx context.Context, dir string, args ...string) (*
 	return cmd, cleanup, err
 }
 
-func (c *Controller) run(ctx context.Context, dir string, args ...string) ([]byte, error) {
+func (c *Controller) run(ctx context.Context, dir string, trace *gcloudexec.RenewalTrace, args ...string) ([]byte, error) {
 	cmd, cleanup, err := c.command(ctx, dir, args...)
 	if err != nil {
 		return nil, errCommand
@@ -107,7 +107,9 @@ func (c *Controller) run(ctx context.Context, dir string, args ...string) ([]byt
 	stdout, stderr := &commandOutput{}, &commandOutput{}
 	defer func() { clear(stderr.data.Bytes()) }()
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	trace.Process(cmd.ProcessState)
+	if err != nil {
 		clear(stdout.data.Bytes())
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

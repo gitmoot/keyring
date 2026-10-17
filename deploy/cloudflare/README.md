@@ -307,6 +307,51 @@ File-mode hosts retain their 30-second renewal budget. Cached requests do not
 start the SDK again, and neither a renewal timeout nor this budget change
 requires reconnecting the saved Google account or increasing the instance size.
 
+#### Read-only renewal diagnostics
+
+`GET /admin/instances/<id>/google-renewal` uses the existing admin authentication
+and caller proof. It reads only the latest actual renewal attempt in memory.
+Unlike `GET services`, it never starts or unlocks a container, imports bindings,
+mints a token, syncs state, or extends the application's idle deadline. A
+diagnostic-only Durable Object wake also leaves the platform inactivity setting
+alone; normal startup/alarm work restores that setting when needed.
+A diagnostic read does not pin an idle container; concurrent shutdown can fail
+the read with the static unavailable response. Normal traffic's lifecycle guards
+remain unchanged.
+
+The response is either `available: false` with one of `container_not_running`,
+`starting`, `locked`, or `no_attempt`, or `available: true` with
+`process_started_at` and an `attempt`:
+
+| Field | Meaning |
+| --- | --- |
+| `started_at`, `completed_at` | UTC attempt times; completion is absent while running |
+| `phase`, `outcome`, `duration_ms` | Current phase, or first failed phase; successful completion is `complete`. Outcomes are `running`, `success`, `timeout`, `canceled`, or `error` |
+| `steps` | Fixed entries for `configuration`, `controller_wait`, `sdk_execution`, `persistence`, and `token_validation`, each with wall duration and outcome; untouched phases are `not_run` |
+| `process` | `available` plus OS-reported SDK process `cpu_time_ms` (user + system), `exit_code`, and numeric `signal`; available only after a process has exited |
+
+Durations use the monotonic clock. A cache hit or diagnostic read does not create
+an attempt. No account/project identifiers, command arguments, raw errors,
+stdout/stderr, credential bytes or URLs are returned. The Worker bounds the
+response to 16 KiB and reconstructs only allowlisted fields; transport,
+malformed-response and oversize failures return a static `503`, not raw data.
+
+This is not persistent incident history. Restart or account-cache invalidation
+can discard the record; `no_attempt` is not proof of health. Instrument deployment
+cannot recover an old failure's missing phase or elapsed time. SDK wall/CPU
+timing helps separate execution from queueing and validation, but does not by
+itself identify every SDK-internal network wait. The 45-second renewal limit,
+resource allocation and grants are unchanged.
+
+Before operator rollout, preserve the **current** bindings, including
+`OAUTH_CLIENT_SECRETS_BY_INSTANCE`, private pilot configuration, sealed SDK state,
+global template and resources—not a stale pre-import baseline. Deploy only the
+reviewed image/Worker, then use a separately authorized instrumented request to
+collect a new attempt. Reading this endpoint is not permission to retry,
+reconnect, revoke, or resize a keyring.
+
+#### Disconnect and cleanup
+
 `DELETE /admin/instances/<id>/keys/drive` disables all three APIs in sealed state
 first, invalidates old flow capabilities, cancels/joins SDK writers, attempts
 remote revocation, and removes local credentials. A remote revocation failure

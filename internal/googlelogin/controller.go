@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
@@ -269,7 +270,7 @@ func (c *Controller) connectLocked(ctx context.Context, j *job) error {
 		if err := c.login(ctx, j, dir, next.Account); err != nil {
 			return err
 		}
-		account, err := c.run(ctx, dir, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)", "--configuration=default", "--quiet")
+		account, err := c.run(ctx, dir, nil, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)", "--configuration=default", "--quiet")
 		if err != nil {
 			return err
 		}
@@ -314,7 +315,8 @@ func (c *Controller) connectLocked(ctx context.Context, j *job) error {
 
 // Token is the container provider's command boundary. A refreshed credential
 // is sealed before its access token can escape to an upstream request.
-func (c *Controller) Token(ctx context.Context, binding policy.GoogleAccount) (string, error) {
+func (c *Controller) Token(ctx context.Context, binding policy.GoogleAccount, trace *gcloudexec.RenewalTrace) (string, error) {
+	trace.Enter(gcloudexec.RenewalControllerWait)
 	if err := c.acquire(ctx); err != nil {
 		return "", err
 	}
@@ -340,10 +342,14 @@ func (c *Controller) Token(ctx context.Context, binding policy.GoogleAccount) (s
 		return "", errLogin
 	}
 	dir := filepath.Join(c.root, s.Generation)
-	out, runErr := c.run(ctx, dir, "auth", "print-access-token", s.Account, "--account="+s.Account, "--configuration=default", "--quiet")
+	trace.Enter(gcloudexec.RenewalSDK)
+	out, runErr := c.run(ctx, dir, trace, "auth", "print-access-token", s.Account, "--account="+s.Account, "--configuration=default", "--quiet")
+	trace.End(runErr)
+	trace.Enter(gcloudexec.RenewalPersistence)
 	defer clear(out)
 	next, err := capture(dir, s)
 	if err != nil {
+		trace.End(err)
 		return "", errCommand
 	}
 	if errors.Is(runErr, errLogin) {
@@ -353,12 +359,15 @@ func (c *Controller) Token(ctx context.Context, binding policy.GoogleAccount) (s
 	}
 	if next != s {
 		if err := c.save(ctx, s.Generation, next); err != nil {
+			trace.End(err)
 			return "", errCommand
 		}
 	}
 	if current := c.snapshot(); current == nil || current.Generation != s.Generation {
+		trace.End(errLogin)
 		return "", errLogin
 	}
+	trace.End(nil)
 	if runErr != nil {
 		return "", runErr
 	}
@@ -410,7 +419,7 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 		}
 		dir := filepath.Join(c.root, entry.Name())
 		if entry.IsDir() {
-			_, err := c.run(cleanupCtx, dir, "auth", "revoke", "--all", "--configuration=default", "--quiet")
+			_, err := c.run(cleanupCtx, dir, nil, "auth", "revoke", "--all", "--configuration=default", "--quiet")
 			revokeErr = errors.Join(revokeErr, err)
 		}
 		if err := os.RemoveAll(dir); err != nil {

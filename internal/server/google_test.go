@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
@@ -375,8 +376,8 @@ func TestContainerGoogleRenewalBeyondHostBudget(t *testing.T) {
 	}
 	h := New(&cfg, nil, audit)
 	h.client.Transport = host.client.Transport
-	h.SetGoogleCommand(func(ctx context.Context, _ policy.GoogleAccount) (string, error) {
-		token, _, err := host.fetchGoogleToken(ctx, account)
+	h.SetGoogleCommand(func(ctx context.Context, _ policy.GoogleAccount, trace *gcloudexec.RenewalTrace) (string, error) {
+		token, _, err := host.fetchGoogleToken(ctx, account, trace)
 		return token, err
 	})
 	proxy := httptest.NewServer(h)

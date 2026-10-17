@@ -6,10 +6,38 @@ import (
 	"encoding/json"
 	"maps"
 	"net/http"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
 )
+
+var renewalProcessStarted = time.Now().UTC()
+
+// googleRenewal only observes memory. In particular it must not unlock an
+// instance, inspect SDK files, mint a token, or persist a diagnostic read.
+func (in *Instance) googleRenewal(w http.ResponseWriter, _ *http.Request) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if !in.opt.Container {
+		writeError(w, &httpError{http.StatusNotFound, "container Google diagnostics are unavailable"})
+		return
+	}
+	if in.state == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "reason": "locked"})
+		return
+	}
+	record, ok := in.proxy.GoogleRenewal("me")
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false, "reason": "no_attempt", "process_started_at": renewalProcessStarted,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available": true, "process_started_at": renewalProcessStarted, "attempt": record,
+	})
+}
 
 func (in *Instance) saveGoogle(ctx context.Context, expected string, next *googlelogin.Snapshot) error {
 	version, err := in.change(func(s *State) error {

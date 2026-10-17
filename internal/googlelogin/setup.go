@@ -18,7 +18,7 @@ func (c *Controller) projectCommand(ctx context.Context, s *Snapshot, args ...st
 	defer cancel()
 	args = append(args, "--account="+s.Account, "--configuration=default", "--quiet")
 	dir := filepath.Join(c.root, s.Generation)
-	out, runErr := c.run(commandCtx, dir, args...)
+	out, runErr := c.run(commandCtx, dir, nil, args...)
 	current := c.snapshot()
 	if current == nil || current.Generation != s.Generation {
 		return nil, errors.New("Google connection was replaced")
