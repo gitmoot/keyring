@@ -27,10 +27,10 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
-    && install -d -m 0700 -o 65532 -g 65532 /run/keyring /run/keyring/google
+    && install -d -m 0700 -o 65532 -g 65532 /var/lib/keyring /var/lib/keyring/google
 COPY --from=google-sdk /opt/google-cloud-sdk /opt/google-cloud-sdk
 ENV CLOUDSDK_PYTHON=/opt/google-cloud-sdk/platform/bundledpythonunix/bin/python3 \
-    CLOUDSDK_CONFIG=/run/keyring/google \
+    CLOUDSDK_CONFIG=/var/lib/keyring/google \
     CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
     CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true
 COPY --from=build /keyring /usr/local/bin/keyring
