@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -338,5 +339,70 @@ func TestGoogleRenewalSurvivesConfigTransition(t *testing.T) {
 	}
 	if checks.Load() != 1 {
 		t.Fatalf("same binding renewed %d times across config transition; want one flight", checks.Load())
+	}
+}
+
+func TestContainerGoogleRenewalBeyondHostBudget(t *testing.T) {
+	t.Parallel()
+	host, audit, dirs, _, _ := googleFixture(t)
+	account := host.snap.Load().config.GoogleAccounts["personal"]
+	// Model the measured lite-container SDK startup with a real, cancellable
+	// command. Keep the host fixture's argv/environment and token validation.
+	if err := os.Rename(account.Executable, account.Executable+".inner"); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nsleep 31\nexec \"$0.inner\" \"$@\"\n"
+	if err := os.WriteFile(account.Executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := *host.snap.Load().config
+	cfg.ContainerMode = true
+	cfg.AllowSources = nil
+	binding := account
+	binding.Executable = policy.ContainerGoogleExecutable
+	binding.ConfigDir = policy.ContainerGoogleRoot + "/" + strings.Repeat("a", 32)
+	cfg.GoogleAccounts = map[string]policy.GoogleAccount{"me": binding}
+	cfg.Services = map[string]policy.Service{
+		"google-me-drive": {Auth: policy.AuthGcloud, GoogleAccount: "me", Base: "https://www.googleapis.com/drive/v3"},
+	}
+	cfg.Roles = map[string]policy.Role{
+		"router": {TokenSHA256: tokenHash("role-personal"), Access: map[string]policy.Access{
+			"google-me-drive": {Methods: []string{"GET"}, Paths: []string{"/files"}},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h := New(&cfg, nil, audit)
+	h.client.Transport = host.client.Transport
+	h.SetGoogleCommand(func(ctx context.Context, _ policy.GoogleAccount) (string, error) {
+		token, _, err := host.fetchGoogleToken(ctx, account)
+		return token, err
+	})
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+	// Match the existing caller's outer limit: a renewal may exceed the host
+	// budget, but must still leave room for the actual upstream request.
+	client := &http.Client{Timeout: time.Minute}
+	for range 2 {
+		req, err := http.NewRequest(http.MethodGet, proxy.URL+"/google-me-drive/files", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(TokenHeader, "role-personal")
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct{ Owner string }
+		err = json.NewDecoder(res.Body).Decode(&body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || err != nil || body.Owner != "personal" {
+			t.Fatalf("slow container renewal did not reach the correct upstream: status=%d owner=%q err=%v", res.StatusCode, body.Owner, err)
+		}
+	}
+	calls, err := os.ReadFile(filepath.Join(dirs["personal"], "calls"))
+	if err != nil || string(calls) != "call\n" {
+		t.Fatalf("cached request launched another SDK renewal: calls=%q err=%v", calls, err)
 	}
 }

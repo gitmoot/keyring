@@ -116,6 +116,14 @@ and checks active setup before idle shutdown. A platform kill during an unfinish
 browser flow expires that flow; saved login/project progress can be retried
 through a new link after wake.
 
+Container access-token renewal (SDK startup plus token validation) has a bounded
+45-second budget. The `lite` CPU allocation can take more than 30 seconds just
+to start the SDK; this leaves 15 seconds within the current Phobos gateway's
+60-second response-header limit for forwarding and the upstream response.
+File-mode hosts retain their 30-second renewal budget. Cached requests do not
+start the SDK again, and neither a renewal timeout nor this budget change
+requires reconnecting the saved Google account or increasing the instance size.
+
 `DELETE /admin/instances/<id>/keys/drive` disables all three APIs in sealed state
 first, invalidates old flow capabilities, cancels/joins SDK writers, attempts
 remote revocation, and removes local credentials. A remote revocation failure
