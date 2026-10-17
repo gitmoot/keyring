@@ -300,12 +300,21 @@ browser flow expires that flow; saved login/project progress can be retried
 through a new link after wake.
 
 Container access-token renewal (SDK startup plus token validation) has a bounded
-45-second budget. The `lite` CPU allocation can take more than 30 seconds just
-to start the SDK; this leaves 15 seconds within the current Phobos gateway's
+45-second budget, leaving 15 seconds within the current Phobos gateway's
 60-second response-header limit for forwarding and the upstream response.
 File-mode hosts retain their 30-second renewal budget. Cached requests do not
 start the SDK again, and neither a renewal timeout nor this budget change
 requires reconnecting the saved Google account or increasing the instance size.
+
+The image prepares SDK bytecode with its bundled Python interpreter at build
+time. The SDK archive has no bytecode cache, and the non-root runtime cannot
+write one in the SDK installation; without preparation, every cold command
+recompiles its imported SDK modules. Legacy Python 2-only compatibility trees
+remain in the image but are excluded from Python 3 compilation.
+This trades build time and image storage for less renewal CPU work; it changes
+neither the SDK source, credential handling, grants, instance resources nor the
+45-second deadline. Synthetic refresh measurements demonstrate the startup
+reduction, not recovery of a particular live Google account or network failure.
 
 #### Read-only renewal diagnostics
 
