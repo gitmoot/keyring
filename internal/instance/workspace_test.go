@@ -123,6 +123,7 @@ type workspaceFixture struct {
 	admin                     http.Handler
 	listen, pages, key, token string
 	options                   Options
+	audit                     *syncBuffer
 	provider                  *workspaceProvider
 }
 
@@ -148,12 +149,13 @@ func newWorkspaceFixture(t *testing.T, daily int) *workspaceFixture {
 	}
 	http.DefaultTransport = transport
 	t.Cleanup(func() { http.DefaultTransport = previous; transport.CloseIdleConnections() })
-	options := Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"}
+	audit := &syncBuffer{}
+	options := Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: audit, AuditName: "test"}
 	in, err := New(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workspaceFixture{t: t, in: in, admin: in.AdminHandler(), listen: freeAddr(t), pages: freeAddr(t), key: newKey(t), options: options, provider: provider}
+	f := &workspaceFixture{t: t, in: in, admin: in.AdminHandler(), listen: freeAddr(t), pages: freeAddr(t), key: newKey(t), options: options, provider: provider, audit: audit}
 	t.Cleanup(func() { f.in.Close() })
 	f.must("POST", "/create", map[string]any{"id": "person", "data_key": f.key, "listen": f.listen}, "")
 	oauth := map[string]any{"token_url": "https://oauth2.googleapis.com/token", "auth_url": "https://accounts.google.com/o/oauth2/v2/auth", "revoke_url": "https://oauth2.googleapis.com/revoke", "client_id": "fixture-client", "client_secret_key": "WORKSPACE_CLIENT_SECRET", "scopes": workspaceScopes, "auth_params": map[string]string{"access_type": "offline", "prompt": "consent"}}
@@ -608,5 +610,118 @@ func TestWorkspaceAccountHydrationCachesByBinding(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, f.provider.snapshot()) {
 		t.Fatal("status retried a rejected credential")
+	}
+}
+
+func TestWorkspaceAccountLegacyRevokeDiagnostics(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	f.provider.mu.Lock()
+	f.provider.rejectRevoke = true
+	f.provider.mu.Unlock()
+	disconnect := func() map[string]any {
+		request := httptest.NewRequest("DELETE", "/keys/gmail", nil)
+		request.RemoteAddr = "127.0.0.1:1234"
+		request.Header.Set("Authorization", "Bearer consent-fixture")
+		response := httptest.NewRecorder()
+		f.in.consent.APIHandler().ServeHTTP(response, request)
+		if response.Code != 200 {
+			t.Fatalf("legacy disconnect: %d %s", response.Code, response.Body.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := disconnect()
+	if before["deleted"] != true || before["revoked"] != false {
+		t.Fatalf("provider refusal was not exercised: %v", before)
+	}
+	if _, reported := before["revoke_error"]; !reported {
+		t.Fatalf("legacy baseline lost its diagnostic: %v", before)
+	}
+	f.must("PUT", "/keys/"+before["key"].(string), map[string]string{"value": "refresh-personal"}, "")
+	personal := f.migrate()
+	if after := disconnect(); !reflect.DeepEqual(before, after) {
+		t.Fatalf("migration changed the legacy revoke result: before=%v after=%v", before, after)
+	}
+	if current := f.listed(accountField(personal, "account_id")); current["connected"] != false || current["status"] != "disconnected" {
+		t.Fatalf("remote refusal restored a locally disconnected grant: %v", current)
+	}
+}
+
+func TestWorkspaceAccountDefaultRejectsServiceKeyRebinding(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	personal := f.hydrate(f.migrate())
+	for _, name := range []string{"gmail", "calendar"} {
+		service := f.in.proxy.Config().Services[name]
+		service.Key = "REBOUND_WORKSPACE_REFRESH"
+		if code, body := f.call("PUT", "/services/"+name, service, ""); code != 400 {
+			t.Fatalf("accepted unusable %s key rebinding: %d %v", name, code, body)
+		}
+	}
+	if current := f.listed(accountField(personal, "account_id")); !reflect.DeepEqual(current, personal) {
+		t.Fatalf("refused key rebinding changed the default: %v", current)
+	}
+	f.expectIdentity(personal, "personal@example.test")
+}
+
+func TestWorkspaceAccountCacheSurvivesUnrelatedChanges(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	f.hydrate(f.migrate())
+	work := f.connect(f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any), "work")
+	f.expectIdentity(work, "work@example.test")
+	before := f.provider.snapshot()
+	f.must("PUT", "/keys/UNRELATED_KEY", map[string]string{"value": "synthetic-unrelated"}, "")
+	f.expectIdentity(work, "work@example.test")
+	after := f.provider.snapshot()
+	if !reflect.DeepEqual(after[len(before):], []string{"profile:work@example.test"}) {
+		t.Fatalf("unrelated state change discarded the account token: %v", after[len(before):])
+	}
+	// A genuine credential replacement must still retire the old cache entry.
+	id := accountField(work, "account_id")
+	f.must("PUT", "/keys/GOOGLE_WORKSPACE_ACCOUNT_"+id, map[string]string{"value": "refresh-other"}, "")
+	replaced := f.hydrate(f.listed(id))
+	f.expectIdentity(replaced, "other@example.test")
+	if code, _, err := f.proxy("GET", qualified(work, "/gmail/gmail/v1/users/me/profile"), accountField(work, "binding_generation")); err != nil || code != 409 {
+		t.Fatalf("old binding survived credential replacement: %d %v", code, err)
+	}
+}
+
+func TestWorkspaceAccountAuditMatchesRefusalStatus(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	personal := f.hydrate(f.migrate())
+	before := f.provider.snapshot()
+	request := httptest.NewRequest("GET", qualified(personal, "/gmail/gmail/v1/users/me/profile"), nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("X-Keyring-Token", f.token)
+	response := httptest.NewRecorder()
+	f.in.proxy.ServeHTTP(response, request)
+	if response.Code != 428 {
+		t.Fatalf("missing generation: %d %s", response.Code, response.Body.String())
+	}
+	decoder := json.NewDecoder(strings.NewReader(f.audit.String()))
+	var audited int
+	for {
+		var record struct {
+			Service string `json:"service"`
+			Status  int    `json:"status"`
+		}
+		err := decoder.Decode(&record)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.Service == "gmail" {
+			audited = record.Status
+		}
+	}
+	if audited != response.Code {
+		t.Fatalf("HTTP refusal %d was recorded as %d", response.Code, audited)
+	}
+	if !reflect.DeepEqual(before, f.provider.snapshot()) {
+		t.Fatal("generation refusal reached the provider")
 	}
 }

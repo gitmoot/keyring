@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/workspace"
 )
 
 const (
@@ -172,6 +173,17 @@ func (h *Handler) retainOAuth(config *policy.Config, keys map[string]string) {
 		if svc.Auth == policy.AuthOAuth2 {
 			refresh, secret := oauthSecrets(svc, keys)
 			keep[oauthKey(*svc.OAuth2, refresh, secret)] = true
+		}
+	}
+	// Additional slots use the same Workspace client with their own sealed key.
+	// They are not separate public services, but their cache/failure state must
+	// survive an unrelated state swap just like the legacy default's does.
+	if svc, ok := config.Services["gmail"]; h.workspace != nil && ok && svc.Auth == policy.AuthOAuth2 {
+		secret := keys[svc.OAuth2.ClientSecretKey]
+		for name, refresh := range keys {
+			if id, account := strings.CutPrefix(name, workspace.AccountKeyPrefix); account && workspace.ValidID(id) {
+				keep[oauthKey(*svc.OAuth2, refresh, secret)] = true
+			}
 		}
 	}
 	h.oauth.mu.Lock()

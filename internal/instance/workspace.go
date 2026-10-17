@@ -105,6 +105,11 @@ func (s *State) validateWorkspace(container bool) error {
 	if !ok || a.Alias != "personal" {
 		return errors.New("invalid default Workspace account")
 	}
+	for _, name := range []string{"gmail", "calendar"} {
+		if svc, exists := s.Services[name]; exists && svc.Key != a.Key {
+			return errors.New("Workspace default refresh key is immutable after migration")
+		}
+	}
 	return nil
 }
 
@@ -296,7 +301,7 @@ func (in *Instance) createAccount(w http.ResponseWriter, r *http.Request) {
 		if len(grants["router"]) == 0 {
 			return workspace.Failure(403, "account_not_allowed")
 		}
-		s.WorkspaceAccounts[id] = workspace.Record{ID: id, Alias: req.Alias, Generation: accountID(), Key: "GOOGLE_WORKSPACE_ACCOUNT_" + id, Grants: grants}
+		s.WorkspaceAccounts[id] = workspace.Record{ID: id, Alias: req.Alias, Generation: accountID(), Key: workspace.AccountKeyPrefix + id, Grants: grants}
 		return nil
 	})
 	in.accountResult(w, id, err)

@@ -16,6 +16,7 @@ import (
 )
 
 const GenerationHeader = "X-Keyring-Binding-Generation"
+const AccountKeyPrefix = "GOOGLE_WORKSPACE_ACCOUNT_"
 
 var idPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var aliasPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -63,7 +64,9 @@ type Error struct {
 
 func (e *Error) Error() string              { return e.Code }
 func Failure(status int, code string) error { return &Error{status, code} }
-func WriteError(w http.ResponseWriter, err error) {
+
+// WriteError returns the emitted status so audit records match the response.
+func WriteError(w http.ResponseWriter, err error) int {
 	var e *Error
 	if !errors.As(err, &e) {
 		e = &Error{http.StatusInternalServerError, "account_operation_failed"}
@@ -72,6 +75,7 @@ func WriteError(w http.ResponseWriter, err error) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(e.Status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": e.Code})
+	return e.Status
 }
 
 // Selection owns a read lease through upstream dispatch. Release must be called

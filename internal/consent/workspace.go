@@ -77,14 +77,24 @@ func (s *Server) disconnectWorkspace(w http.ResponseWriter, r *http.Request, id,
 	s.mu.Unlock()
 	defer selected.Release()
 	revoked := false
-	if selected.Refresh != "" && selected.Service.OAuth2.RevokeURL != "" {
+	var revokeErr error
+	attempted := selected.Refresh != "" && selected.Service.OAuth2.RevokeURL != ""
+	if attempted {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-		revoked = s.revoke(ctx, *selected.Service.OAuth2, selected.Refresh, selected.Secret) == nil
+		revokeErr = s.revoke(ctx, *selected.Service.OAuth2, selected.Refresh, selected.Secret)
+		revoked = revokeErr == nil
 		cancel()
 	}
 	s.writeAudit("workspace_disconnected", map[string]any{"account_id": view.ID, "revoked": revoked})
 	if legacy {
-		writeJSON(w, 200, map[string]any{"deleted": selected.Refresh != "", "key": selected.Service.Key, "revoked": revoked})
+		result := map[string]any{"deleted": selected.Refresh != "", "key": selected.Service.Key}
+		if attempted {
+			result["revoked"] = revoked
+			if revokeErr != nil {
+				result["revoke_error"] = revokeErr.Error()
+			}
+		}
+		writeJSON(w, 200, result)
 		return true
 	}
 	writeJSON(w, 200, map[string]any{"account": view, "provider_revoked": revoked})

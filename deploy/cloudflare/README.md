@@ -295,6 +295,11 @@ email before publishing credentials. Adding another slot is refused while a
 connected slot has an unknown identity; duplicate connected identities are
 refused without revoking an already-active Google grant.
 
+After migration, the Gmail/Calendar service key references cannot be renamed:
+configuration changes that would detach the immutable default are rejected
+without changing state. Rotate a stored credential or reconnect its slot instead.
+Unrelated state changes preserve account token caches and cached refresh failures.
+
 Account-qualified proxy requests use
 `/p/<instance>/_accounts/<account>/<gmail|calendar>/<path>`, the existing role
 token/caller proof, and `X-Keyring-Binding-Generation`. The account gets separate
@@ -315,7 +320,8 @@ publish a replacement while an admitted request crosses that boundary. A request
 already sent may finish using its original credentials, never a replacement.
 Writes are not replayed. Local disconnect removes the shared Gmail/Calendar grant
 and invalidates flows before best-effort provider revocation; failure to revoke
-remotely does not reconnect it locally.
+remotely does not reconnect it locally. Legacy disconnect responses retain their
+bounded `revoke_error` diagnostic when remote revocation fails.
 
 Missing generation returns 428; stale generation returns 409
 `account_binding_changed`. Disconnected/unverified bindings return 409

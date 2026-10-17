@@ -273,8 +273,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var accountErr error
 	r, accountID, accountErr = workspaceRequest(r)
 	if accountErr != nil {
-		rec.Status, rec.Note = http.StatusBadRequest, "invalid account path"
-		workspace.WriteError(w, accountErr)
+		rec.Note = "invalid account path"
+		rec.Status = workspace.WriteError(w, accountErr)
 		return
 	}
 	if accountID != "" && h.workspace == nil {
@@ -410,8 +410,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var err error
 		selected, err = h.workspace.Acquire(r.Context(), accountID, r.Header.Get(workspace.GenerationHeader), roleName, r.Header.Get(TokenHeader), service, r.Method, rest)
 		if err != nil {
-			rec.Status, rec.Note = http.StatusConflict, "account selection refused"
-			workspace.WriteError(w, err)
+			rec.Note = "account selection refused"
+			rec.Status = workspace.WriteError(w, err)
 			return
 		}
 		if selected != nil {
@@ -552,8 +552,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if selected != nil {
 		if err := h.workspace.Revalidate(r.Context(), selected); err != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
-			rec.Status, rec.Note = http.StatusConflict, "account binding changed"
-			workspace.WriteError(w, err)
+			rec.Note = "account binding changed"
+			rec.Status = workspace.WriteError(w, err)
 			return
 		}
 	}
