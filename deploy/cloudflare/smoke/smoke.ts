@@ -360,6 +360,55 @@ try {
 	expect("delete again", (await call("DELETE", `/admin/instances/${id}`, ADMIN)).status, 200);
 	expect("call after delete", (await call("GET", `/p/${id}/echo/x`, { ...P, "x-keyring-token": token2 })).status, 404);
 
+	// Account mutations must survive the Worker's sealed-state checkpoint,
+	// not just the in-process Go instance. No provider call is needed here.
+	{
+		const person = await (await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "accounts" }))).json() as { keyring_id: string; role_token: string };
+		const root = `/admin/instances/${person.keyring_id}`;
+		const oauth2 = {
+			token_url: "https://oauth2.googleapis.com/token", client_id: "fixture-client",
+			client_secret_key: "GOOGLE_CLIENT_SECRET", auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
+			scopes: ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar.events"],
+		};
+		for (const [name, base] of [["gmail", "https://gmail.googleapis.com"], ["calendar", "https://www.googleapis.com"]]) {
+			const configured = await call("PUT", `${root}/services/${name}`, ADMIN, JSON.stringify({
+				service: { base, key: "GMAIL_REFRESH", auth: "oauth2", oauth2 },
+				access: { paths: ["/"], methods: ["GET", "POST"] },
+			}));
+			expect(`account ${name} policy configured`, configured.status, 200);
+		}
+		type Account = { account_id: string; binding_generation: string; alias: string; connected: boolean };
+		const migrated = await call("POST", `${root}/accounts/migrate`, ADMIN, "{}");
+		expect("Worker exposes explicit account migration", migrated.status, 200);
+		const personal = ((await migrated.json()) as { account: Account }).account;
+		const work = ((await (await call("POST", `${root}/accounts`, ADMIN, '{"alias":"work"}')).json()) as { account: Account }).account;
+		const generation = { ...ADMIN, "X-Keyring-Binding-Generation": work.binding_generation };
+		expect("qualified consent fails without generation", (await call("POST", `${root}/accounts/${work.account_id}/links`, ADMIN, '{"service":"gmail"}')).status, 428);
+		const link = await call("POST", `${root}/accounts/${work.account_id}/links`, generation, '{"service":"gmail","ttl_seconds":900}');
+		expect("qualified consent accepts the bound account", link.status, 201);
+		const capability = (await link.json()) as { url: string };
+		expect("published account link reaches the actual consent page", (await call("GET", new URL(capability.url).pathname)).status, 200);
+		const before = await (await call("GET", `${root}/accounts`, ADMIN)).json();
+		await containers.get(person.keyring_id)!.destroy();
+		objects.delete(person.keyring_id);
+		expect("account registry survives DO eviction and sealed cold restore", await (await call("GET", `${root}/accounts`, ADMIN)).json(), before);
+		expect("account admin still requires caller proof", (await call("GET", `${root}/accounts`, { ...ADMIN, "x-keyring-caller": "wrong" })).status, 401);
+		expect("stale shared disconnect is refused", (await call("DELETE", `${root}/accounts/${work.account_id}`, { ...generation, "X-Keyring-Binding-Generation": "0".repeat(32) })).status, 409);
+		const detached = await call("DELETE", `${root}/accounts/${work.account_id}`, generation);
+		expect("qualified shared disconnect succeeds", detached.status, 200);
+		const result = (await detached.json()) as { account: Account; provider_revoked: boolean };
+		expect("disconnect changes only its local binding without a provider grant", [result.account.binding_generation !== work.binding_generation, result.account.connected, result.provider_revoked], [true, false, false]);
+		await containers.get(person.keyring_id)!.destroy();
+		objects.delete(person.keyring_id);
+		const restored = (await (await call("GET", `${root}/accounts`, ADMIN)).json()) as { accounts: Account[]; default_account_id: string };
+		expect("disconnect remains durable without changing the default", [
+			restored.default_account_id,
+			restored.accounts.find(a => a.account_id === personal.account_id)?.binding_generation,
+			restored.accounts.find(a => a.account_id === work.account_id)?.binding_generation,
+		], [personal.account_id, personal.binding_generation, result.account.binding_generation]);
+		await call("DELETE", root, ADMIN);
+	}
+
 	// A pilot secret must work only in its selected keyring, including an
 	// existing keyring restarted from sealed state. Other global clients stay usable.
 	{
