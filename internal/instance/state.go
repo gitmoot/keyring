@@ -13,10 +13,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 
 	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/workspace"
 )
 
 // KeySize is the data key length: AES-256.
@@ -46,12 +48,16 @@ type State struct {
 	Roles        map[string]policy.Role    `json:"roles"`
 	Keys         map[string]string         `json:"keys"`
 	// Google is an immutable opaque snapshot, not a key any service can send.
-	Google *googlelogin.Snapshot `json:"google,omitempty"`
+	Google                    *googlelogin.Snapshot       `json:"google,omitempty"`
+	WorkspaceAccounts         map[string]workspace.Record `json:"workspace_accounts,omitempty"`
+	DefaultWorkspaceAccountID string                      `json:"default_workspace_account_id,omitempty"`
 }
 
 // clone returns a deep enough copy to change without touching s.
 func (s *State) clone() *State {
 	c := *s
+	// Records and their grant maps are immutable after publication.
+	c.WorkspaceAccounts = maps.Clone(s.WorkspaceAccounts)
 	c.AllowSources = append([]string(nil), s.AllowSources...)
 	if s.Consent != nil {
 		k := *s.Consent
@@ -77,6 +83,9 @@ func (s *State) clone() *State {
 // fills the field Validate requires; the instance writes its own audit.
 // container sets policy.Config.ContainerMode.
 func (s *State) config(auditName string, container bool) (*policy.Config, error) {
+	if err := s.validateWorkspace(container); err != nil {
+		return nil, err
+	}
 	if s.Google != nil && !container {
 		return nil, errors.New("managed Google login requires container mode")
 	}

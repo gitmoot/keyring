@@ -257,6 +257,92 @@ time-limited grants and Workspace admin policy can still require consent.
 Real permitted-account consent, refresh, revocation/reconnect and both service
 reads remain release gates. Offline fixtures do not satisfy them.
 
+### Multiple Workspace accounts
+
+Multiple Gmail/Calendar accounts are opt-in inside the existing person's instance.
+Each slot has an immutable opaque `account_id`, a stable alias
+(`[a-z][a-z0-9-]{0,31}`), and a `binding_generation`. `personal` is the migrated
+legacy default. An ID identifies the local slot, not a Google subject.
+Gmail and Calendar share one refresh grant **per slot**; Drive remains separate.
+
+All account administration below uses the existing caller proof and admin token.
+Prefix routes with `/admin/instances/<instance>`.
+
+| Method and route | Request and result |
+|---|---|
+| `GET /accounts` | `{accounts, default_account_id, migration_required}`; cached metadata only |
+| `POST /accounts/migrate` | Idempotent, metadata-only adoption of the existing Workspace key and role grants; returns `{account}` |
+| `POST /accounts` | `{alias}`; creates a disconnected slot, returns `{account}` |
+| `POST /accounts/<account>/identity` | Requires `X-Keyring-Binding-Generation`; explicit identity hydration, returns `{account}` |
+| `POST /accounts/<account>/links` | `{service:"gmail"|"calendar", ttl_seconds?:900}` and generation header; existing TTL bounds/default apply; returns `url`, `expires_at`, `account_id`, `alias`, `affected_services` |
+| `DELETE /accounts/<account>` | Requires generation header and caller-side shared-grant confirmation; returns `{account, provider_revoked}` |
+
+Account views contain `account_id`, `alias`, `default`, `provider`,
+`binding_generation`, nullable `email` / `email_verified_at`, `identity_state`,
+`connected`, `status`, `affected_services`, and per-service `connected` / `failing`
+fields. Status can be `connected`, `identity_pending`, `reconnect_required`,
+`revoking`, or `disconnected`. Credentials and internal key references are never
+returned. A disconnected slot retains its last verified identity, explicitly
+marked disconnected.
+
+Listing may start/unlock the container through the normal status lifecycle, but
+does not refresh tokens or fetch provider identity. Existing grants migrate
+without reconnect; their identity is honestly `unknown` until the operator
+explicitly hydrates it. Hydration uses the already-approved Gmail profile scope,
+not new OIDC scopes, and caches verified email for that binding. Concurrent
+hydration is serialized; cached reads make no Google call. New consent verifies
+email before publishing credentials. Adding another slot is refused while a
+connected slot has an unknown identity; duplicate connected identities are
+refused without revoking an already-active Google grant.
+
+After migration, the Gmail/Calendar service key references cannot be renamed:
+configuration changes that would detach the immutable default are rejected
+without changing state. Rotate a stored credential or reconnect its slot instead.
+Unrelated state changes preserve account token caches and cached refresh failures.
+
+Account-qualified proxy requests use
+`/p/<instance>/_accounts/<account>/<gmail|calendar>/<path>`, the existing role
+token/caller proof, and `X-Keyring-Binding-Generation`. The account gets separate
+grants capped by the current role policy. Requests still consume the existing
+aggregate role/service daily quota: adding an account does not reset it.
+The generation header is removed before forwarding.
+
+The caller resolves an omitted account only when exactly one eligible account
+exists. Writes and shared-grant disconnect approvals bind ID, verified email and
+generation; reconnect, disconnect, credential replacement or client changes
+invalidate old approvals. Access-token refresh does not change generation.
+Consent links also bind the exact slot/generation/browser. Changing the email of
+an active slot requires an explicit shared-group disconnect first.
+
+Credential selection and upstream dispatch share the account's read lease.
+Generation is checked again after renewal, before dispatch; mutation cannot
+publish a replacement while an admitted request crosses that boundary. A request
+already sent may finish using its original credentials, never a replacement.
+Writes are not replayed. Local disconnect removes the shared Gmail/Calendar grant
+and invalidates flows before best-effort provider revocation; failure to revoke
+remotely does not reconnect it locally. Legacy disconnect responses retain their
+bounded `revoke_error` diagnostic when remote revocation fails.
+
+Missing generation returns 428; stale generation returns 409
+`account_binding_changed`. Disconnected/unverified bindings return 409
+`account_disconnected` / `account_identity_unverified`. Identity hydration reports
+`account_reconnect_required` when its refresh grant is rejected. Account failures
+use `{error:<fixed code>}`; ordinary proxy errors retain their existing format.
+Re-list and obtain a new approval rather than retrying a write against another binding.
+Old unqualified service routes stay pinned to the original default, even after
+it disconnects; they never fall through to a remaining work account. The separate
+qualified namespace fails closed on old Worker/container code.
+
+**Cutover and rollback:** invalidate old caller action revisions before enabling
+account-qualified actions. Preserve every existing binding, template, sealed
+state, role grant and Drive account. Migration and hydration are explicit
+operator steps, not effects of listing or deployment. Once account metadata is
+persisted, old Keyring images reject the new sealed fields: do not roll back only
+the image or restore a stale whole-state snapshot. Keep schema-capable Keyring
+when rolling back the caller, or roll forward a compatible correction. A
+pre-migration snapshot is usable only during a still-quiesced metadata-only
+cutover with no intervening credential, account or Drive mutations.
+
 ## Per-person Drive and Sheets
 
 The `drive` consent entry (`auth: gcloud-login`, `google_account: me`) opts new

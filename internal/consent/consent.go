@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/workspace"
 )
 
 const (
@@ -57,12 +58,13 @@ type Keys interface {
 // Server holds the open links and sign-ins. They live in memory only: a
 // restart ends them all, which fails safe.
 type Server struct {
-	config func() *policy.Config
-	keys   Keys
-	audit  io.Writer
-	client *http.Client
-	now    func() time.Time
-	google *googlelogin.Controller // container-only, set before serving
+	config    func() *policy.Config
+	keys      Keys
+	audit     io.Writer
+	client    *http.Client
+	now       func() time.Time
+	google    *googlelogin.Controller // container-only, set before serving
+	workspace workspace.Boundary
 
 	auditMu sync.Mutex
 
@@ -79,6 +81,7 @@ type link struct {
 	expires     time.Time
 	google      bool
 	googleEpoch uint64
+	workspace   *workspace.ConsentBinding
 }
 
 type signIn struct {
@@ -93,6 +96,7 @@ type signIn struct {
 	expires     time.Time
 	google      bool
 	googleEpoch uint64
+	workspace   *workspace.ConsentBinding
 }
 
 // New builds a consent server. config returns the settings in use (the
@@ -323,6 +327,22 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusNotFound, "unknown service")
 		return
 	}
+	var binding *workspace.ConsentBinding
+	if s.workspace != nil && workspace.Service(req.Service) {
+		var err error
+		binding, err = s.workspace.PrepareConsent(r.PathValue("account"), r.Header.Get(workspace.GenerationHeader), req.Service)
+		if err != nil {
+			workspace.WriteError(w, err)
+			return
+		}
+		if binding != nil {
+			svc = binding.Service
+			req.Label = binding.View.Alias + " (Gmail + Calendar)"
+		}
+	} else if r.PathValue("account") != "" {
+		workspace.WriteError(w, workspace.Failure(403, "account_not_allowed"))
+		return
+	}
 	if !linkable(svc) {
 		apiError(w, http.StatusBadRequest, "this service cannot be connected by a link (an oauth2 service needs auth_url; signing keys are set by the owner)")
 		return
@@ -360,7 +380,19 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusTooManyRequests, "too many open links")
 		return
 	}
-	s.links[h] = &link{service: req.Service, key: svc.Key, label: req.Label, expires: expires}
+	if binding != nil {
+		for hash, previous := range s.links {
+			if previous.workspace != nil && previous.workspace.ID == binding.ID {
+				delete(s.links, hash)
+			}
+		}
+		for hash, previous := range s.signIns {
+			if previous.workspace != nil && previous.workspace.ID == binding.ID {
+				delete(s.signIns, hash)
+			}
+		}
+	}
+	s.links[h] = &link{service: req.Service, key: svc.Key, label: req.Label, expires: expires, workspace: binding}
 	if svc.Auth == policy.AuthGcloudLogin {
 		s.links[h].google = true
 		s.links[h].googleEpoch = s.google.Epoch()
@@ -369,7 +401,11 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 	u := cfg.Consent.PublicBase()
 	u.Path += "/c/" + id
 	s.writeAudit("link_created", map[string]any{"service": req.Service, "link": ref(h), "expires": expires.UTC().Format(time.RFC3339)})
-	writeJSON(w, http.StatusCreated, map[string]string{"url": u.String(), "expires_at": expires.UTC().Format(time.RFC3339)})
+	result := map[string]any{"url": u.String(), "expires_at": expires.UTC().Format(time.RFC3339)}
+	if binding != nil {
+		result["account_id"], result["alias"], result["affected_services"] = binding.ID, binding.View.Alias, binding.View.AffectedServices
+	}
+	writeJSON(w, http.StatusCreated, result)
 }
 
 // deleteKey removes the service's stored key. OAuth removal also invalidates
@@ -394,6 +430,9 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if svc.Auth == policy.AuthOAuth2 {
+		if s.workspace != nil && workspace.Service(name) && s.disconnectWorkspace(w, r, "", "", true) {
+			return
+		}
 		s.deleteOAuthKey(w, r, name, svc)
 		return
 	}
@@ -548,6 +587,11 @@ func (s *Server) openLink(id string, now time.Time) (*link, [sha256.Size]byte, b
 	if l.google && (s.google == nil || l.googleEpoch != s.google.Epoch()) {
 		return nil, h, false
 	}
+	if l.workspace != nil {
+		if _, valid := s.boundService(l.service, l.key, l.workspace); !valid {
+			return nil, h, false
+		}
+	}
 	return l, h, true
 }
 
@@ -602,7 +646,6 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		render(w, http.StatusBadRequest, pageData{Message: "The form could not be read."})
 		return
 	}
-	cfg := s.config()
 	now := s.now()
 	s.mu.Lock()
 	l, h, ok := s.openLink(id, now)
@@ -611,7 +654,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		render(w, http.StatusGone, pageData{Message: "This link has expired or was already used. Ask for a new one."})
 		return
 	}
-	svc, known := cfg.Services[l.service]
+	svc, known := s.boundService(l.service, l.key, l.workspace)
 	if !known || !linkable(svc) || svc.Key != l.key {
 		s.mu.Unlock()
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
@@ -665,12 +708,13 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 	delete(s.links, h)
 	state, verifier, browser := randomToken(), randomToken(), randomToken()
 	s.signIns[hashOf(state)] = &signIn{
-		service:  service,
-		key:      svc.Key,
-		oauth:    *svc.OAuth2,
-		verifier: verifier,
-		browser:  hashOf(browser),
-		expires:  now.Add(signInTTL),
+		service:   service,
+		key:       svc.Key,
+		oauth:     *svc.OAuth2,
+		verifier:  verifier,
+		browser:   hashOf(browser),
+		expires:   now.Add(signInTTL),
+		workspace: l.workspace,
 	}
 	s.mu.Unlock()
 
@@ -758,7 +802,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		render(w, http.StatusOK, pageData{Service: f.service, Message: "Sign-in was not completed (" + code + "). Ask for a new link to try again.", Problem: true})
 		return
 	}
-	svc, known := s.config().Services[f.service]
+	svc, known := s.boundService(f.service, f.key, f.workspace)
 	if !known || svc.Key != f.key || svc.Auth != policy.AuthOAuth2 || !svc.OAuth2.Equal(&f.oauth) {
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": "service changed"})
 		render(w, http.StatusConflict, pageData{Message: "This service's settings changed during the sign-in. Ask for a new link."})
@@ -784,7 +828,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	refresh, err := s.exchange(ctx, f.oauth, code, f.verifier, callbackURL(public), secret)
+	refresh, email, err := s.exchange(ctx, f.oauth, code, f.verifier, callbackURL(public), secret, f.workspace != nil)
 	cancel()
 	if err != nil {
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": err.Error()})
@@ -792,14 +836,18 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		return
 	}
 	s.mu.Lock()
-	current, known := s.config().Services[f.service]
+	current, known := s.boundService(f.service, f.key, f.workspace)
 	if s.signIns[h] != f || !s.now().Before(f.expires) || !known ||
 		current.Key != f.key || current.Auth != policy.AuthOAuth2 || !current.OAuth2.Equal(&f.oauth) {
 		s.mu.Unlock()
 		render(w, http.StatusConflict, pageData{Message: "This connection was removed or changed during sign-in. Ask for a new link."})
 		return
 	}
-	err = s.keys.Set(f.key, refresh)
+	if f.workspace != nil {
+		err = s.workspace.CommitConsent(r.Context(), *f.workspace, refresh, email)
+	} else {
+		err = s.keys.Set(f.key, refresh)
+	}
 	s.mu.Unlock()
 	if err != nil {
 		s.writeAudit("connect_failed", map[string]any{"service": f.service, "reason": "store"})
@@ -811,9 +859,9 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 }
 
 // exchange trades the authorization code for tokens (RFC 6749 4.1.3, RFC
-// 7636) and returns the refresh token. Errors are safe to show: never a
-// token, a secret or the provider's free text.
-func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier, redirectURI, secret string) (string, error) {
+// 7636) and returns the refresh token and optional verified Workspace email.
+// Errors never include tokens, secrets or the provider's free text.
+func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier, redirectURI, secret string, verifyIdentity bool) (string, string, error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -826,17 +874,18 @@ func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", errors.New("bad token endpoint")
+		return "", "", errors.New("bad token endpoint")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", errors.New("the provider could not be reached")
+		return "", "", errors.New("the provider could not be reached")
 	}
 	defer resp.Body.Close()
 	var body struct {
 		RefreshToken string  `json:"refresh_token"`
+		AccessToken  string  `json:"access_token"`
 		Error        string  `json:"error"`
 		Scope        *string `json:"scope"`
 	}
@@ -846,10 +895,10 @@ func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier
 		if decodeErr == nil && errorCode.MatchString(body.Error) {
 			code = body.Error
 		}
-		return "", fmt.Errorf("the provider refused the sign-in code (%s)", code)
+		return "", "", fmt.Errorf("the provider refused the sign-in code (%s)", code)
 	}
 	if decodeErr != nil {
-		return "", errors.New("the provider sent invalid JSON")
+		return "", "", errors.New("the provider sent invalid JSON")
 	}
 	// RFC 6749 section 5.1 permits omission only when the granted scopes
 	// equal those requested. An explicit partial grant must not activate
@@ -858,14 +907,24 @@ func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier
 		granted := strings.Fields(*body.Scope)
 		for _, required := range cfg.Scopes {
 			if !slices.Contains(granted, required) {
-				return "", errors.New("the provider did not grant all required permissions")
+				return "", "", errors.New("the provider did not grant all required permissions")
 			}
 		}
 	}
 	if !usableToken(body.RefreshToken) {
-		return "", errors.New("the provider sent no refresh token (check the service's auth_params, e.g. access_type=offline and prompt=consent for Google)")
+		return "", "", errors.New("the provider sent no refresh token (check the service's auth_params, e.g. access_type=offline and prompt=consent for Google)")
 	}
-	return body.RefreshToken, nil
+	var email string
+	if verifyIdentity {
+		if !usableToken(body.AccessToken) {
+			return "", "", errors.New("the provider sent no access token")
+		}
+		email, err = workspace.VerifiedEmail(ctx, s.client, body.AccessToken)
+		if err != nil {
+			return "", "", errors.New("the account identity could not be verified")
+		}
+	}
+	return body.RefreshToken, email, nil
 }
 
 func usableToken(t string) bool {

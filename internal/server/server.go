@@ -28,6 +28,7 @@ import (
 	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
+	"github.com/gitmoot/keyring/internal/workspace"
 )
 
 const (
@@ -70,7 +71,8 @@ type Handler struct {
 	// Set before serving: the container seals SDK changes before token use.
 	googleCommand func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)
 
-	auditMu sync.Mutex
+	auditMu   sync.Mutex
+	workspace workspace.Boundary // fixed before serving in container mode
 }
 
 // SetGoogleCommand installs the container credential boundary before serving.
@@ -267,6 +269,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusUnauthorized, "role expired")
 		return
 	}
+	var accountID string
+	var accountErr error
+	r, accountID, accountErr = workspaceRequest(r)
+	if accountErr != nil {
+		rec.Note = "invalid account path"
+		rec.Status = workspace.WriteError(w, accountErr)
+		return
+	}
+	if accountID != "" && h.workspace == nil {
+		rec.Status, rec.Note = http.StatusNotFound, "accounts unavailable"
+		workspace.WriteError(w, workspace.Failure(http.StatusNotFound, "accounts_unavailable"))
+		return
+	}
 	service, rest, ok := splitPath(r.URL, snap.config.Services, role.Access)
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
@@ -390,7 +405,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusForbidden, "path not allowed for this role")
 		return
 	}
+	var selected *workspace.Selection
+	if h.workspace != nil && workspace.Service(service) {
+		var err error
+		selected, err = h.workspace.Acquire(r.Context(), accountID, r.Header.Get(workspace.GenerationHeader), roleName, r.Header.Get(TokenHeader), service, r.Method, rest)
+		if err != nil {
+			rec.Note = "account selection refused"
+			rec.Status = workspace.WriteError(w, err)
+			return
+		}
+		if selected != nil {
+			svc = selected.Service
+			access.DailyRequests = selected.DailyRequests
+		}
+	}
+	releaseAccount := func() {
+		if selected != nil && selected.Release != nil {
+			selected.Release()
+			selected.Release = nil
+		}
+	}
+	defer releaseAccount()
 	key := snap.keys[svc.Key]
+	if selected != nil {
+		key = selected.Refresh
+	}
 	if key == "" && svc.Auth != policy.AuthGcloud {
 		fail(http.StatusServiceUnavailable, "key not loaded")
 		return
@@ -440,6 +479,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamKey, alsoRedact := key, []string(nil)
 	if svc.Auth == policy.AuthOAuth2 {
 		refresh, secret := oauthSecrets(svc, snap.keys)
+		if selected != nil {
+			refresh, secret = selected.Refresh, selected.Secret
+		}
 		token, err := h.accessToken(r.Context(), svc, refresh, secret)
 		if err != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
@@ -455,9 +497,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		current := h.snap.Load()
 		currentService, exists := current.config.Services[service]
-		if !exists || currentService.Auth != policy.AuthOAuth2 || currentService.Key != svc.Key ||
+		if selected == nil && (!exists || currentService.Auth != policy.AuthOAuth2 || currentService.Key != svc.Key ||
 			!currentService.OAuth2.Equal(svc.OAuth2) || current.keys[svc.Key] != refresh ||
-			current.keys[svc.OAuth2.ClientSecretKey] != secret {
+			current.keys[svc.OAuth2.ClientSecretKey] != secret) {
 			h.refund(roleName, service, access.DailyRequests, start)
 			fail(http.StatusServiceUnavailable, "OAuth connection changed during renewal")
 			return
@@ -507,7 +549,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadGateway, "could not build upstream request")
 		return
 	}
+	if selected != nil {
+		if err := h.workspace.Revalidate(r.Context(), selected); err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			rec.Note = "account binding changed"
+			rec.Status = workspace.WriteError(w, err)
+			return
+		}
+	}
 	resp, err := h.clientFor(svc).Do(out)
+	releaseAccount()
 	if err != nil {
 		// The call never reached the service: do not charge the limit. The
 		// error text can include the URL, and so a query-string key.
@@ -524,6 +575,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The token may have been revoked before it expired: mint a new
 		// one on the next call.
 		refresh, secret := oauthSecrets(svc, snap.keys)
+		if selected != nil {
+			refresh, secret = selected.Refresh, selected.Secret
+		}
 		h.dropAccessToken(svc, refresh, secret, upstreamKey)
 	}
 	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
@@ -749,6 +803,7 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 		out.Del(name)
 	}
 	out.Del(TokenHeader)
+	out.Del(workspace.GenerationHeader)
 	out.Del("Authorization")
 	out.Del("Cookie")
 	if svc.Auth == policy.AuthGcloud {

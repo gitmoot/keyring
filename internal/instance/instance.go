@@ -55,7 +55,10 @@ type Instance struct {
 	opt   Options
 	admin netip.AddrPort
 
-	auditMu sync.Mutex
+	auditMu           sync.Mutex
+	workspaceMu       sync.Mutex
+	workspaceGates    sync.Map        // account ID -> *workspaceGate
+	workspaceRevoking map[string]bool // guarded by mu
 
 	// mu serializes every change and guards the fields below.
 	mu        sync.Mutex
@@ -269,6 +272,11 @@ func (in *Instance) commit(next *State, key []byte) error {
 			in.proxy.SetGoogleCommand(in.google.Token)
 			in.consent.SetGoogle(in.google)
 		}
+		if in.opt.Container {
+			boundary := workspaceBoundary{in}
+			in.proxy.SetWorkspace(boundary)
+			in.consent.SetWorkspace(boundary)
+		}
 	}
 	opened, err := in.bind(cfg)
 	if err != nil {
@@ -307,6 +315,7 @@ func (in *Instance) change(fn func(*State) error) (uint64, error) {
 	if err := fn(next); err != nil {
 		return 0, err
 	}
+	reconcileWorkspace(in.state, next)
 	next.Version++
 	if err := in.commit(next, in.key); err != nil {
 		return 0, err
@@ -327,12 +336,12 @@ func (k instanceKeys) Load() (map[string]string, error) {
 }
 
 func (k instanceKeys) Set(name, value string) error {
-	_, err := k.in.change(func(s *State) error { s.Keys[name] = value; return nil })
+	_, err := k.in.changeBindings(name, func(s *State) error { s.Keys[name] = value; return nil })
 	return err
 }
 
 func (k instanceKeys) Delete(name string) error {
-	_, err := k.in.change(func(s *State) error { delete(s.Keys, name); return nil })
+	_, err := k.in.changeBindings(name, func(s *State) error { delete(s.Keys, name); return nil })
 	return err
 }
 
@@ -345,6 +354,12 @@ func (in *Instance) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /unlock", in.unlock)
 	mux.HandleFunc("GET /status", in.status)
 	mux.HandleFunc("GET /google-renewal", in.googleRenewal)
+	mux.HandleFunc("GET /accounts", in.accounts)
+	mux.HandleFunc("POST /accounts/migrate", in.migrateAccounts)
+	mux.HandleFunc("POST /accounts", in.createAccount)
+	mux.HandleFunc("POST /accounts/{account}/identity", in.hydrateAccount)
+	mux.HandleFunc("POST /accounts/{account}/links", in.accountLink)
+	mux.HandleFunc("DELETE /accounts/{account}", in.disconnectAccount)
 	mux.HandleFunc("GET /state", in.getState)
 	mux.HandleFunc("GET /usage", in.getUsage)
 	mux.HandleFunc("PUT /network", in.putNetwork)
@@ -658,13 +673,13 @@ func (in *Instance) putService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	v, err := in.change(func(s *State) error { s.Services[name] = svc; return nil })
+	v, err := in.changeBindings("", func(s *State) error { s.Services[name] = svc; return nil })
 	in.changed(w, "service_set", map[string]any{"service": name}, v, err, nil)
 }
 
 func (in *Instance) deleteService(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	v, err := in.change(func(s *State) error {
+	v, err := in.changeBindings("", func(s *State) error {
 		if _, ok := s.Services[name]; !ok {
 			return &httpError{http.StatusNotFound, "no such service"}
 		}
@@ -685,7 +700,7 @@ func (in *Instance) putRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var token string
-	v, err := in.change(func(s *State) error {
+	v, err := in.changeBindings("", func(s *State) error {
 		role, exists := s.Roles[name]
 		if !exists {
 			t, sha, err := policy.NewToken()
@@ -709,7 +724,7 @@ func (in *Instance) putRole(w http.ResponseWriter, r *http.Request) {
 func (in *Instance) newRoleToken(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var token string
-	v, err := in.change(func(s *State) error {
+	v, err := in.changeBindings("", func(s *State) error {
 		role, ok := s.Roles[name]
 		if !ok {
 			return &httpError{http.StatusNotFound, "no such role"}
@@ -727,7 +742,7 @@ func (in *Instance) newRoleToken(w http.ResponseWriter, r *http.Request) {
 
 func (in *Instance) deleteRole(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	v, err := in.change(func(s *State) error {
+	v, err := in.changeBindings("", func(s *State) error {
 		if _, ok := s.Roles[name]; !ok {
 			return &httpError{http.StatusNotFound, "no such role"}
 		}
@@ -754,13 +769,13 @@ func (in *Instance) putKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest("value: 1 byte to 64 KiB"))
 		return
 	}
-	v, err := in.change(func(s *State) error { s.Keys[name] = req.Value; return nil })
+	v, err := in.changeBindings(name, func(s *State) error { s.Keys[name] = req.Value; return nil })
 	in.changed(w, "key_set", map[string]any{"key": name}, v, err, nil)
 }
 
 func (in *Instance) deleteKey(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	v, err := in.change(func(s *State) error {
+	v, err := in.changeBindings(name, func(s *State) error {
 		if _, ok := s.Keys[name]; !ok {
 			return &httpError{http.StatusNotFound, "no such key"}
 		}

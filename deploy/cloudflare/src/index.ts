@@ -198,6 +198,13 @@ async function admin(request: Request, env: Env, rest: string[]): Promise<Respon
 	else if (op === "google-drive" && m === "POST") out = await s.provisionGoogle(await request.text());
 	else if (rest[1] === "services" && rest.length === 3 && m === "PUT") out = await s.putService(rest[2], await request.text());
 	else if (rest[1] === "keys" && rest.length === 3 && m === "DELETE") out = await s.deleteKey(rest[2]);
+	else if (
+		(op === "accounts" && (m === "GET" || m === "POST")) ||
+		(op === "accounts/migrate" && m === "POST") ||
+		(rest[1] === "accounts" && ID.test(rest[2] ?? "") &&
+			((rest.length === 3 && m === "DELETE") ||
+				(rest.length === 4 && m === "POST" && ["identity", "links"].includes(rest[3]))))
+	) out = await s.accounts(op, m, m === "POST" ? await request.text() : undefined, request.headers.get("X-Keyring-Binding-Generation") ?? "");
 	else if (op === "role-token" && m === "POST") out = await s.rotateRoleToken();
 	else return json(404, { error: "not found" });
 	if ("body" in out) return json(out.status ?? 200, out.body);
@@ -481,18 +488,39 @@ export class KeyringInstance extends DurableObject<Env> {
 			});
 			const out = await reply(r);
 			if (!r.ok) return { status: r.status, error: out.error ?? "link refused" };
-			// The keyring's link is <PUBLIC_BASE>/connect/c/<link>; the person
-			// opens it under this keyring's path.
-			const prefix = `${this.env.PUBLIC_BASE}/connect/c/`;
-			if (typeof out.url !== "string" || !out.url.startsWith(prefix)) return { status: 502, error: "unexpected link" };
-			out.url = `${this.env.PUBLIC_BASE}/connect/${m.id}/c/${out.url.slice(prefix.length)}`;
-			const until = Date.parse(out.expires_at ?? "") + SIGN_IN_MS;
-			if (Number.isNaN(until)) return { status: 502, error: "unexpected link" };
-			// Only this method writes the field, and nothing but storage is
-			// awaited between the read and the write.
-			const cur = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
-			await this.put(K_OPEN_UNTIL, Math.max(cur, until));
-			return { status: 201, body: out };
+			return this.publishLink(m, out);
+		});
+	}
+
+	private async publishLink(m: Identity, out: Reply): Promise<Result> {
+		const prefix = `${this.env.PUBLIC_BASE}/connect/c/`;
+		if (typeof out.url !== "string" || !out.url.startsWith(prefix)) return { status: 502, error: "unexpected link" };
+		out.url = `${this.env.PUBLIC_BASE}/connect/${m.id}/c/${out.url.slice(prefix.length)}`;
+		const until = Date.parse(out.expires_at ?? "") + SIGN_IN_MS;
+		if (Number.isNaN(until)) return { status: 502, error: "unexpected link" };
+		// Keep the existing consent lifetime and monotonic idle deadline.
+		const cur = (await this.ctx.storage.get<number>(K_OPEN_UNTIL)) ?? 0;
+		await this.put(K_OPEN_UNTIL, Math.max(cur, until));
+		return { status: 201, body: out };
+	}
+
+	async accounts(path: string, method: string, body: string | undefined, generation: string): Promise<Result> {
+		return this.withInstance(async (m) => {
+			const response = await this.port(PORT_ADMIN).fetch("http://keyring/" + path, {
+				method,
+				headers: {
+					authorization: "Bearer " + m.adminToken,
+					"content-type": "application/json",
+					"X-Keyring-Binding-Generation": generation,
+				},
+				body,
+				signal: AbortSignal.timeout(60_000),
+			});
+			const out = await reply(response);
+			if (!response.ok) return { status: response.status, error: out.error ?? "account_operation_failed" };
+			if (path.endsWith("/links")) return this.publishLink(m, out);
+			if (method !== "GET") await this.sync(m);
+			return { status: response.status, body: out };
 		});
 	}
 
