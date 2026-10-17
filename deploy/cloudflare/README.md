@@ -107,9 +107,11 @@ controls. MCP receives API responses through Keyring, not Google credentials.
 
 ### Provisioning and lifecycle
 
-1. Obtain the owner-approved client, publishing-mode decision and protected
-   client-secret provisioning (use `OAUTH_CLIENT_SECRETS_BY_INSTANCE` for an
-   owner-only pilot). Use a project separate from Drive:
+1. An authorized deployment operator provisions or selects the approved Web
+   OAuth client and publishing mode, then installs its secret through protected
+   setup (`OAUTH_CLIENT_SECRETS_BY_INSTANCE` for a personal pilot). The end user
+   must not be required to create a Google app, project or client.
+   Use a project separate from Drive:
    [Google combined grants can revoke all included scopes together](https://developers.google.com/identity/protocols/oauth2/javascript-implicit-flow#incrementalAuth).
    Two refresh-token strings under one client are not independent revocation
    boundaries.
@@ -140,13 +142,26 @@ controls. MCP receives API responses through Keyring, not Google credentials.
    state sync before treating disconnect as durable. A new browser-bound
    connection may then be requested; do not restore an older sealed snapshot.
 
-### Owner-only client-secret entry
+### Operator-managed client provisioning
 
-The owner creates the separate project's Web OAuth client in Google Cloud
-Console and enters its secret directly into the Worker's protected
-`OAUTH_CLIENT_SECRETS_BY_INSTANCE` setting in Cloudflare. Do not put the value
-in a command argument, chat, issue, agent tool, repository file, MCP worker
-or guest.
+The service owner authorizes the deployment operator. Delegation does not
+waive the owner's approval gates for credentials, publishing, deployment,
+spending or permissions.
+
+App/project/client creation and protected credential provisioning belong to
+the deployment operator, not the person connecting Gmail and Calendar.
+The operator uses an authorized Google Cloud console session for the approved
+Web OAuth client and installs its secret directly into the Worker's protected
+`OAUTH_CLIENT_SECRETS_BY_INSTANCE` setting in Cloudflare. The connecting person
+only signs in and consents to approved scopes. Do not put secret values in a
+command argument, chat, issue, agent tool, repository file, MCP worker or guest.
+
+If no authorized operator session or approved client is available, report that
+operator prerequisite; do not send the person an app-creation checklist.
+An existing managed connection is an alternative only after verifying its
+authorization and Keyring-only token custody. Do not borrow the Drive SDK's
+client for Gmail/Calendar or assume new service grants, spending or changes
+to shared security are approved.
 
 The JSON object's outer key is the person's exact existing `keyring_id`,
 not a contact ID, label or role token. Its value maps the configured
@@ -163,8 +178,9 @@ the provider and disconnect the Workspace connection; do not infer removal
 from a changed binding alone. Public admin APIs still do not accept raw secrets.
 
 Agents need only non-secret project/client identifiers, the confirmed redirect
-URI, the target keyring ID and an owner-reported protected-import receipt.
-Review and deployment gates must pass before sending a real consent link.
+URI, the target keyring ID and an operator-reported protected-import receipt.
+Review, deployment and service-grant approval gates must pass before sending
+a real consent link.
 
 
 ### Pilot authorization is not public-launch approval
