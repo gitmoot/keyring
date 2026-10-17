@@ -32,6 +32,23 @@ type googleCache struct {
 type googleEntry struct {
 	oauthEntry
 	expires time.Time
+	renewal gcloudexec.RenewalTrace
+}
+
+// GoogleRenewal returns a fixed-size, credential-free snapshot of the latest
+// actual attempt. It does not refresh, inspect SDK files, or change the cache.
+func (h *Handler) GoogleRenewal(name string) (gcloudexec.RenewalRecord, bool) {
+	a, ok := h.snap.Load().config.GoogleAccounts[name]
+	if !ok {
+		return gcloudexec.RenewalRecord{}, false
+	}
+	h.google.mu.Lock()
+	e := h.google.entries[a]
+	h.google.mu.Unlock()
+	if e == nil {
+		return gcloudexec.RenewalRecord{}, false
+	}
+	return e.renewal.Snapshot()
 }
 
 // GoogleStatus is safe dashboard metadata, never command output or a token.
@@ -92,6 +109,7 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 		}
 		done := make(chan struct{})
 		e.refreshing = done
+		e.renewal.Begin()
 		c.mu.Unlock()
 
 		// Other callers may still need this renewal if the first disconnects.
@@ -103,7 +121,8 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 			timeout = 45 * time.Second
 		}
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-		token, lifetime, err := h.fetchGoogleToken(fetchCtx, a)
+		token, lifetime, err := h.fetchGoogleToken(fetchCtx, a, &e.renewal)
+		e.renewal.Finish(err)
 		cancel()
 		h.recordGoogleAttempt(name, a, h.now(), err)
 		c.mu.Lock()
@@ -166,11 +185,11 @@ func (w *limitedOutput) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) (string, time.Duration, error) {
+func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount, trace *gcloudexec.RenewalTrace) (string, time.Duration, error) {
 	var token string
 	if h.googleCommand != nil {
 		var err error
-		token, err = h.googleCommand(ctx, a)
+		token, err = h.googleCommand(ctx, a, trace)
 		if err != nil {
 			return "", 0, err
 		}
@@ -185,6 +204,7 @@ func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) 
 		if info.Mode().Perm()&0077 != 0 {
 			return "", 0, googleFailure("configuration_error", "configuration", "configuration_not_private")
 		}
+		trace.Enter(gcloudexec.RenewalSDK)
 		cmd := exec.CommandContext(ctx, a.Executable, "auth", "print-access-token", a.Account, "--account="+a.Account, "--configuration=default", "--quiet")
 		// Do not inherit proxy variables, CLOUDSDK_AUTH_ACCESS_TOKEN,
 		// impersonation, credential overrides, Python hooks, or an agent's HOME.
@@ -211,11 +231,19 @@ func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) 
 			clear(stderr.buf.Bytes())
 		}()
 		cmd.Stdout, cmd.Stderr = stdout, stderr
-		if err := cmd.Run(); err != nil {
+		err = cmd.Run()
+		trace.Process(cmd.ProcessState)
+		if err != nil {
+			if ctx.Err() != nil {
+				trace.End(ctx.Err())
+			} else {
+				trace.End(err)
+			}
 			return "", 0, classifyGoogleCommand(ctx, err, stderr.buf.Bytes(), stdout.exceeded || stderr.exceeded)
 		}
 		token = strings.TrimSpace(stdout.buf.String())
 	}
+	trace.Enter(gcloudexec.RenewalValidation)
 	if !usableAccessToken(token) {
 		return "", 0, googleFailure("unknown", "command", "unusable_token_output")
 	}
@@ -228,6 +256,7 @@ func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) 
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
+		trace.End(err)
 		return "", 0, classifyGoogleValidation(ctx, err)
 	}
 	defer resp.Body.Close()
@@ -241,6 +270,9 @@ func (h *Handler) fetchGoogleToken(ctx context.Context, a policy.GoogleAccount) 
 		return "", 0, googleFailure("credentials_invalid", "token_validation", "invalid_token")
 	}
 	if resp.StatusCode != http.StatusOK || decodeErr != nil {
+		if decodeErr != nil {
+			trace.End(decodeErr)
+		}
 		return "", 0, googleFailure("provider_error", "token_validation", "invalid_token_response")
 	}
 	seconds, err := strconv.ParseInt(strings.Trim(string(result.ExpiresIn), `"`), 10, 64)

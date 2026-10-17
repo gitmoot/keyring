@@ -145,7 +145,7 @@ func TestLoginTermsRetryRefreshAndRestore(t *testing.T) {
 	if !connected.Ready || connected.Generation != checkpoint.Generation || connected.Project != checkpoint.Project {
 		t.Fatal("retry replaced login/project instead of completing it")
 	}
-	token, err := c.Token(context.Background(), connected.Binding())
+	token, err := c.Token(context.Background(), connected.Binding(), nil)
 	if err != nil || token != "fixture-access-token" {
 		t.Fatalf("token: %q %v", token, err)
 	}
@@ -154,7 +154,7 @@ func TestLoginTermsRetryRefreshAndRestore(t *testing.T) {
 		t.Fatal("refreshed credential not preserved before returning token")
 	}
 	*failSave = true
-	if token, err := c.Token(context.Background(), refreshed.Binding()); err == nil || token != "" {
+	if token, err := c.Token(context.Background(), refreshed.Binding(), nil); err == nil || token != "" {
 		t.Fatal("access token escaped failed persistence")
 	}
 	*failSave = false
@@ -171,13 +171,13 @@ func TestLoginTermsRetryRefreshAndRestore(t *testing.T) {
 	if err := os.WriteFile(failure, []byte("Try signing in again: https://accounts.google.com/?error_subtype=rapt_required SECRET-CANARY"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if token, err := c.Token(context.Background(), refreshed.Binding()); token != "" || !errors.Is(err, errCommand) || !saved().Ready {
+	if token, err := c.Token(context.Background(), refreshed.Binding(), nil); token != "" || !errors.Is(err, errCommand) || !saved().Ready {
 		t.Fatalf("ambiguous advice invented a login requirement: %v", err)
 	}
 	if err := os.WriteFile(failure, []byte(`{"error_subtype":"invalid_rapt"} SECRET-CANARY`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if token, err := c.Token(context.Background(), refreshed.Binding()); token != "" || !errors.Is(err, errLogin) || saved().Ready || !saved().NeedsLogin {
+	if token, err := c.Token(context.Background(), refreshed.Binding(), nil); token != "" || !errors.Is(err, errLogin) || saved().Ready || !saved().NeedsLogin {
 		t.Fatalf("proven reauthentication did not disable the binding: %v", err)
 	}
 }
@@ -201,7 +201,7 @@ func TestDisconnectCancelsRefreshAndRevokesOldFlows(t *testing.T) {
 		err   error
 	}
 	result := make(chan tokenResult, 1)
-	go func() { token, err := c.Token(context.Background(), binding); result <- tokenResult{token, err} }()
+	go func() { token, err := c.Token(context.Background(), binding, nil); result <- tokenResult{token, err} }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(c.root, "started")); err == nil {
@@ -233,7 +233,7 @@ func TestDisconnectCancelsRefreshAndRevokesOldFlows(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("disconnect did not join the canceled refresh")
 	}
-	if token, err := c.Token(context.Background(), binding); err == nil || token != "" {
+	if token, err := c.Token(context.Background(), binding, nil); err == nil || token != "" {
 		t.Fatal("disconnected binding still mints tokens")
 	}
 }

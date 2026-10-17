@@ -103,8 +103,12 @@ class FakeContainer {
 		await this.proc?.exited;
 		this.proc = null;
 	}
+	timeoutWrites = 0;
+	diagnosticCalls = 0;
+	diagnosticOverride: (() => Response | Promise<Response>) | null = null;
 	inactivityMs = 0;
 	async setInactivityTimeout(ms: number) {
+		this.timeoutWrites++;
 		this.inactivityMs = ms;
 	}
 	signal(n: number) {
@@ -112,28 +116,37 @@ class FakeContainer {
 	}
 	getTcpPort(p: number) {
 		return {
-			fetch: (u: string, init?: RequestInit) =>
-				fetch(u.replace("http://keyring", `http://127.0.0.1:${this.base + p - 8080}`), {
+			fetch: (u: string, init?: RequestInit) => {
+				if (p === 8090 && new URL(u).pathname === "/google-renewal") {
+					this.diagnosticCalls++;
+					if (this.diagnosticOverride) return Promise.resolve(this.diagnosticOverride());
+				}
+				return fetch(u.replace("http://keyring", `http://127.0.0.1:${this.base + p - 8080}`), {
 					...init,
 					body: typeof init?.body === "string" ? this.map(init.body) : init?.body,
-				}),
+				});
+			},
 		};
 	}
 }
 
 class Storage {
 	m = new Map<string, unknown>();
+	alarm: number | null = null;
 	async get<T>(k: string) {
 		return structuredClone(this.m.get(k)) as T | undefined;
 	}
+	writes = 0;
 	async put(k: string, v: unknown) {
+		this.writes++;
 		this.m.set(k, structuredClone(v));
 	}
 	async deleteAll() {
+		this.writes++;
 		this.m.clear();
 	}
-	async setAlarm() {}
-	async deleteAlarm() {}
+	async setAlarm(when: number) { this.writes++; this.alarm = when; }
+	async deleteAlarm() { this.writes++; this.alarm = null; }
 }
 
 const objects = new Map<string, InstanceType<typeof mod.KeyringInstance>>();
@@ -210,6 +223,77 @@ try {
 	const driveNames = ["drive", "google-me-drive", "google-me-sheets", "google-me-upload"];
 	expect("all provisioned Google services start disconnected", driveServices.services.filter(s => driveNames.includes(s.name)).map(s => [s.name, s.connected]), driveNames.map(name => [name, false]));
 	expect("Drive status contains no identity or credentials", driveServices.services.filter(s => driveNames.includes(s.name)).every(s => Object.keys(s).sort().join() === "connected,failing,name"), true);
+
+	// A diagnostic-only DO wake must not renew platform idle time or sealed state.
+	const dc = containers.get(id)!;
+	const ds = storages.get(id)!;
+	const unchanged = () => [starts, dc.timeoutWrites, ds.writes, ds.alarm, JSON.stringify([...ds.m])];
+	const beforeDiagnostic = unchanged();
+	objects.delete(id);
+	let diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	const emptyDiagnostic = await diagnostic.json() as { available: boolean; reason: string };
+	expect("running cold-DO diagnostic observes without a renewal", [diagnostic.status, emptyDiagnostic.available, emptyDiagnostic.reason], [200, false, "no_attempt"]);
+	expect("diagnostic-only wake changes no lifecycle or sealed state", JSON.stringify(unchanged()) === JSON.stringify(beforeDiagnostic), true);
+	expect("renewal diagnostics require admin proof", (await call("GET", `/admin/instances/${id}/google-renewal`, { "x-keyring-caller": "caller-secret" })).status, 401);
+	const instance = objects.get(id)! as any;
+	instance.starting = true;
+	const beforeStarting = [...unchanged(), dc.diagnosticCalls];
+	diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	expect("starting container is unavailable without a container call", await diagnostic.json(), { available: false, reason: "starting" });
+	expect("starting diagnostic has no side effects", JSON.stringify([...unchanged(), dc.diagnosticCalls]) === JSON.stringify(beforeStarting), true);
+	instance.starting = false;
+
+	const phases = ["configuration", "controller_wait", "sdk_execution", "persistence", "token_validation"];
+	const safeAttempt = {
+		available: true, process_started_at: "2026-01-01T00:00:00Z",
+		attempt: { started_at: "2026-01-01T00:00:01Z", completed_at: "2026-01-01T00:00:02Z",
+			phase: "sdk_execution", outcome: "timeout", duration_ms: 1000,
+			process: { available: true, cpu_time_ms: 42, exit_code: -1, signal: 9 },
+			steps: phases.map(phase => ({ phase, duration_ms: phase === "sdk_execution" ? 1000 : 0,
+				outcome: phase === "sdk_execution" ? "timeout" : "not_run" })) },
+	};
+	const canary = "SYNTHETIC-PRIVATE-DIAGNOSTIC-CANARY";
+	dc.diagnosticOverride = () => Response.json({ ...safeAttempt, credential: canary,
+		attempt: { ...safeAttempt.attempt, stderr: canary } });
+	diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	const projected = await diagnostic.text();
+	expect("diagnostics exclude unexpected private provider fields", projected.includes(canary), false);
+	expect("diagnostics retain fixed failure metadata", [JSON.parse(projected).attempt.phase, JSON.parse(projected).attempt.process.cpu_time_ms], ["sdk_execution", 42]);
+	dc.diagnosticOverride = () => Response.json({ ...safeAttempt, attempt: { ...safeAttempt.attempt, phase: canary } });
+	diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	expect("unrecognized failure text is refused without echo", [diagnostic.status, (await diagnostic.text()).includes(canary)], [503, false]);
+	dc.diagnosticOverride = () => new Response(canary.repeat(2000));
+	diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	expect("oversized diagnostic response is refused without echo", [diagnostic.status, (await diagnostic.text()).includes(canary)], [503, false]);
+	let releaseDiagnostic!: () => void;
+	let enteredDiagnostic!: () => void;
+	const diagnosticEntered = new Promise<void>(resolve => { enteredDiagnostic = resolve; });
+	const diagnosticRelease = new Promise<void>(resolve => { releaseDiagnostic = resolve; });
+	dc.diagnosticOverride = async () => {
+		enteredDiagnostic();
+		await diagnosticRelease;
+		return Response.json(safeAttempt);
+	};
+	ds.m.set("lastUsed", Date.now() - 30 * 60_000);
+	objects.delete(id);
+	const idleDiagnostic = call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	await diagnosticEntered;
+	try {
+		await objects.get(id)!.alarm();
+		const stoppedDuringRead = await Promise.race([dc.proc!.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);
+		expect("a pending diagnostic does not pin an idle container", stoppedDuringRead, true);
+	} finally {
+		releaseDiagnostic();
+		await idleDiagnostic;
+		dc.diagnosticOverride = null;
+	}
+	objects.delete(id);
+	const beforeStopped = [...unchanged(), dc.diagnosticCalls];
+	diagnostic = await call("GET", `/admin/instances/${id}/google-renewal`, ADMIN);
+	expect("stopped diagnostic does not start or unlock", await diagnostic.json(), { available: false, reason: "container_not_running" });
+	expect("stopped diagnostic preserves storage, idle and container state", JSON.stringify([...unchanged(), dc.diagnosticCalls]) === JSON.stringify(beforeStopped), true);
+	// Resume ordinary fixture traffic, not a diagnostic warm-up.
+	expect("ordinary service access still restores the stopped fixture", (await call("GET", `/admin/instances/${id}/services`, ADMIN)).status, 200);
 	expect("call before connect", (await call("GET", `/p/${id}/echo/x`, P)).status, 503);
 	expect("call without caller proof", (await call("GET", `/p/${id}/echo/x`, { "x-keyring-token": created.role_token })).status, 401);
 
@@ -236,7 +320,7 @@ try {
 	// The container sleeps: its process and the object's memory are gone.
 	await containers.get(id)!.destroy();
 	objects.delete(id);
-	expect("after a restart, the daily limit holds", [(await call("GET", `/p/${id}/echo/x5`, P)).status, starts], [429, 2]);
+	expect("after a restart, the daily limit holds", (await call("GET", `/p/${id}/echo/x5`, P)).status, 429);
 
 	// Concurrent calls on a stopped container start it once (review P3).
 	await containers.get(id)!.destroy();

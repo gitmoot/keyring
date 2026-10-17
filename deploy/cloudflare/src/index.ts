@@ -194,6 +194,7 @@ async function admin(request: Request, env: Env, rest: string[]): Promise<Respon
 	if (op === "" && m === "DELETE") out = await s.remove();
 	else if (op === "links" && m === "POST") out = await s.link(await request.text());
 	else if (op === "services" && m === "GET") out = await s.services();
+	else if (op === "google-renewal" && m === "GET") out = await s.googleRenewal();
 	else if (op === "google-drive" && m === "POST") out = await s.provisionGoogle(await request.text());
 	else if (rest[1] === "services" && rest.length === 3 && m === "PUT") out = await s.putService(rest[2], await request.text());
 	else if (rest[1] === "keys" && rest.length === 3 && m === "DELETE") out = await s.deleteKey(rest[2]);
@@ -254,12 +255,6 @@ const LAST_USED_WRITE_MS = 30 * 1000;
 class Deleted extends Error {}
 
 export class KeyringInstance extends DurableObject<Env> {
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-		// A restarted object starts without a timeout (Cloudflare docs).
-		const c = ctx.container;
-		if (c?.running) void ctx.blockConcurrencyWhile(() => c.setInactivityTimeout(INACTIVITY_MS));
-	}
 
 	/** The one start in progress or done; null when the container is stopped. */
 	private ready: Promise<void> | null = null;
@@ -275,6 +270,8 @@ export class KeyringInstance extends DurableObject<Env> {
 	private lastUsedStored = 0;
 	/** A start() is between c.start() and the end of its wait. */
 	private starting = false;
+	// Restored only by normal lifecycle work, never by a diagnostic-only wake.
+	private inactivityConfigured = false;
 
 	private async identity(): Promise<Identity | undefined> {
 		if (this.deleted) return undefined;
@@ -347,7 +344,6 @@ export class KeyringInstance extends DurableObject<Env> {
 					"--admin-token-sha256", adminHash,
 				],
 			});
-			await c.setInactivityTimeout(INACTIVITY_MS);
 			const mine = this.ready;
 			c.monitor()
 				.catch((e) => console.error("keyring container stopped:", String(e)))
@@ -356,6 +352,8 @@ export class KeyringInstance extends DurableObject<Env> {
 					if (this.ready === mine) this.ready = null;
 				});
 		}
+		await c.setInactivityTimeout(INACTIVITY_MS);
+		this.inactivityConfigured = true;
 		for (let i = 0; ; i++) {
 			if (this.deleted) throw new Deleted();
 			try {
@@ -528,6 +526,25 @@ export class KeyringInstance extends DurableObject<Env> {
 		});
 	}
 
+	/** Strict observation: no withInstance/running, unlock, import, sync or touch. */
+	async googleRenewal(): Promise<Result> {
+		const m = await this.identity();
+		if (!m || this.deleted) return { status: 404, error: "unknown keyring" };
+		const c = this.ctx.container;
+		if (this.starting) return { body: { available: false, reason: "starting" } };
+		if (!c?.running) return { body: { available: false, reason: "container_not_running" } };
+		// Do not pin an idle container. A concurrent shutdown may fail this read.
+		try {
+			const r = await this.adminCall(m, "GET", "/google-renewal", undefined, 2_000);
+			if (!r.ok) return { status: 503, error: "Google renewal diagnostics unavailable" };
+			const body = await renewalView(r);
+			if (this.deleted) return { status: 404, error: "unknown keyring" };
+			return { body };
+		} catch {
+			return { status: 503, error: "Google renewal diagnostics unavailable" };
+		}
+	}
+
 	async putService(name: string, body: string): Promise<Result> {
 		return this.withInstance(async (m) => {
 			const req = JSON.parse(body) as { service: unknown; access?: unknown };
@@ -685,6 +702,10 @@ export class KeyringInstance extends DurableObject<Env> {
 			return;
 		}
 		try {
+			if (!this.inactivityConfigured) {
+				await c.setInactivityTimeout(INACTIVITY_MS);
+				this.inactivityConfigured = true;
+			}
 			await this.put(K_USAGE, await this.adminJSON(m, "GET", "/usage"));
 		} catch (e) {
 			if (e instanceof Deleted) return;
@@ -738,4 +759,72 @@ async function reply(r: Response): Promise<Reply> {
 function failure(e: unknown): { status: number; error: string } {
 	if (e instanceof KeyringError) return { status: e.status, error: e.message };
 	return { status: 502, error: "keyring unavailable" };
+}
+
+/** Bound the response and reconstruct only fixed, credential-free fields. */
+async function renewalView(response: Response): Promise<unknown> {
+	const reader = response.body?.getReader();
+	if (!reader) throw new Error("missing diagnostics");
+	let text = "";
+	let size = 0;
+	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > 16_384) throw new Error("oversized diagnostics");
+			text += decoder.decode(value, { stream: true });
+		}
+		text += decoder.decode();
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	const object = (value: unknown): Record<string, unknown> => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid diagnostics");
+		return value as Record<string, unknown>;
+	};
+	const choice = (value: unknown, allowed: readonly string[]): string => {
+		if (typeof value !== "string" || !allowed.includes(value)) throw new Error("invalid diagnostics");
+		return value;
+	};
+	const integer = (value: unknown, minimum = 0): number => {
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) throw new Error("invalid diagnostics");
+		return value;
+	};
+	const timestamp = (value: unknown): string => {
+		if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value) ||
+			!Number.isFinite(Date.parse(value))) throw new Error("invalid diagnostics");
+		return value;
+	};
+	const data = object(JSON.parse(text));
+	if (data.available === false) {
+		const reason = choice(data.reason, ["locked", "no_attempt"]);
+		return reason === "locked" ? { available: false, reason } :
+			{ available: false, reason, process_started_at: timestamp(data.process_started_at) };
+	}
+	if (data.available !== true) throw new Error("invalid diagnostics");
+	const attempt = object(data.attempt);
+	const phases = ["configuration", "controller_wait", "sdk_execution", "persistence", "token_validation"] as const;
+	const outcomes = ["running", "success", "timeout", "canceled", "error"] as const;
+	const process = object(attempt.process);
+	if (typeof process.available !== "boolean" || !Array.isArray(attempt.steps) || attempt.steps.length !== phases.length) {
+		throw new Error("invalid diagnostics");
+	}
+	const steps = attempt.steps.map((value, i) => {
+		const step = object(value);
+		return { phase: choice(step.phase, [phases[i]]), duration_ms: integer(step.duration_ms),
+			outcome: choice(step.outcome, [...outcomes, "not_run"]) };
+	});
+	return {
+		available: true, process_started_at: timestamp(data.process_started_at),
+		attempt: {
+			started_at: timestamp(attempt.started_at),
+			...(attempt.completed_at === undefined ? {} : { completed_at: timestamp(attempt.completed_at) }),
+			phase: choice(attempt.phase, [...phases, "complete"]), outcome: choice(attempt.outcome, outcomes),
+			duration_ms: integer(attempt.duration_ms), steps,
+			process: { available: process.available, cpu_time_ms: integer(process.cpu_time_ms),
+				exit_code: integer(process.exit_code, -1), signal: integer(process.signal) },
+		},
+	};
 }

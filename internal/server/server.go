@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
 )
@@ -67,14 +68,14 @@ type Handler struct {
 	google        googleCache
 	googleHistory googleHistory
 	// Set before serving: the container seals SDK changes before token use.
-	googleCommand func(context.Context, policy.GoogleAccount) (string, error)
+	googleCommand func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)
 
 	auditMu sync.Mutex
 }
 
 // SetGoogleCommand installs the container credential boundary before serving.
 // File-mode hosts keep the existing isolated subprocess path.
-func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAccount) (string, error)) {
+func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)) {
 	h.googleCommand = command
 }
 

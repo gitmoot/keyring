@@ -344,6 +344,7 @@ func (in *Instance) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /create", in.create)
 	mux.HandleFunc("POST /unlock", in.unlock)
 	mux.HandleFunc("GET /status", in.status)
+	mux.HandleFunc("GET /google-renewal", in.googleRenewal)
 	mux.HandleFunc("GET /state", in.getState)
 	mux.HandleFunc("GET /usage", in.getUsage)
 	mux.HandleFunc("PUT /network", in.putNetwork)
