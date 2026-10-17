@@ -51,13 +51,14 @@ Inputs:
 | `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per Phobos server |
 | `ADMIN_TOKEN` | secret | the router's admin bearer token |
 | `OAUTH_CLIENT_SECRETS` | secret | JSON `{"GOOGLE_CLIENT_SECRET": "..."}`, pushed into every keyring |
+| `OAUTH_CLIENT_SECRETS_BY_INSTANCE` | secret | JSON `{"keyring_id": {"GOOGLE_CLIENT_SECRET": "..."}}`, imported only by the named keyring; overrides matching global names there |
 
-Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both template entries. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
+Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both service entries. For a personal pilot, update only that person's existing instance, not the global template. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
 
 ```sh
 cd deploy/cloudflare
 npm ci
-npx wrangler secret put MASTER_KEY        # and CALLER_SECRET, ADMIN_TOKEN, OAUTH_CLIENT_SECRETS
+npx wrangler secret put MASTER_KEY        # and CALLER_SECRET, ADMIN_TOKEN; OAuth bindings only when approved
 npx wrangler deploy                        # builds the image from the repository root
 ```
 
@@ -107,7 +108,8 @@ controls. MCP receives API responses through Keyring, not Google credentials.
 ### Provisioning and lifecycle
 
 1. Obtain the owner-approved client, publishing-mode decision and protected
-   `OAUTH_CLIENT_SECRETS` provisioning. Use a project separate from Drive:
+   client-secret provisioning (use `OAUTH_CLIENT_SECRETS_BY_INSTANCE` for an
+   owner-only pilot). Use a project separate from Drive:
    [Google combined grants can revoke all included scopes together](https://developers.google.com/identity/protocols/oauth2/javascript-implicit-flow#incrementalAuth).
    Two refresh-token strings under one client are not independent revocation
    boundaries.
@@ -137,6 +139,33 @@ controls. MCP receives API responses through Keyring, not Google credentials.
    as successful Google revocation. Wait for the completed response/sealed
    state sync before treating disconnect as durable. A new browser-bound
    connection may then be requested; do not restore an older sealed snapshot.
+
+### Owner-only client-secret entry
+
+The owner creates the separate project's Web OAuth client in Google Cloud
+Console and enters its secret directly into the Worker's protected
+`OAUTH_CLIENT_SECRETS_BY_INSTANCE` setting in Cloudflare. Do not put the value
+in a command argument, chat, issue, agent tool, repository file, MCP worker
+or guest.
+
+The JSON object's outer key is the person's exact existing `keyring_id`,
+not a contact ID, label or role token. Its value maps the configured
+`client_secret_key` name to the secret. Preserve any other approved entries
+when replacing the binding. Keep personal-pilot secrets out of
+`OAUTH_CLIENT_SECRETS`, which intentionally imports into every instance.
+Instance-specific entries override global entries with the same key name;
+other instances continue using their existing global values.
+
+Import happens when the instance starts, and is saved in its sealed state.
+Removing a binding entry is **not revocation** and does not erase a previously
+imported key. For withdrawal, revoke the Google grant/client credential through
+the provider and disconnect the Workspace connection; do not infer removal
+from a changed binding alone. Public admin APIs still do not accept raw secrets.
+
+Agents need only non-secret project/client identifiers, the confirmed redirect
+URI, the target keyring ID and an owner-reported protected-import receipt.
+Review and deployment gates must pass before sending a real consent link.
+
 
 ### Pilot authorization is not public-launch approval
 

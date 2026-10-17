@@ -28,6 +28,8 @@ export interface Env {
 	ADMIN_TOKEN: string;
 	/** Secret (optional): JSON {"KEY_NAME": "value"}, OAuth client secrets put in every instance. */
 	OAUTH_CLIENT_SECRETS?: string;
+	/** Secret (optional): JSON {"keyring_id": {"KEY_NAME": "value"}}; selected values override globals only in that instance. */
+	OAUTH_CLIENT_SECRETS_BY_INSTANCE?: string;
 }
 
 /** The services every instance has, and the router role's access to each. */
@@ -410,10 +412,17 @@ export class KeyringInstance extends DurableObject<Env> {
 	}
 
 	private async pushClientSecrets(m: Identity): Promise<void> {
-		const raw = this.env.OAUTH_CLIENT_SECRETS ?? "";
-		const h = await sha256Hex(raw);
+		let secrets: Record<string, string>;
+		try {
+			const global = this.env.OAUTH_CLIENT_SECRETS ? JSON.parse(this.env.OAUTH_CLIENT_SECRETS) : {};
+			const scoped = JSON.parse(this.env.OAUTH_CLIENT_SECRETS_BY_INSTANCE || "{}");
+			secrets = { ...global, ...scoped[m.id] };
+		} catch {
+			// JSON parse errors can quote the input: never expose secret text.
+			throw new Error("OAuth client-secret settings must be valid JSON objects");
+		}
+		const h = await sha256Hex(JSON.stringify(secrets));
 		if (h === (await this.ctx.storage.get<string>(K_SECRETS))) return;
-		const secrets = raw ? (JSON.parse(raw) as Record<string, string>) : {};
 		for (const [name, value] of Object.entries(secrets)) {
 			await this.adminJSON(m, "PUT", `/keys/${name}`, { value });
 		}
