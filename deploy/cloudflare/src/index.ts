@@ -16,7 +16,10 @@ import { DurableObject } from "cloudflare:workers";
 
 export interface Env {
 	KEYRING: DurableObjectNamespace<KeyringInstance>;
-	/** https origin of this Worker, e.g. https://keyring.example.com */
+	/**
+	 * https origin of this Worker, e.g. https://keyring.example.com. It may
+	 * change: each keyring gets the new consent URL on its next start.
+	 */
 	PUBLIC_BASE: string;
 	/** The services every new instance starts with (a JSON var). */
 	SERVICES_TEMPLATE: Template | string;
@@ -124,6 +127,13 @@ export default {
 			}
 			const id = parts[2];
 			if (!ID.test(id ?? "") || !["c", "g"].includes(parts[3] ?? "")) return page(404, "Not found.");
+			// A link issued under an earlier PUBLIC_BASE: its form must be posted
+			// from PUBLIC_BASE's origin (the keyring checks Origin), so it opens
+			// there. A sign-in already started (g/) stays put: its browser cookie
+			// is only on the host it started on.
+			if (parts[3] === "c" && url.origin !== new URL(env.PUBLIC_BASE).origin) {
+				return new Response(null, { status: 303, headers: { location: env.PUBLIC_BASE + url.pathname + url.search, "cache-control": "no-store" } });
+			}
 			return stub(env, id).fetch(internal(request, "/_pages/connect/" + parts.slice(3).join("/") + url.search));
 		}
 		// Everything else is for the router only.
@@ -256,6 +266,8 @@ const K_USAGE = "usage";
 const K_OPEN_UNTIL = "openUntil";
 const K_SECRETS = "clientSecretsHash";
 const K_LAST_USED = "lastUsed";
+/** The consent public_url last sent to the keyring and saved in its sealed state. */
+const K_CONSENT_URL = "consentPublicUrl";
 /** lastUsed is written to storage at most this often. */
 const LAST_USED_WRITE_MS = 30 * 1000;
 
@@ -334,7 +346,10 @@ export class KeyringInstance extends DurableObject<Env> {
 			this.starting = false;
 		}
 		// A new keyring gets them from create(), once it exists.
-		if (await this.ctx.storage.get(K_SEALED)) await this.pushClientSecrets(m);
+		if (await this.ctx.storage.get(K_SEALED)) {
+			await this.pushConsent(m);
+			await this.pushClientSecrets(m);
+		}
 		await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
 	}
 
@@ -416,6 +431,30 @@ export class KeyringInstance extends DurableObject<Env> {
 		if (!cur || s.version > cur.version) await this.put(K_SEALED, { state: s.state, version: s.version } satisfies Sealed);
 	}
 
+	/** The keyring's consent settings; public_url follows PUBLIC_BASE. */
+	private async consentSettings(m: Identity) {
+		return {
+			listen: `0.0.0.0:${PORT_PAGES}`,
+			public_url: `${this.env.PUBLIC_BASE}/connect`,
+			api_listen: `0.0.0.0:${PORT_CONSENT_API}`,
+			api_token_sha256: await sha256Hex(m.consentToken),
+		};
+	}
+
+	/**
+	 * Sends the consent settings again when PUBLIC_BASE changed since they
+	 * were last sent. The keyring builds link, Google page and callback URLs
+	 * from its own public_url, kept in its sealed state; publishLink and the
+	 * page route expect them under PUBLIC_BASE. Open links and accounts stay.
+	 */
+	private async pushConsent(m: Identity): Promise<void> {
+		const consent = await this.consentSettings(m);
+		if (consent.public_url === (await this.ctx.storage.get<string>(K_CONSENT_URL))) return;
+		await this.adminJSON(m, "PUT", "/consent", consent);
+		await this.sync(m);
+		await this.put(K_CONSENT_URL, consent.public_url);
+	}
+
 	private async pushClientSecrets(m: Identity): Promise<void> {
 		let secrets: Record<string, string>;
 		try {
@@ -455,12 +494,8 @@ export class KeyringInstance extends DurableObject<Env> {
 		try {
 			await this.running(m);
 			await this.adminJSON(m, "POST", "/create", { id, data_key: await this.dataKey(m), listen: `0.0.0.0:${PORT_PROXY}` });
-			await this.adminJSON(m, "PUT", "/consent", {
-				listen: `0.0.0.0:${PORT_PAGES}`,
-				public_url: `${this.env.PUBLIC_BASE}/connect`,
-				api_listen: `0.0.0.0:${PORT_CONSENT_API}`,
-				api_token_sha256: await sha256Hex(m.consentToken),
-			});
+			const consent = await this.consentSettings(m);
+			await this.adminJSON(m, "PUT", "/consent", consent);
 			for (const [name, svc] of Object.entries(template.services)) {
 				await this.adminJSON(m, "PUT", `/services/${name}`, svc);
 			}
@@ -470,6 +505,7 @@ export class KeyringInstance extends DurableObject<Env> {
 			}
 			await this.pushClientSecrets(m);
 			await this.sync(m);
+			await this.put(K_CONSENT_URL, consent.public_url);
 			if (!role.token) throw new KeyringError(502, "the keyring returned no role token");
 			return { role_token: role.token };
 		} catch (e) {

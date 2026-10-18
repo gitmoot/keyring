@@ -23,6 +23,7 @@ The DO keeps each item under its own storage key, so writers of different items 
 | Data key | derived by HKDF from the `MASTER_KEY` secret and a random per-keyring salt kept in the DO | deleting the DO's storage destroys the salt, so no copy of the state can be opened again |
 | Daily counts | the container; the DO saves `GET /usage` every minute and before stopping the container, and passes it back on unlock | a restart does not reset a daily limit |
 | Consent links | the container's memory | the DO keeps the container running until the last link and its sign-in have expired (#50) |
+| Consent public URL | the container's sealed state; the DO keeps the last one sent (`consentPublicUrl`) | follows `PUBLIC_BASE`; see [Changing `PUBLIC_BASE`](#changing-public_base) |
 | Audit | the container's stdout (Workers logs) | never a key value or token |
 | Container disk | transient Google CLI configuration under private `/var/lib/keyring/google` | never a durable credential store; persisted credentials belong in sealed state |
 
@@ -37,7 +38,7 @@ The DO keeps each item under its own storage key, so writers of different items 
   - `DELETE /admin/instances/<id>/keys/<service>`: removes the local credential and pending OAuth consent, then attempts bounded provider revocation; inspect `revoked`/`revoke_error`, not just HTTP 200
   - `POST /admin/instances/<id>/role-token` → `{"role_token"}`; the old token stops working
   - `DELETE /admin/instances/<id>`: wipes the container and the DO's storage; repeating it returns 200
-- `/connect/<keyring_id>/c/<link>` and `/connect/callback`: public pages for the person. A link opens only while that keyring's container is running and the link is open, so a stranger cannot wake a container. The callback finds its keyring through a short-lived `__Host-` cookie; the keyring itself still checks the OAuth state, PKCE and its own browser cookie.
+- `/connect/<keyring_id>/c/<link>` and `/connect/callback`: public pages for the person. A link opens only while that keyring's container is running and the link is open, so a stranger cannot wake a container. The callback finds its keyring through a short-lived `__Host-` cookie; the keyring itself still checks the OAuth state, PKCE and its own browser cookie. A link page requested on another host than `PUBLIC_BASE` answers 303 to the same path on `PUBLIC_BASE`.
 
 ## Deploying (needs the owner's approval: changes the Cloudflare account and costs money)
 
@@ -45,7 +46,7 @@ Inputs:
 
 | Name | Kind | Value |
 |---|---|---|
-| `PUBLIC_BASE` | var in `wrangler.jsonc` | https origin of the Worker, e.g. `https://keyring.example.com` |
+| `PUBLIC_BASE` | var in `wrangler.jsonc` | https origin of the Worker, e.g. `https://keyring.example.com`; may change, see [Changing `PUBLIC_BASE`](#changing-public_base) |
 | `SERVICES_TEMPLATE` | var in `wrangler.jsonc` | services each keyring starts with, and the router role's access |
 | `MASTER_KEY` | secret | `head -c32 /dev/urandom \| base64`. Losing it makes every keyring unreadable; rotating it needs a re-seal (not built yet) |
 | `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per Phobos server |
@@ -74,6 +75,15 @@ npx wrangler deploy \
 After `wrangler deploy` returns, the container image can stay "provisioning" for several minutes (seen: about 4). In that window new keyrings may start on the **old** image with the **new** template. Wait until `npx wrangler containers list` shows the application ready before creating keyrings.
 
 `--domain` adds the Worker's custom domain and its DNS record only; other records in the zone are not touched. The template's `REPLACE` client ID is not a working OAuth client. Until an approved client and secret exist, Gmail/Calendar activation is blocked; fixed-key services, consent forms, the caller check and deletes still work. Add a fixed-key service with `PUT /admin/instances/<id>/services/<name>`.
+
+### Changing `PUBLIC_BASE`
+
+Each keyring builds its link, Google page and callback URLs from the consent `public_url` in its sealed state (`<PUBLIC_BASE>/connect`, sent at create). After a deploy with a new `PUBLIC_BASE`, every keyring gets it again with `PUT /consent` on its next start (the first call after the deploy restarts its DO), before any link is issued or page served; the new sealed state is saved and the DO records the URL under `consentPublicUrl`, so this happens once per change. Open links, keys and accounts are kept. A keyring made before this record existed gets one such `PUT` on its first start, even if `PUBLIC_BASE` did not change.
+
+Before switching, attach the new hostname to the Worker and add `<new PUBLIC_BASE>/connect/callback` to the OAuth client. Keep the old hostname and its callback URI for at least the longest link lifetime (15 minutes by default, up to 1 hour with `ttl_seconds`) plus a 10-minute sign-in:
+
+- A link issued before the switch still works: on the old host its page answers 303 to the new host, where it opens and submits normally. A form opened before the switch and submitted after it lands on the page again on the new host.
+- A sign-in started before the switch (Connect pressed on the old host) does not finish: the OAuth callback on the old host exchanges the code with the new callback URL, which the provider refuses, and a Drive code form posted on the old host fails the keyring's Origin check. The person asks for a new link. This affects only sign-ins started in the 10 minutes before the switch.
 
 ## Per-person Gmail and Calendar
 

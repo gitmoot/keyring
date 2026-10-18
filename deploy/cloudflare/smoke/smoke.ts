@@ -105,6 +105,7 @@ class FakeContainer {
 	}
 	timeoutWrites = 0;
 	diagnosticCalls = 0;
+	consentPuts = 0;
 	diagnosticOverride: (() => Response | Promise<Response>) | null = null;
 	inactivityMs = 0;
 	async setInactivityTimeout(ms: number) {
@@ -117,6 +118,7 @@ class FakeContainer {
 	getTcpPort(p: number) {
 		return {
 			fetch: (u: string, init?: RequestInit) => {
+				if (p === 8090 && new URL(u).pathname === "/consent" && init?.method === "PUT") this.consentPuts++;
 				if (p === 8090 && new URL(u).pathname === "/google-renewal") {
 					this.diagnosticCalls++;
 					if (this.diagnosticOverride) return Promise.resolve(this.diagnosticOverride());
@@ -191,8 +193,16 @@ const env = {
 	},
 };
 
+// A path is on https://keyring.test (the first PUBLIC_BASE); a full URL is taken as is.
 const call = (method: string, path: string, headers: Record<string, string> = {}, body?: string) =>
-	mod.default.fetch(new Request("https://keyring.test" + path, { method, headers, body, redirect: "manual" }), env as never);
+	mod.default.fetch(new Request(new URL(path, "https://keyring.test"), { method, headers, body, redirect: "manual" }), env as never);
+
+/** A string field of a JSON reply, or "" when it has none. */
+async function stringField(response: Response, name: string): Promise<string> {
+	const body: unknown = await response.json().catch(() => null);
+	const value: unknown = body !== null && typeof body === "object" ? Reflect.get(body, name) : undefined;
+	return typeof value === "string" ? value : "";
+}
 
 let failed = false;
 function expect(what: string, got: unknown, want: unknown) {
@@ -560,6 +570,50 @@ try {
 	]);
 	expect("link keep-alive survives a concurrent alarm", [typeof storages.get(kf)!.m.get("openUntil"), typeof storages.get(kf)!.m.get("usage")], ["number", "object"]);
 	await call("DELETE", `/admin/instances/${kf}`, ADMIN);
+
+	// PUBLIC_BASE moves to another host. A deploy restarts every object while
+	// the container may keep running: the keyring gets the new consent URL
+	// once, before it issues a link, and keeps the links it already issued.
+	{
+		const A = env.PUBLIC_BASE;
+		const B = "https://connect.example.org";
+		const km = await stringField(await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "moved" })), "keyring_id");
+		const mc = containers.get(km)!;
+		const putsAtCreate = mc.consentPuts;
+		r = await call("POST", `/admin/instances/${km}/links`, ADMIN, JSON.stringify({ service: "echo" }));
+		const old = await stringField(r, "url");
+		expect("link under the first PUBLIC_BASE", [r.status, old.startsWith(`${A}/connect/${km}/c/`)], [201, true]);
+		const moved = B + new URL(old).pathname;
+		storages.get(km)!.m.delete("consentPublicUrl"); // as for a keyring made before it was kept
+		try {
+			env.PUBLIC_BASE = B;
+			objects.delete(km);
+			r = await call("POST", `/admin/instances/${km}/links`, ADMIN, JSON.stringify({ service: "echo" }));
+			const fresh = await stringField(r, "url");
+			expect("after PUBLIC_BASE changed, a link is issued under the new base", [r.status, fresh.startsWith(`${B}/connect/${km}/c/`)], [201, true]);
+			expect("consent settings sent again once", mc.consentPuts - putsAtCreate, 1);
+			expect("the new link opens", (await call("GET", fresh)).status, 200);
+			r = await call("GET", old);
+			expect("a link from the old host is sent to the new one", [r.status, r.headers.get("location")], [303, moved]);
+			expect("the old link opens on the new host", (await call("GET", moved)).status, 200);
+			// A page opened before the switch, submitted after it.
+			r = await call("POST", old, FORM, "value=old-host");
+			expect("a form posted on the old host goes back to the page on the new one", [r.status, r.headers.get("location")], [303, moved]);
+			expect("the old link still saves on the new host", (await call("POST", moved, { ...FORM, origin: B }, "value=moved-secret")).status, 200);
+			const glink = await stringField(await call("POST", `/admin/instances/${km}/links`, ADMIN, JSON.stringify({ service: "gmail" })), "url");
+			r = await call("POST", glink, { ...FORM, origin: B }, "");
+			expect("a sign-in uses the new callback", [r.status, new URL(r.headers.get("location") ?? "about:blank").searchParams.get("redirect_uri")], [303, `${B}/connect/callback`]);
+			// The sealed state holds the new URL: a cold restart needs no resend.
+			await mc.destroy();
+			objects.delete(km);
+			r = await call("POST", `/admin/instances/${km}/links`, ADMIN, JSON.stringify({ service: "echo" }));
+			const restored = await stringField(r, "url");
+			expect("after a cold restart, links stay under the new base with no resend", [r.status, restored.startsWith(`${B}/connect/${km}/c/`), mc.consentPuts - putsAtCreate], [201, true, 1]);
+		} finally {
+			env.PUBLIC_BASE = A;
+		}
+		await call("DELETE", `/admin/instances/${km}`, ADMIN);
+	}
 } finally {
 	for (const c of containers.values()) await c.destroy();
 	api.stop(true);
