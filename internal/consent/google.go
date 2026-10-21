@@ -132,8 +132,15 @@ func (s *Server) googlePage(w http.ResponseWriter, r *http.Request, id string, p
 		default:
 			data.Message = "Google connection could not finish. Retry or ask for a new link; completed progress is retained."
 		}
+	case "setting_up_project":
+		data.GoogleStep = 2
+		data.Message = "Setting up Drive and Sheets in your Google account. This can take a few minutes; keep this page open."
+	case "signing_in":
+		data.GoogleStep = 1
+		data.Message = "Signing in to Google…"
 	default:
-		data.Message = "Connecting to Google. This page refreshes while the private login and project setup finish."
+		data.GoogleStep = 1
+		data.Message = "Preparing Google sign-in…"
 	}
 	render(w, http.StatusOK, data)
 }
