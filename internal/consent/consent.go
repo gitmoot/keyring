@@ -972,6 +972,9 @@ type pageData struct {
 	Problem                                               bool
 	Google, GoogleCode, GoogleRetry, GoogleTerms, Refresh bool
 	GoogleURL, GoogleAccount, GoogleProject               string
+	// GoogleStep is the Google connection's current step while it runs
+	// (1 sign-in, 2 project setup), shown as a list; 0 shows none.
+	GoogleStep int
 }
 
 // page is plain HTML and inline CSS: the pages' CSP allows inline styles
@@ -1010,6 +1013,16 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 .hint{margin-top:10px;font-size:14px;color:var(--mut)}
 .note{display:flex;gap:10px;align-items:flex-start;margin-top:24px;padding-top:20px;border-top:1px solid var(--line);font-size:14px;color:var(--mut)}
 .note svg{flex:none;margin-top:1px}
+.spin{flex:none;width:20px;height:20px;margin-top:2px;border-radius:50%;border:2.5px solid var(--line);border-top-color:var(--ink);animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2s}}
+.steps{list-style:none;margin-top:18px;display:grid;gap:10px;font-size:15px;color:var(--mut)}
+.steps li{display:flex;align-items:center;gap:10px}
+.steps li::before{content:"";flex:none;width:8px;height:8px;border-radius:50%;background:#d6dae1}
+.steps .now{color:var(--ink);font-weight:500}
+.steps .now::before{background:var(--blue);box-shadow:0 0 0 4px rgba(36,102,224,.15)}
+.steps .done{color:var(--green)}
+.steps .done::before{background:var(--green)}
 .foot{max-width:480px;margin-top:22px;text-align:center;font-size:13px;color:var(--mut)}
 @media (max-width:480px){body{padding:20px 14px 32px}.card{padding:26px 20px 24px;border-radius:20px}h1{font-size:27px}}
 </style>
@@ -1018,7 +1031,8 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 <main class="card">
 {{if .Label}}<h1>Connect {{.Label}}</h1>{{else if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
 {{if .Message}}<div class="msg{{if or .Problem (ge .Status 400)}} err{{else if not (or .Form .Refresh)}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if or .Problem (ge .Status 400)}}alert{{else}}status{{end}}">
-{{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not (or .Form .Refresh)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not (or .Form .Refresh)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{else if .Refresh}}<span class="spin" aria-hidden="true"></span>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{if .GoogleStep}}<ol class="steps" aria-label="Progress"><li class="{{if eq .GoogleStep 1}}now{{else}}done{{end}}">Sign in to Google</li><li{{if eq .GoogleStep 2}} class="now"{{end}}>Set up Drive and Sheets</li><li>Done</li></ol>{{end}}
 {{if .Google}}
 {{if .SignIn}}<p class="hint">Connect your own Google Drive and Sheets. After sign-in, this creates a Google Cloud project in your account and enables their APIs. No billing account is attached. Your Google credentials stay in your private keyring, not with the assistant.</p>{{end}}
 {{with .GoogleAccount}}<p class="hint">Google account: {{.}}</p>{{end}}
