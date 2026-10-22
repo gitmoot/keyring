@@ -399,8 +399,14 @@ Container access-token renewal (SDK startup plus token validation) has a bounded
 45-second budget, leaving 15 seconds within the current Phobos gateway's
 60-second response-header limit for forwarding and the upstream response.
 File-mode hosts retain their 30-second renewal budget. Cached requests do not
-start the SDK again, and neither a renewal timeout nor this budget change
-requires reconnecting the saved Google account or increasing the instance size.
+start the SDK again, and a renewal timeout does not require reconnecting the
+saved Google account.
+
+Containers are `basic` (1/4 vCPU, 1 GiB), not `lite` (1/16 vCPU, 256 MiB;
+keyring#90, owner-approved 2026-10-22): on `lite` a live renewal ran the vCPU
+flat out (2.7 s CPU in 45.4 s) and was killed at the budget, twice. Memory is
+billed while a container is awake, so this costs about four times as much
+memory time.
 
 The image prepares SDK bytecode with its bundled Python interpreter at build
 time. The SDK archive has no bytecode cache, and the non-root runtime cannot
