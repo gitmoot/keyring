@@ -52,7 +52,8 @@ Inputs:
 | `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per Phobos server |
 | `ADMIN_TOKEN` | secret | the router's admin bearer token |
 | `OAUTH_CLIENT_SECRETS` | secret | JSON `{"GOOGLE_CLIENT_SECRET": "..."}`, pushed into every keyring |
-| `OAUTH_CLIENT_SECRETS_BY_INSTANCE` | secret | JSON `{"keyring_id": {"GOOGLE_CLIENT_SECRET": "..."}}`, imported only by the named keyring; overrides matching global names there |
+| `OAUTH_CLIENT_SECRETS_SHARED` | secret | Optional additive JSON map, pushed into every keyring; overrides matching global names without replacing the existing opaque global binding |
+| `OAUTH_CLIENT_SECRETS_BY_INSTANCE` | secret | JSON `{"keyring_id": {"GOOGLE_CLIENT_SECRET": "..."}}`, imported only by the named keyring; overrides matching global and shared names there |
 
 Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both service entries. For a personal pilot, update only that person's existing instance, not the global template. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
 
@@ -246,6 +247,49 @@ acknowledgment only: `value_readback` and `runtime_import_verified` remain false
 Compatible Worker/container deployment, instance startup/import and real-account
 acceptance are separate gates. No public receiver or additional permission is
 introduced by this command.
+
+### Promoting a pilot client without replacing opaque bindings
+
+The merge order is global, shared, then per-instance. Use
+`OAUTH_CLIENT_SECRETS_SHARED` when the existing global binding's contents cannot
+be recovered safely. Do not overwrite an unknown global map or remove the pilot
+override. An absent shared binding leaves existing behavior unchanged.
+
+With owner approval for the shared credential scope, the same importer accepts
+`--shared` **instead of** `--keyring-id`. Preflight:
+
+```sh
+keyring cloudflare-import-client \
+  --relay-base "$CLOUDFLARE_RELAY_BASE" \
+  --account "$CLOUDFLARE_ACCOUNT_ID" \
+  --worker "$KEYRING_WORKER" \
+  --shared --check-only
+```
+
+The authorized producer then invokes that command with `--exclusive-writer`
+instead of `--check-only`, passing the exact secret through an anonymous pipe.
+It creates only `{"GOOGLE_CLIENT_SECRET":"..."}` in the shared binding and refuses
+any existing destination. The old global and per-instance bindings are untouched;
+the same input, secrecy, no-retry and exclusive-writer requirements apply.
+There is no arbitrary binding-name option.
+
+For a new shared Workspace rollout, keep both services' OAuth client, scopes,
+refresh key and router access consistent with the approved pilot. Changing
+`SERVICES_TEMPLATE` affects new instances only: repair approved existing instances
+with the documented per-service PUT, preserving their other grants. Do not repair
+or sign in the pilot as a rollout check. Confirm container rollout readiness and
+non-pilot consent-link creation before handing off the real Gmail/Calendar check.
+
+If the original secret is unavailable, provisioning an additional active secret
+on the same Google client requires its own applicable owner authorization; never
+reset or revoke the pilot's secret as a shortcut. Importing the shared binding
+changes future imports into all instances, not just the repaired instances.
+Per-instance values still win, so a pilot retaining its override keeps that secret.
+Rollback must preserve both original bindings and the pilot configuration.
+Removing a binding does **not** erase a value already imported into a keyring;
+reverting the Worker is not credential revocation. Coordinate rollback with the
+deployment owner rather than deleting secrets or restoring whole old settings.
+
 
 
 ### Pilot authorization is not public-launch approval
