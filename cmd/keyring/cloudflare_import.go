@@ -22,8 +22,8 @@ const scopedClientBinding = "OAUTH_CLIENT_SECRETS_BY_INSTANCE"
 
 // This is an initial import, not a read/modify/write of an opaque Worker secret.
 // Cloudflare offers no compare-and-set here: the operator must exclude competing
-// deployment/secret writers until the command finishes. An existing binding of
-// any type is refused rather than risking loss of another instance's entries.
+// deployment/secret writers until the command finishes. An existing destination
+// binding of any type is refused rather than overwriting unknown entries.
 func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cloudflare-import-client", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -31,6 +31,7 @@ func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io
 	account := fs.String("account", "", "confirmed Cloudflare account ID")
 	worker := fs.String("worker", "", "confirmed existing Worker name")
 	id := fs.String("keyring-id", "", "pilot ID confirmed from the authenticated person's canonical mapping")
+	shared := fs.Bool("shared", false, "initial shared-client overlay import instead of a per-instance binding")
 	checkOnly := fs.Bool("check-only", false, "check destination and binding absence without reading a secret or writing")
 	exclusive := fs.Bool("exclusive-writer", false, "operator has excluded other Worker deployment/secret writers during import")
 	if err := fs.Parse(args); err != nil {
@@ -47,8 +48,12 @@ func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io
 		fmt.Fprintln(stderr, "cloudflare-import-client: "+message)
 		return 1
 	}
-	if fs.NArg() != 0 || !lowerHexID(*account) || !lowerHexID(*id) || !workerName(*worker) {
-		return fail("pass confirmed --account, --worker and --keyring-id; no positional secret or file arguments")
+	if fs.NArg() != 0 || !lowerHexID(*account) || !workerName(*worker) || (*shared && *id != "") || (!*shared && !lowerHexID(*id)) {
+		return fail("pass confirmed --account, --worker and exactly one of --keyring-id or --shared; no positional secret or file arguments")
+	}
+	binding := scopedClientBinding
+	if *shared {
+		binding = "OAUTH_CLIENT_SECRETS_SHARED"
 	}
 	u, err := url.Parse(*base)
 	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" || !net.ParseIP(u.Hostname()).IsLoopback() || u.Path == "" || strings.Contains(u.Path, "..") {
@@ -97,11 +102,11 @@ func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io
 	if err != nil {
 		return fail("could not verify existing Worker bindings; no write attempted")
 	}
-	if _, exists := before[scopedClientBinding]; exists {
-		return fail("target binding already exists; refuse to overwrite unknown per-instance entries")
+	if _, exists := before[binding]; exists {
+		return fail("target binding already exists; refuse to overwrite unknown entries")
 	}
 	if *checkOnly {
-		return cloudflareImportReceipt(stdout, stderr, *account, *worker, *id, false)
+		return cloudflareImportReceipt(stdout, stderr, *account, *worker, *id, binding, false)
 	}
 	// Reuse the native Linux/Darwin private-pipe and bounded-input checks. Neither
 	// the pipe contents nor provider response bodies are ever printed or saved.
@@ -112,15 +117,20 @@ func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io
 	if !utf8.ValidString(secret) || strings.TrimSpace(secret) != secret || strings.ContainsAny(secret, "\r\n\x00") {
 		return fail("expected an exact UTF-8 client-secret value without surrounding whitespace or line breaks")
 	}
-	value, err := json.Marshal(map[string]map[string]string{*id: {"GOOGLE_CLIENT_SECRET": secret}})
+	var value []byte
+	if *shared {
+		value, err = json.Marshal(map[string]string{"GOOGLE_CLIENT_SECRET": secret})
+	} else {
+		value, err = json.Marshal(map[string]map[string]string{*id: {"GOOGLE_CLIENT_SECRET": secret}})
+	}
 	if err != nil {
-		return fail("could not encode scoped secret")
+		return fail("could not encode client secret")
 	}
 	body, err := json.Marshal(struct {
 		Name string `json:"name"`
 		Type string `json:"type"`
 		Text string `json:"text"`
-	}{scopedClientBinding, "secret_text", string(value)})
+	}{binding, "secret_text", string(value)})
 	if err != nil {
 		return fail("could not encode binding")
 	}
@@ -134,18 +144,18 @@ func runCloudflareClientImport(args []string, stdin io.Reader, stdout, stderr io
 		Name string `json:"name"`
 		Type string `json:"type"`
 	}
-	if err := cloudflareImportRequest(client, http.MethodPut, root+"/secrets", body, &accepted); err != nil || accepted.Name != scopedClientBinding || accepted.Type != "secret_text" {
+	if err := cloudflareImportRequest(client, http.MethodPut, root+"/secrets", body, &accepted); err != nil || accepted.Name != binding || accepted.Type != "secret_text" {
 		return fail("submission was not confirmed; binding state may have changed; do not retry blindly")
 	}
 	after, err := cloudflareBindings(client, root)
-	if err != nil || after[scopedClientBinding] != "secret_text" {
+	if err != nil || after[binding] != "secret_text" {
 		return fail("write acknowledged but binding metadata verification failed; do not retry blindly")
 	}
-	delete(after, scopedClientBinding)
+	delete(after, binding)
 	if !sameBindings(before, after) {
 		return fail("write acknowledged but unrelated binding metadata changed; stop and reconcile with the deployment owner")
 	}
-	return cloudflareImportReceipt(stdout, stderr, *account, *worker, *id, true)
+	return cloudflareImportReceipt(stdout, stderr, *account, *worker, *id, binding, true)
 }
 
 func lowerHexID(s string) bool {
@@ -243,17 +253,17 @@ func cloudflareImportRequest(client *http.Client, method, target string, body []
 	return nil
 }
 
-func cloudflareImportReceipt(stdout, stderr io.Writer, account, worker, id string, written bool) int {
+func cloudflareImportReceipt(stdout, stderr io.Writer, account, worker, id, binding string, written bool) int {
 	receipt := struct {
 		Account        string `json:"account"`
 		Worker         string `json:"worker"`
-		KeyringID      string `json:"keyring_id"`
+		KeyringID      string `json:"keyring_id,omitempty"`
 		Binding        string `json:"binding"`
 		Ready          bool   `json:"ready"`
 		Written        bool   `json:"write_acknowledged"`
 		ValueReadback  bool   `json:"value_readback"`
 		RuntimeChecked bool   `json:"runtime_import_verified"`
-	}{account, worker, id, scopedClientBinding, !written, written, false, false}
+	}{account, worker, id, binding, !written, written, false, false}
 	if json.NewEncoder(stdout).Encode(receipt) != nil {
 		fmt.Fprintln(stderr, "cloudflare-import-client: receipt output failed; inspect binding metadata before retrying")
 		return 1

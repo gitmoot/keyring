@@ -31,6 +31,8 @@ export interface Env {
 	ADMIN_TOKEN: string;
 	/** Secret (optional): JSON {"KEY_NAME": "value"}, OAuth client secrets put in every instance. */
 	OAUTH_CLIENT_SECRETS?: string;
+	/** Optional additive JSON map; shared clients override globals but never per-instance entries. */
+	OAUTH_CLIENT_SECRETS_SHARED?: string;
 	/** Secret (optional): JSON {"keyring_id": {"KEY_NAME": "value"}}; selected values override globals only in that instance. */
 	OAUTH_CLIENT_SECRETS_BY_INSTANCE?: string;
 }
@@ -459,8 +461,9 @@ export class KeyringInstance extends DurableObject<Env> {
 		let secrets: Record<string, string>;
 		try {
 			const global = this.env.OAUTH_CLIENT_SECRETS ? JSON.parse(this.env.OAUTH_CLIENT_SECRETS) : {};
+			const shared = this.env.OAUTH_CLIENT_SECRETS_SHARED ? JSON.parse(this.env.OAUTH_CLIENT_SECRETS_SHARED) : {};
 			const scoped = JSON.parse(this.env.OAUTH_CLIENT_SECRETS_BY_INSTANCE || "{}");
-			secrets = { ...global, ...scoped[m.id] };
+			secrets = { ...global, ...shared, ...scoped[m.id] };
 		} catch {
 			// JSON parse errors can quote the input: never expose secret text.
 			throw new Error("OAuth client-secret settings must be valid JSON objects");

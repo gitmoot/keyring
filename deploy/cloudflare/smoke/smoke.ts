@@ -159,7 +159,8 @@ const env = {
 	MASTER_KEY: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
 	CALLER_SECRET: "caller-secret",
 	ADMIN_TOKEN: "admin-token",
-	OAUTH_CLIENT_SECRETS: JSON.stringify({ GOOGLE_CLIENT_SECRET: "client-secret-value" }),
+	OAUTH_CLIENT_SECRETS: JSON.stringify({ GOOGLE_CLIENT_SECRET: "client-secret-value", OTHER_CLIENT_SECRET: "client-secret-value" }),
+	OAUTH_CLIENT_SECRETS_SHARED: "",
 	OAUTH_CLIENT_SECRETS_BY_INSTANCE: "{}",
 	// Passed as a string when SMOKE_TEMPLATE_AS_STRING is set, as `wrangler deploy --var` does.
 	SERVICES_TEMPLATE: ((t: object) => (process.env.SMOKE_TEMPLATE_AS_STRING ? JSON.stringify(t) : t))({
@@ -427,11 +428,12 @@ try {
 			port: 0,
 			async fetch(req) {
 				const path = new URL(req.url).pathname;
-				if (req.method !== "POST" || !["/pilot/token", "/global/token"].includes(path)) return new Response("", { status: 404 });
+				if (req.method !== "POST" || !["/pilot/token", "/global/token", "/shared/token"].includes(path)) return new Response("", { status: 404 });
 				const form = await req.formData();
-				const pilot = path === "/pilot/token";
-				if (form.get("client_id") !== (pilot ? "pilot-client" : "global-client") ||
-					form.get("client_secret") !== (pilot ? "synthetic-owner-only-secret" : "client-secret-value")) {
+				const mode = path.split("/")[1];
+				const expectedSecret = mode === "pilot" ? "synthetic-owner-only-secret" : mode === "shared" ? "synthetic-shared-secret" : "client-secret-value";
+				if (form.get("client_id") !== `${mode}-client` ||
+					form.get("client_secret") !== expectedSecret) {
 					return Response.json({ error: "invalid_client" }, { status: 400 });
 				}
 				return Response.json({ refresh_token: "synthetic-refresh", access_token: "synthetic-access", token_type: "Bearer", expires_in: 3600 });
@@ -445,13 +447,13 @@ try {
 				await containers.get(person.keyring_id)!.destroy();
 				objects.delete(person.keyring_id);
 			}
-			const configure = async (id: string, mode: "pilot" | "global") => {
+			const configure = async (id: string, mode: "pilot" | "global" | "shared") => {
 				const response = await call("PUT", `/admin/instances/${id}/services/gmail`, ADMIN, JSON.stringify({
 					service: {
 						base: `http://127.0.0.1:${api.port}`, key: "GMAIL_REFRESH", auth: "oauth2",
 						oauth2: {
 							token_url: `http://127.0.0.1:${provider.port}/${mode}/token`,
-							client_id: `${mode}-client`, client_secret_key: "GOOGLE_CLIENT_SECRET",
+							client_id: `${mode}-client`, client_secret_key: mode === "global" ? "OTHER_CLIENT_SECRET" : "GOOGLE_CLIENT_SECRET",
 							auth_url: "https://accounts.example.com/auth", scopes: ["read"],
 						},
 					},
@@ -482,6 +484,33 @@ try {
 			await configure(other.keyring_id, "pilot");
 			expect("unselected keyring cannot consent with the pilot client", (await connect(other.keyring_id)).status, 502);
 			expect("unselected keyring cannot reuse its old grant as the pilot", (await read(other)).status, 503);
+			// Add a shared client without reading/replacing either existing opaque map.
+			env.OAUTH_CLIENT_SECRETS_SHARED = JSON.stringify({ GOOGLE_CLIENT_SECRET: "synthetic-shared-secret" });
+			for (const person of [pilot, other]) {
+				await containers.get(person.keyring_id)!.destroy();
+				objects.delete(person.keyring_id);
+			}
+			await configure(other.keyring_id, "shared");
+			expect("shared overlay enables an existing non-pilot keyring", (await connect(other.keyring_id)).status, 200);
+			expect("shared overlay grant can reach its upstream", (await read(other)).status, 200);
+			expect("pilot override still wins over the shared client", (await read(pilot)).status, 200);
+			await configure(other.keyring_id, "global");
+			expect("unrelated global client survives shared overlay", (await connect(other.keyring_id)).status, 200);
+			const fresh = await (await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "shared-fresh" }))).json() as typeof pilot;
+			await configure(fresh.keyring_id, "shared");
+			expect("new keyring receives shared client", (await connect(fresh.keyring_id)).status, 200);
+			await containers.get(fresh.keyring_id)!.destroy();
+			objects.delete(fresh.keyring_id);
+			expect("shared grant survives sealed cold restore", (await read(fresh)).status, 200);
+			env.OAUTH_CLIENT_SECRETS_SHARED = "synthetic-shared-secret-not-json";
+			await containers.get(fresh.keyring_id)!.destroy();
+			objects.delete(fresh.keyring_id);
+			const sharedFailure = await call("GET", `/admin/instances/${fresh.keyring_id}/services`, ADMIN);
+			expect("malformed shared settings fail without leaking input",
+				[sharedFailure.status, (await sharedFailure.text()).includes("synthetic-shared-secret")], [502, false]);
+			env.OAUTH_CLIENT_SECRETS_SHARED = JSON.stringify({ GOOGLE_CLIENT_SECRET: "synthetic-shared-secret" });
+			objects.delete(fresh.keyring_id);
+			await call("DELETE", `/admin/instances/${fresh.keyring_id}`, ADMIN);
 			const savedSettings = env.OAUTH_CLIENT_SECRETS_BY_INSTANCE;
 			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = "synthetic-private-secret-not-json";
 			await containers.get(pilot.keyring_id)!.destroy();
@@ -496,6 +525,7 @@ try {
 		} finally {
 			env.OAUTH_CLIENT_SECRETS_BY_INSTANCE = "{}";
 			provider.stop(true);
+			env.OAUTH_CLIENT_SECRETS_SHARED = "";
 		}
 	}
 

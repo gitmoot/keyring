@@ -201,3 +201,85 @@ func TestCloudflareClientImport(t *testing.T) {
 		})
 	}
 }
+
+func TestCloudflareSharedClientImport(t *testing.T) {
+	const binding = "OAUTH_CLIENT_SECRETS_SHARED"
+	const secret = "synthetic-new-shared-secret"
+	const global = `{"EXISTING_CLIENT":"synthetic-global"}`
+	const pilot = `{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb":{"GOOGLE_CLIENT_SECRET":"synthetic-pilot"}}`
+	for _, mode := range []string{"import", "existing", "ambiguous-scope"} {
+		t.Run(mode, func(t *testing.T) {
+			var mu sync.Mutex
+			values := map[string]string{"OAUTH_CLIENT_SECRETS": global, scopedClientBinding: pilot}
+			if mode == "existing" {
+				values[binding] = `{"OTHER":"already-installed"}`
+			}
+			writes := 0
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/settings"):
+					bindings := make([]map[string]string, 0, len(values))
+					for name := range values {
+						bindings = append(bindings, map[string]string{"name": name, "type": "secret_text"})
+					}
+					json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"bindings": bindings}})
+				case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/secrets"):
+					writes++
+					var input struct{ Name, Type, Text string }
+					if json.NewDecoder(r.Body).Decode(&input) != nil || input.Name != binding || input.Type != "secret_text" {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					values[input.Name] = input.Text
+					json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]string{"name": input.Name, "type": input.Type}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer api.Close()
+			args := []string{"cloudflare-import-client", "--relay-base", api.URL + "/operator/cloudflare/client/v4", "--account", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--worker", "keyring-instances", "--shared", "--exclusive-writer"}
+			if mode == "ambiguous-scope" {
+				args = append(args, "--keyring-id", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+			}
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			if _, err := io.WriteString(writer, secret); err != nil {
+				writer.Close()
+				t.Fatal(err)
+			}
+			writer.Close()
+			var out, diagnostics bytes.Buffer
+			code := run(args, reader, &out, &diagnostics)
+			mu.Lock()
+			defer mu.Unlock()
+			if values["OAUTH_CLIENT_SECRETS"] != global || values[scopedClientBinding] != pilot {
+				t.Fatal("existing global or pilot secret map changed")
+			}
+			if strings.Contains(out.String()+diagnostics.String(), secret) {
+				t.Fatal("shared secret appeared in output")
+			}
+			if mode == "import" {
+				var imported map[string]string
+				if code != 0 || writes != 1 || json.Unmarshal([]byte(values[binding]), &imported) != nil || len(imported) != 1 || imported["GOOGLE_CLIENT_SECRET"] != secret {
+					t.Fatal("shared secret did not reach the independent overlay")
+				}
+				var receipt struct {
+					Binding   string `json:"binding"`
+					KeyringID string `json:"keyring_id"`
+					Written   bool   `json:"write_acknowledged"`
+				}
+				if json.Unmarshal(out.Bytes(), &receipt) != nil || receipt.Binding != binding || receipt.KeyringID != "" || !receipt.Written {
+					t.Fatal("shared import receipt misidentifies its scope")
+				}
+			} else if code == 0 || writes != 0 || (mode == "existing" && values[binding] != `{"OTHER":"already-installed"}`) {
+				t.Fatal("unsafe shared import changed protected settings")
+			}
+		})
+	}
+}
