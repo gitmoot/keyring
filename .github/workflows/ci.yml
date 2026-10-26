@@ -28,6 +28,7 @@ jobs:
           name: keyring-smoke-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/keyring
           retention-days: 1
+          overwrite: true
   macos-import:
     name: native macOS private-pipe import
     runs-on: macos-latest
