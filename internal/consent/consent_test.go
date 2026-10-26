@@ -57,6 +57,22 @@ func (m *memKeys) Delete(name string) error {
 	return nil
 }
 
+func (m *memKeys) SetAll(values map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	maps.Copy(m.keys, values)
+	return nil
+}
+
+func (m *memKeys) DeleteAll(names []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range names {
+		delete(m.keys, name)
+	}
+	return nil
+}
+
 func (m *memKeys) get(name string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -213,6 +229,70 @@ func (e *env) page(method, path string, form url.Values, hdr map[string]string, 
 }
 
 var fromPage = map[string]string{"Origin": origin}
+
+func TestExtraHeaderConsent(t *testing.T) {
+	e := newEnv(t)
+	var svc policy.Service
+	if err := json.Unmarshal([]byte(`{"base":"https://service.example","auth":"header","header":"CF-Access-Client-Id","key":"ACCESS_ID","extra_headers":{"CF-Access-Client-Secret":"ACCESS_SECRET"}}`), &svc); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Services["double"] = svc
+	if err := e.cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e.keys.Set("ACCESS_ID", "old-primary")
+	e.keys.Set("ACCESS_SECRET", "old-secondary")
+	path := e.link("double")
+	page := e.page("GET", path, nil, nil)
+	if page.Code != 200 || !strings.Contains(page.Body.String(), `name="extra_ACCESS_SECRET"`) || strings.Contains(page.Body.String(), "old-primary") || strings.Contains(page.Body.String(), "old-secondary") {
+		t.Fatal("consent page did not expose an empty field for each credential")
+	}
+	for _, fields := range []url.Values{
+		{"value": {"new-primary"}},
+		{"value": {"new-primary"}, "extra_ACCESS_SECRET": {"bad-secret\nsecond-line"}},
+	} {
+		w := e.page("POST", path, fields, fromPage)
+		if w.Code != 400 || strings.Contains(w.Body.String(), "new-primary") || strings.Contains(w.Body.String(), "bad-secret") {
+			t.Fatal("invalid bundle was accepted or echoed")
+		}
+		if e.keys.get("ACCESS_ID") != "old-primary" || e.keys.get("ACCESS_SECRET") != "old-secondary" {
+			t.Fatal("incomplete consent partially replaced stored credentials")
+		}
+	}
+	fields := url.Values{"value": {"new-primary"}, "extra_ACCESS_SECRET": {"new-secondary"}}
+	if w := e.page("POST", path, fields, fromPage); w.Code != 200 {
+		t.Fatalf("complete consent failed: %d", w.Code)
+	}
+	if e.keys.get("ACCESS_ID") != "new-primary" || e.keys.get("ACCESS_SECRET") != "new-secondary" {
+		t.Fatal("complete consent did not replace both credentials")
+	}
+	if w := e.page("POST", path, fields, fromPage); w.Code != 410 {
+		t.Fatal("bundle consent link could be reused")
+	}
+	stale := e.link("double")
+	if err := json.Unmarshal([]byte(`{"extra_headers":{"X-New-Secret":"ANOTHER_SECRET"}}`), &svc); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Services["double"] = svc
+	if w := e.page("POST", stale, fields, fromPage); w.Code != 410 {
+		t.Fatal("service remapping silently changed a previously issued consent link")
+	}
+	// Restore the original service mapping before disconnecting its credentials.
+	svc = policy.Service{}
+	if err := json.Unmarshal([]byte(`{"base":"https://service.example","auth":"header","header":"CF-Access-Client-Id","key":"ACCESS_ID","extra_headers":{"CF-Access-Client-Secret":"ACCESS_SECRET"}}`), &svc); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Services["double"] = svc
+	if w := e.api("DELETE", "/keys/double", apiToken, ""); w.Code != 200 {
+		t.Fatalf("bundle disconnect failed: %d", w.Code)
+	}
+	if e.keys.get("ACCESS_ID") != "" || e.keys.get("ACCESS_SECRET") != "" {
+		t.Fatal("disconnect left part of the credential bundle behind")
+	}
+	if strings.Contains(e.audit.String(), "new-primary") || strings.Contains(e.audit.String(), "new-secondary") {
+		t.Fatal("consent credentials reached the audit log")
+	}
+}
 
 func TestValueLinkIsSingleUseAndBoundToItsService(t *testing.T) {
 	e := newEnv(t)

@@ -345,6 +345,26 @@ func (k instanceKeys) Delete(name string) error {
 	return err
 }
 
+func (k instanceKeys) SetAll(values map[string]string) error {
+	_, err := k.in.changeBindings("", func(s *State) error {
+		for name, value := range values {
+			s.Keys[name] = value
+		}
+		return nil
+	})
+	return err
+}
+
+func (k instanceKeys) DeleteAll(names []string) error {
+	_, err := k.in.changeBindings("", func(s *State) error {
+		for _, name := range names {
+			delete(s.Keys, name)
+		}
+		return nil
+	})
+	return err
+}
+
 // ---- admin API ----
 
 // AdminHandler serves the admin API. Every request needs the admin token.

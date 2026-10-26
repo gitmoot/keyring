@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -33,6 +36,38 @@ func (k storeKeys) Set(name, value string) error {
 
 func (k storeKeys) Delete(name string) error {
 	return k.change(name, true, func() error { return store.Delete(k.path, name) })
+}
+
+func (k storeKeys) SetAll(values map[string]string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := store.SetAll(k.path, values); err != nil {
+		return err
+	}
+	return k.applyBundle(maps.Keys(values), false)
+}
+
+func (k storeKeys) DeleteAll(names []string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := store.DeleteAll(k.path, names); err != nil {
+		return err
+	}
+	return k.applyBundle(slices.Values(names), true)
+}
+
+func (k storeKeys) applyBundle(names iter.Seq[string], deleted bool) error {
+	keys, err := store.Load(k.path)
+	if err != nil {
+		return err
+	}
+	k.proxy.Swap(k.proxy.Config(), keys)
+	for name := range names {
+		if err := dashboardpkg.NoteKeyChange(k.metaPath, name, deleted, time.Now()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (k storeKeys) change(name string, deleted bool, write func() error) error {

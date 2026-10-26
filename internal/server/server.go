@@ -434,6 +434,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable, "key not loaded")
 		return
 	}
+	for _, name := range svc.ExtraHeaders {
+		if snap.keys[name] == "" {
+			fail(http.StatusServiceUnavailable, "key not loaded")
+			return
+		}
+	}
 	if !h.take(roleName, service, access.DailyRequests, start) {
 		fail(http.StatusTooManyRequests, "daily limit reached")
 		return
@@ -538,6 +544,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The supervisor removes it; never pass the router's proof on even
 		// if one slipped through.
 		header.Del(policy.CallerHeader)
+	}
+	for name, storeKey := range svc.ExtraHeaders {
+		value := snap.keys[storeKey]
+		header.Set(name, value)
+		alsoRedact = append(alsoRedact, value)
 	}
 	out, err := buildOutbound(r.Context(), svc, upstreamKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
 	if errors.Is(err, errBadQuery) {
@@ -699,8 +710,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	if svc.TestPath == "" {
 		return 0, errors.New("the service has no test request")
 	}
+	snap := h.snap.Load()
 	if svc.Auth == policy.AuthOAuth2 {
-		_, secret := oauthSecrets(svc, h.snap.Load().keys)
+		_, secret := oauthSecrets(svc, snap.keys)
 		token, err := h.accessToken(ctx, svc, key, secret)
 		if err != nil {
 			return 0, err
@@ -713,9 +725,16 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	}
 	path, query, _ := strings.Cut(svc.TestPath, "?")
 	header := http.Header{"User-Agent": {"keyring-test"}}
+	for name, storeKey := range svc.ExtraHeaders {
+		value := snap.keys[storeKey]
+		if value == "" {
+			return 0, errors.New("key not loaded")
+		}
+		header.Set(name, value)
+	}
 	var googleAccount policy.GoogleAccount
 	if svc.Auth == policy.AuthGcloud {
-		googleAccount = h.snap.Load().config.GoogleAccounts[svc.GoogleAccount]
+		googleAccount = snap.config.GoogleAccounts[svc.GoogleAccount]
 		token, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
 		if err != nil {
 			return 0, err
@@ -814,6 +833,9 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 	out.Del("Accept-Encoding")
 	if svc.Auth == policy.AuthHeader {
 		out.Del(svc.Header)
+	}
+	for name := range svc.ExtraHeaders {
+		out.Del(name)
 	}
 	return out
 }

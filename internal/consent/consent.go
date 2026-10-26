@@ -19,6 +19,7 @@ import (
 	"github.com/gitmoot/keyring/internal/googlelogin"
 	"html/template"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -52,6 +53,8 @@ const (
 type Keys interface {
 	Load() (map[string]string, error)
 	Set(name, value string) error
+	SetAll(values map[string]string) error
+	DeleteAll(names []string) error
 	Delete(name string) error
 }
 
@@ -75,13 +78,14 @@ type Server struct {
 }
 
 type link struct {
-	service     string
-	key         string
-	label       string
-	expires     time.Time
-	google      bool
-	googleEpoch uint64
-	workspace   *workspace.ConsentBinding
+	service      string
+	key          string
+	extraHeaders map[string]string
+	label        string
+	expires      time.Time
+	google       bool
+	googleEpoch  uint64
+	workspace    *workspace.ConsentBinding
 }
 
 type signIn struct {
@@ -392,7 +396,7 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.links[h] = &link{service: req.Service, key: svc.Key, label: req.Label, expires: expires, workspace: binding}
+	s.links[h] = &link{service: req.Service, key: svc.Key, extraHeaders: maps.Clone(svc.ExtraHeaders), label: req.Label, expires: expires, workspace: binding}
 	if svc.Auth == policy.AuthGcloudLogin {
 		s.links[h].google = true
 		s.links[h].googleEpoch = s.google.Epoch()
@@ -441,13 +445,16 @@ func (s *Server) deleteKey(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusInternalServerError, "store unreadable")
 		return
 	}
-	_, stored := keys[svc.Key]
+	stored := false
+	for _, key := range svc.KeyNames() {
+		stored = stored || keys[key] != ""
+	}
 	if !stored {
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": false, "key": svc.Key})
 		return
 	}
 	result := map[string]any{"deleted": true, "key": svc.Key}
-	if err := s.keys.Delete(svc.Key); err != nil {
+	if err := s.keys.DeleteAll(svc.KeyNames()); err != nil {
 		apiError(w, http.StatusInternalServerError, "could not delete the key")
 		return
 	}
@@ -592,6 +599,9 @@ func (s *Server) openLink(id string, now time.Time) (*link, [sha256.Size]byte, b
 			return nil, h, false
 		}
 	}
+	if svc, known := s.boundService(l.service, l.key, l.workspace); !known || !maps.Equal(svc.ExtraHeaders, l.extraHeaders) {
+		return nil, h, false
+	}
 	return l, h, true
 }
 
@@ -610,13 +620,14 @@ func (s *Server) linkPage(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	svc, known := s.config().Services[data.Service]
-	if !known || !linkable(svc) {
+	if !known || !linkable(svc) || !maps.Equal(svc.ExtraHeaders, l.extraHeaders) {
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
 		return
 	}
 	data.Form = true
 	data.SignIn = svc.Auth == policy.AuthOAuth2 || svc.Auth == policy.AuthGcloudLogin
 	data.Google = svc.Auth == policy.AuthGcloudLogin
+	credentialForm(&data, svc)
 	if svc.Auth == policy.AuthEgressProxy {
 		proxyForm(&data, svc)
 	}
@@ -655,7 +666,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		return
 	}
 	svc, known := s.boundService(l.service, l.key, l.workspace)
-	if !known || !linkable(svc) || svc.Key != l.key {
+	if !known || !linkable(svc) || svc.Key != l.key || !maps.Equal(svc.ExtraHeaders, l.extraHeaders) {
 		s.mu.Unlock()
 		render(w, http.StatusGone, pageData{Message: "This service can no longer be connected. Ask for a new link."})
 		return
@@ -669,6 +680,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		var value string
 		var err error
 		retry := pageData{Service: service, Label: l.label, Form: true, Message: "Paste the value, on one line."}
+		credentialForm(&retry, svc)
 		if svc.Auth == policy.AuthEgressProxy {
 			value, err = proxyValue(r, svc)
 			proxyForm(&retry, svc)
@@ -677,6 +689,15 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 			}
 		} else {
 			value, err = readValue(r)
+		}
+		values := map[string]string{svc.Key: value}
+		for _, key := range svc.ExtraHeaders {
+			extra, readErr := readNamedValue(r, "extra_"+key)
+			if readErr != nil {
+				err = readErr
+				retry.Message = "Paste every credential on one line."
+			}
+			values[key] = extra
 		}
 		if err != nil {
 			// The link stays usable: the person can correct the form.
@@ -688,7 +709,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		// same moment, finds no link.
 		delete(s.links, h)
 		s.mu.Unlock()
-		if err := s.keys.Set(svc.Key, value); err != nil {
+		if err := s.keys.SetAll(values); err != nil {
 			s.writeAudit("connect_failed", map[string]any{"service": service, "link": ref(h), "reason": "store"})
 			render(w, http.StatusInternalServerError, pageData{Message: "The value could not be saved. Ask for a new link."})
 			return
@@ -940,7 +961,11 @@ func usableToken(t string) bool {
 }
 
 func readValue(r *http.Request) (string, error) {
-	v := strings.TrimRight(r.PostFormValue("value"), "\r\n")
+	return readNamedValue(r, "value")
+}
+
+func readNamedValue(r *http.Request, field string) (string, error) {
+	v := strings.TrimRight(r.PostFormValue(field), "\r\n")
 	if v == "" || strings.ContainsAny(v, "\r\n") {
 		return "", errors.New("paste the value on one line")
 	}
@@ -962,6 +987,8 @@ func remoteAddr(hostport string) (netip.Addr, bool) {
 type pageData struct {
 	Service, Label, Message string
 	Form, SignIn            bool
+	PrimaryLabel            string
+	ExtraFields             []credentialField
 	// Proxy: an egress-proxy form; it asks for the address (and the type)
 	// when the service's config leaves them to the person.
 	Proxy, ProxyAsksAddress, ProxyAsksType bool
@@ -975,6 +1002,21 @@ type pageData struct {
 	// GoogleStep is the Google connection's current step while it runs
 	// (1 sign-in, 2 project setup), shown as a list; 0 shows none.
 	GoogleStep int
+}
+
+type credentialField struct {
+	Name, Label string
+}
+
+func credentialForm(data *pageData, svc policy.Service) {
+	data.PrimaryLabel = "Key"
+	if svc.Auth == policy.AuthHeader {
+		data.PrimaryLabel = svc.Header
+	}
+	headers := slices.Sorted(maps.Keys(svc.ExtraHeaders))
+	for _, header := range headers {
+		data.ExtraFields = append(data.ExtraFields, credentialField{Name: "extra_" + svc.ExtraHeaders[header], Label: header})
+	}
 }
 
 // page is plain HTML and inline CSS: the pages' CSP allows inline styles
@@ -999,8 +1041,6 @@ h1{font:500 32px/1.12 var(--font);letter-spacing:-.03em}
 p{margin-top:16px}
 .msg{display:flex;gap:12px;align-items:flex-start;margin-top:20px;padding:16px 18px;border-radius:14px;background:var(--bg);border:1px solid var(--line)}
 .msg svg{flex:none;margin-top:2px}
-.msg.ok{background:#eefaf4;border-color:#c9ebd9;color:#14513b}
-.msg.err{background:#fef3f2;border-color:#f8d4d0;color:#7a271a}
 .msg.only{margin-top:0}
 form{margin-top:22px}
 label{display:block;font:500 15px/1.3 var(--font);margin:18px 0 8px}
@@ -1055,8 +1095,9 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 {{else}}<label for="username">Username</label><input id="username" name="username" required autocomplete="off" spellcheck="false">
 <label for="password">Password</label><input id="password" type="password" name="password" autocomplete="off" spellcheck="false">{{end}}
 <button class="btn" type="submit">Save</button>
-{{else}}<p>Paste the key. It is stored only in your own keyring and never shown again.</p>
-<label for="value">Key</label><input id="value" type="password" name="value" required autocomplete="off" spellcheck="false">
+{{else}}<p>Paste the credentials. They are stored only in your own keyring and never shown again.</p>
+<label for="value">{{.PrimaryLabel}}</label><input id="value" type="password" name="value" required autocomplete="off" spellcheck="false">
+{{range .ExtraFields}}<label for="{{.Name}}">{{.Label}}</label><input id="{{.Name}}" type="password" name="{{.Name}}" required autocomplete="off" spellcheck="false">{{end}}
 <button class="btn" type="submit">Save</button>
 {{end}}</form>
 <div class="note"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>This link works once and expires soon. Don't forward it to anyone.</span></div>{{end}}

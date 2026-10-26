@@ -252,6 +252,23 @@ Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its
 
 A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
 
+Static `bearer`, `header`, and `query` services may add up to two secret headers:
+`"extra_headers": {"CF-Access-Client-Secret": "ACCESS_SECRET"}` maps each header
+to a distinct store key, not a credential value. For Cloudflare Access, use
+`"auth": "header", "header": "CF-Access-Client-Id", "key": "ACCESS_ID"` as the
+primary credential. Header names are case-insensitive; duplicates, primary
+collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
+refused. Signing keys and OAuth credentials cannot be reused as extra headers.
+The proxy replaces caller-supplied values, requires the complete bundle before
+dispatch (503 if a value is missing), and redacts every injected credential.
+Existing role paths, methods and quotas still apply.
+
+A one-time consent link collects the primary credential and every extra header
+in password fields, never displays stored values, and saves the complete bundle
+atomically. Missing or multiline values leave the link usable without changing
+any credential. Changing the extra-header mapping invalidates previously issued
+links. Disconnecting the service removes the entire bundle.
+
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
 ### OAuth services with refresh tokens

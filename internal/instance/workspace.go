@@ -101,6 +101,13 @@ func (s *State) validateWorkspace(container bool) error {
 			}
 		}
 	}
+	for _, svc := range s.Services {
+		for _, key := range svc.ExtraHeaders {
+			if keys[key] {
+				return errors.New("Workspace refresh keys cannot be extra headers")
+			}
+		}
+	}
 	a, ok := s.WorkspaceAccounts[s.DefaultWorkspaceAccountID]
 	if !ok || a.Alias != "personal" {
 		return errors.New("invalid default Workspace account")
