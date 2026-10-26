@@ -82,3 +82,23 @@ func TestSetRejectsBadNamesAndEmptyValues(t *testing.T) {
 		t.Fatal("empty value accepted")
 	}
 }
+
+func TestSetAllRejectsPartialCredentialBundle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	original := map[string]string{"PRIMARY": "old-primary", "EXTRA": "old-extra"}
+	if err := SetAll(path, original); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []map[string]string{
+		{"PRIMARY": "new-primary", "BAD-NAME": "new-extra"},
+		{"PRIMARY": "new-primary", "EXTRA": ""},
+	} {
+		if err := SetAll(path, invalid); err == nil {
+			t.Fatal("invalid credential bundle accepted")
+		}
+		got, err := Load(path)
+		if err != nil || !reflect.DeepEqual(got, original) {
+			t.Fatal("rejected bundle changed the existing store")
+		}
+	}
+}

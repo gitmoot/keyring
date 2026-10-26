@@ -24,6 +24,90 @@ const accountGenerationHeader = "X-Keyring-Binding-Generation"
 
 var workspaceScopes = []string{"https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events.freebusy"}
 
+func TestExtraHeaderConsentDuringWorkspaceRevocation(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	account := f.migrate()
+	id := accountField(account, "account_id")
+	f.must("PUT", "/services/access", map[string]any{
+		"base": "https://access.example", "auth": "header", "header": "X-Client", "key": "ACCESS_ID",
+		"extra_headers": map[string]string{"X-Secret": "ACCESS_SECRET"},
+	}, "")
+	consentCall := func(method, path, body, contentType string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, "http://"+f.pages+path, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer consent-fixture")
+		req.Header.Set("Origin", "http://"+f.pages)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		if strings.HasPrefix(path, "/connect/") {
+			f.in.consent.PagesHandler().ServeHTTP(rec, req)
+		} else {
+			f.in.consent.APIHandler().ServeHTTP(rec, req)
+		}
+		return rec
+	}
+	link := consentCall("POST", "/links", `{"service":"access"}`, "application/json")
+	var issued struct {
+		URL string `json:"url"`
+	}
+	if link.Code != 201 || json.Unmarshal(link.Body.Bytes(), &issued) != nil {
+		t.Fatalf("issue consent link: %d %s", link.Code, link.Body)
+	}
+	u, err := url.Parse(issued.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.in.mu.Lock()
+	f.in.workspaceRevoking = map[string]bool{id: true}
+	accountKey := f.in.state.WorkspaceAccounts[id].Key
+	f.in.mu.Unlock()
+	saved := consentCall("POST", u.Path, "value=fixture-client&extra_ACCESS_SECRET=fixture-secret", "application/x-www-form-urlencoded")
+	if saved.Code != 200 {
+		t.Fatalf("unrelated account revocation blocked bundle consent: %d %s", saved.Code, saved.Body)
+	}
+	keys, err := (instanceKeys{f.in}).Load()
+	if err != nil || keys["ACCESS_ID"] != "fixture-client" || keys["ACCESS_SECRET"] != "fixture-secret" {
+		t.Fatalf("bundle not saved together: %v", err)
+	}
+	// Related credential writers must still respect the revocation gate.
+	if err := (instanceKeys{f.in}).SetAll(map[string]string{accountKey: "replacement", "ACCESS_ID": "changed"}); err == nil {
+		t.Fatal("bundle changed a revoking account")
+	}
+	if err := (instanceKeys{f.in}).DeleteAll([]string{accountKey, "ACCESS_SECRET"}); err == nil {
+		t.Fatal("bundle deleted a revoking account")
+	}
+	after, err := (instanceKeys{f.in}).Load()
+	if err != nil || !reflect.DeepEqual(keys, after) {
+		t.Fatal("rejected related bundle partially changed stored keys")
+	}
+	deleted := consentCall("DELETE", "/keys/access", "", "")
+	if deleted.Code != 200 {
+		t.Fatalf("unrelated account revocation blocked bundle disconnect: %d %s", deleted.Code, deleted.Body)
+	}
+	after, err = (instanceKeys{f.in}).Load()
+	if err != nil || after["ACCESS_ID"] != "" || after["ACCESS_SECRET"] != "" || after[accountKey] != keys[accountKey] {
+		t.Fatal("disconnect did not remove only the unrelated bundle")
+	}
+}
+
+func TestExtraHeaderRejectsWorkspaceAccountKey(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	f.hydrate(f.migrate())
+	account := f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any)
+	id := accountField(account, "account_id")
+	f.in.mu.Lock()
+	key := f.in.state.WorkspaceAccounts[id].Key
+	f.in.mu.Unlock()
+	code, _ := f.call("PUT", "/services/leak", map[string]any{
+		"base": "https://access.example", "auth": "bearer", "key": "ACCESS_ID",
+		"extra_headers": map[string]string{"X-Secret": key},
+	}, "")
+	if code != 400 {
+		t.Fatalf("Workspace account credential accepted as extra header: %d", code)
+	}
+}
+
 type workspaceProvider struct {
 	mu           sync.Mutex
 	events       []string

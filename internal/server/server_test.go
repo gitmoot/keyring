@@ -3,9 +3,11 @@ package server
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +142,48 @@ func call(h http.Handler, method, target, token string, headers map[string]strin
 
 var bearer = policy.Service{Auth: policy.AuthBearer}
 var allowAll = policy.Access{Paths: []string{"/"}, Methods: []string{"GET", "POST"}}
+
+func TestExtraHeaderProxy(t *testing.T) {
+	const primary, extra = "primary-sensitive-value", "secondary-sensitive-value"
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("CF-Access-Client-Id") != primary || r.Header.Get("CF-Access-Client-Secret") != extra {
+			t.Error("upstream did not receive the complete stored credentials")
+		}
+		w.Header().Set("X-Echo", extra)
+		fmt.Fprintf(w, "%s %s", primary, extra)
+	}))
+	defer up.Close()
+	var svc policy.Service
+	if err := json.Unmarshal([]byte(`{"auth":"header","header":"CF-Access-Client-Id","test_path":"/check","extra_headers":{"CF-Access-Client-Secret":"EXTRA_KEY"}}`), &svc); err != nil {
+		t.Fatal(err)
+	}
+	h, audit := newHandlerKey(t, up.URL, svc, allowAll, primary)
+	if got := call(h, "GET", "/api/check", testToken, nil).Code; got != 503 || calls.Load() != 0 {
+		t.Fatal("partial credential bundle was dispatched")
+	}
+	h.Swap(h.Config(), map[string]string{"API_KEY": primary, "EXTRA_KEY": extra})
+	w := call(h, "GET", "/api/check", testToken, map[string]string{
+		"CF-Access-Client-Id": "forged-primary", "CF-Access-Client-Secret": "forged-extra",
+		"Connection": "CF-Access-Client-Secret",
+	})
+	if w.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("complete bundle failed: status=%d calls=%d", w.Code, calls.Load())
+	}
+	for _, secret := range []string{primary, extra} {
+		if strings.Contains(w.Body.String()+w.Header().Get("X-Echo")+audit.String(), secret) {
+			t.Fatal("upstream echoed credential escaped redaction")
+		}
+	}
+	if status, err := h.TestKey(context.Background(), h.Config().Services["api"], primary); err != nil || status != 200 {
+		t.Fatalf("dashboard test omitted extra credentials: %d %v", status, err)
+	}
+	h.Swap(h.Config(), map[string]string{"API_KEY": primary})
+	if got := call(h, "GET", "/api/check", testToken, nil).Code; got != 503 || calls.Load() != 2 {
+		t.Fatal("removing an extra credential did not stop dispatch")
+	}
+}
 
 func TestProxyAddsKeyAndDropsCallerCredentials(t *testing.T) {
 	up, got := upstream(t)

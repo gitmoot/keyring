@@ -209,12 +209,14 @@ func (c *Config) sourcesFor(field string, list []string) ([]netip.Prefix, error)
 
 type Service struct {
 	// Base is the API origin (and optional base path) requests are sent to.
-	Base          string `json:"base,omitempty"`
-	Key           string `json:"key"`
-	Auth          string `json:"auth"`
-	Header        string `json:"header,omitempty"`
-	Param         string `json:"param,omitempty"`
-	GoogleAccount string `json:"google_account,omitempty"`
+	Base   string `json:"base,omitempty"`
+	Key    string `json:"key"`
+	Auth   string `json:"auth"`
+	Header string `json:"header,omitempty"`
+	// ExtraHeaders maps additional upstream credential headers to store key names.
+	ExtraHeaders  map[string]string `json:"extra_headers,omitempty"`
+	Param         string            `json:"param,omitempty"`
+	GoogleAccount string            `json:"google_account,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
 	// key works (the dashboard's Test button). TestPath may carry a query.
 	TestMethod      string           `json:"test_method,omitempty"`
@@ -320,14 +322,22 @@ func printableToken(s string, max int) bool {
 	return s != "" && len(s) <= max && strings.IndexFunc(s, func(r rune) bool { return r < 33 || r > 126 }) < 0
 }
 
-// KeyNames are the store keys the service needs: its key and, for oauth2, the
-// client secret.
+// KeyNames are all store keys the service needs, never their values.
 func (s Service) KeyNames() []string {
 	if s.Auth == AuthGcloud {
 		return nil // credentials live in the host's private gcloud directory
 	}
 	if s.OAuth2 != nil && s.OAuth2.ClientSecretKey != "" {
 		return []string{s.Key, s.OAuth2.ClientSecretKey}
+	}
+	if len(s.ExtraHeaders) != 0 {
+		names := make([]string, 1, 1+len(s.ExtraHeaders))
+		names[0] = s.Key
+		for _, key := range s.ExtraHeaders {
+			names = append(names, key)
+		}
+		slices.Sort(names[1:])
+		return names
 	}
 	return []string{s.Key}
 }
@@ -740,7 +750,7 @@ func (c *Config) Validate() error {
 			continue
 		}
 		for name, svc := range c.Services {
-			if name != signerName && svc.Key == signer.Key {
+			if name != signerName && slices.Contains(svc.KeyNames(), signer.Key) {
 				return errors.New("a signing key cannot be shared with another service")
 			}
 		}
@@ -753,14 +763,14 @@ func (c *Config) Validate() error {
 			// A refresh token goes only to the token endpoint: a service
 			// that sends its key upstream must not hold it, and services
 			// sharing it share one access token, so one OAuth client.
-			if name != oauthName && svc.Key == oauth.Key && (svc.Auth != AuthOAuth2 || !svc.OAuth2.Equal(oauth.OAuth2)) {
+			if name != oauthName && slices.Contains(svc.KeyNames(), oauth.Key) && (svc.Auth != AuthOAuth2 || !svc.OAuth2.Equal(oauth.OAuth2)) {
 				return errors.New("an oauth2 refresh token can be shared only by oauth2 services with the same oauth2 settings")
 			}
 			// A client secret is the key of no service (so no refresh
 			// token either, as svc ranges over every oauth2 service) and
 			// goes to one token endpoint only.
 			secret := oauth.OAuth2.ClientSecretKey
-			if secret != "" && svc.Key == secret {
+			if secret != "" && (svc.Key == secret || svc.OAuth2 == nil && slices.Contains(svc.KeyNames(), secret)) {
 				return errors.New("an oauth2 client secret cannot be a service's key")
 			}
 			if secret != "" && svc.OAuth2 != nil && svc.OAuth2.ClientSecretKey == secret && svc.OAuth2.TokenURL != oauth.OAuth2.TokenURL {
@@ -861,6 +871,25 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	if len(s.ExtraHeaders) > 2 {
+		return errors.New("at most two extra credential headers are allowed")
+	}
+	if len(s.ExtraHeaders) != 0 {
+		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
+			return errors.New("extra_headers requires bearer, header or query authentication")
+		}
+		seenHeaders, seenKeys := map[string]bool{}, map[string]bool{s.Key: true}
+		for header, key := range s.ExtraHeaders {
+			name := strings.ToLower(header)
+			if !safeCredentialHeader(header, false) || seenHeaders[name] || s.Auth == AuthHeader && strings.EqualFold(header, s.Header) {
+				return errors.New("extra_headers contains an unsafe or duplicate credential header")
+			}
+			if !store.ValidName(key) || seenKeys[key] {
+				return errors.New("extra_headers requires distinct valid store key names")
+			}
+			seenHeaders[name], seenKeys[key] = true, true
+		}
+	}
 	if s.Auth == AuthGcloudLogin {
 		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
 			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
@@ -950,7 +979,7 @@ func (s *Service) validate() error {
 			return errors.New("auth gcloud requires a supported Google API HTTPS origin")
 		}
 	case AuthHeader:
-		if !headerName.MatchString(s.Header) {
+		if !safeCredentialHeader(s.Header, true) {
 			return fmt.Errorf("auth header needs a valid header name, got %q", s.Header)
 		}
 	case AuthQuery:
@@ -981,6 +1010,22 @@ func (s *Service) validate() error {
 	}
 	s.base = u
 	return nil
+}
+
+// Authorization can only be the explicit primary auth=header credential.
+func safeCredentialHeader(name string, primary bool) bool {
+	if !headerName.MatchString(name) || strings.HasPrefix(strings.ToLower(name), "x-keyring-") {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "authorization":
+		return primary
+	case "host", "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+		"content-length", "content-encoding", "accept-encoding":
+		return false
+	}
+	return true
 }
 
 // upstreamURL parses a URL the keyring sends a secret to: https, or plain

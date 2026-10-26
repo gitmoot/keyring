@@ -340,6 +340,51 @@ try {
 	const both = await Promise.all([call("GET", `/p/${id}/echo/z1`, P), call("GET", `/p/${id}/echo/z2`, P)]);
 	expect("two calls on a stopped container: one start", [both.map((x) => x.status), starts - before], [[429, 429], 1]);
 
+	// Additional credentials stay a single consent bundle across Worker forwarding
+	// and encrypted cold restore, without broadening the router's grant.
+	{
+		let bundleCalls = 0;
+		const provider = serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+			bundleCalls++;
+			expect("provider receives stored credential pair", [req.headers.get("CF-Access-Client-Id"), req.headers.get("CF-Access-Client-Secret")], ["fixture-access-id", "fixture-access-secret"]);
+			return new Response("fixture-access-id fixture-access-secret");
+		} });
+		try {
+			const bundle = await (await call("POST", "/admin/instances", ADMIN, JSON.stringify({ label: "Bundle" }))).json() as { keyring_id: string; role_token: string };
+			const admin = `/admin/instances/${bundle.keyring_id}`;
+			const proxy = `/p/${bundle.keyring_id}/access`;
+			const proof = { "x-keyring-caller": "caller-secret", "x-keyring-token": bundle.role_token };
+			expect("Worker accepts extra header service", (await call("PUT", `${admin}/services/access`, ADMIN, JSON.stringify({
+				service: { base: `http://127.0.0.1:${provider.port}`, auth: "header", header: "CF-Access-Client-Id", key: "ACCESS_ID", extra_headers: { "CF-Access-Client-Secret": "ACCESS_SECRET" } },
+				access: { paths: ["/allowed"], methods: ["GET"] },
+			}))).status, 200);
+			const connected = async () => {
+				const status = await (await call("GET", `${admin}/services`, ADMIN)).json() as { services: { name: string; connected: boolean }[] };
+				return status.services.find(s => s.name === "access")?.connected;
+			};
+			expect("bundle starts disconnected", await connected(), false);
+			const link = new URL(await stringField(await call("POST", `${admin}/links`, ADMIN, JSON.stringify({ service: "access" })), "url")).pathname;
+			expect("partial bundle consent rejected", (await call("POST", link, FORM, "value=fixture-access-id")).status, 400);
+			expect("partial bundle cannot dispatch", [(await call("GET", `${proxy}/allowed`, proof)).status, bundleCalls], [503, 0]);
+			expect("bundle consent completes", (await call("POST", link, FORM, "value=fixture-access-id&extra_ACCESS_SECRET=fixture-access-secret")).status, 200);
+			expect("bundle connected after both credentials", await connected(), true);
+			const result = await call("GET", `${proxy}/allowed`, { ...proof, "CF-Access-Client-Id": "spoof", "CF-Access-Client-Secret": "spoof" });
+			expect("bundle request succeeds", result.status, 200);
+			expect("both echoed credentials redacted", (await result.text()).includes("fixture-access"), false);
+			expect("extra header service retains route restriction", (await call("GET", `${proxy}/forbidden`, proof)).status, 403);
+			expect("stored bundle contains no plaintext", JSON.stringify([...storages.get(bundle.keyring_id)!.m]).includes("fixture-access"), false);
+			await containers.get(bundle.keyring_id)!.destroy();
+			objects.delete(bundle.keyring_id);
+			expect("bundle survives encrypted cold restore", (await call("GET", `${proxy}/allowed`, proof)).status, 200);
+			expect("bundle disconnect", (await call("DELETE", `${admin}/keys/access`, ADMIN)).status, 200);
+			expect("bundle disconnected after deletion", await connected(), false);
+			expect("deleted bundle cannot dispatch", [(await call("GET", `${proxy}/allowed`, proof)).status, bundleCalls], [503, 2]);
+			expect("delete bundle fixture", (await call("DELETE", admin, ADMIN)).status, 200);
+		} finally {
+			provider.stop(true);
+		}
+	}
+
 	r = await call("POST", `/admin/instances/${id}/role-token`, ADMIN);
 	const token2 = ((await r.json()) as { role_token: string }).role_token;
 	expect("rotated token retains provisioned Drive grant", (await call("GET", `/p/${id}/google-me-drive/about`, { ...P, "x-keyring-token": token2 })).status, 503);

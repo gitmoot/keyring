@@ -101,6 +101,35 @@ func Delete(path, name string) error {
 	return save(path, keys)
 }
 
+// SetAll validates and writes a credential bundle in one atomic store update.
+func SetAll(path string, values map[string]string) error {
+	for name, value := range values {
+		if !ValidName(name) || value == "" {
+			return errors.New("invalid credential bundle")
+		}
+	}
+	keys, err := Load(path)
+	if err != nil {
+		return err
+	}
+	for name, value := range values {
+		keys[name] = value
+	}
+	return save(path, keys)
+}
+
+// DeleteAll removes the named credentials together, including partial bundles.
+func DeleteAll(path string, names []string) error {
+	keys, err := Load(path)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		delete(keys, name)
+	}
+	return save(path, keys)
+}
+
 func save(path string, keys map[string]string) error {
 	raw, err := json.MarshalIndent(keys, "", "  ")
 	if err != nil {

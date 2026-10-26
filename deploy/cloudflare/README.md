@@ -40,6 +40,30 @@ The DO keeps each item under its own storage key, so writers of different items 
   - `DELETE /admin/instances/<id>`: wipes the container and the DO's storage; repeating it returns 200
 - `/connect/<keyring_id>/c/<link>` and `/connect/callback`: public pages for the person. A link opens only while that keyring's container is running and the link is open, so a stranger cannot wake a container. The callback finds its keyring through a short-lived `__Host-` cookie; the keyring itself still checks the OAuth state, PKCE and its own browser cookie. A link page requested on another host than `PUBLIC_BASE` answers 303 to the same path on `PUBLIC_BASE`.
 
+Static service definitions accept `extra_headers`, a map of at most two header
+names to secret store keys, through the existing service PUT API and
+`SERVICES_TEMPLATE`. For example:
+
+```json
+{
+  "service": {
+    "base": "https://protected.example.com",
+    "auth": "header",
+    "header": "CF-Access-Client-Id",
+    "key": "ACCESS_ID",
+    "extra_headers": {"CF-Access-Client-Secret": "ACCESS_SECRET"}
+  },
+  "access": {"paths": ["/api/*"], "methods": ["GET"]}
+}
+```
+
+The consent link collects both values in one submission; the Worker forwards
+them to the keyring without retaining plaintext. Service status is connected
+only when all required credentials exist. Missing credentials return 503 before
+upstream dispatch. Deleting the service's keys removes all credentials in the
+bundle. Extra headers do not widen the router's access grant. Deploy both the
+Worker and the new keyring container image for this feature.
+
 ## Deploying (needs the owner's approval: changes the Cloudflare account and costs money)
 
 Inputs:

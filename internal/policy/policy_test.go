@@ -15,6 +15,57 @@ func hash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func TestExtraHeaderPolicy(t *testing.T) {
+	for _, auth := range []string{AuthBearer, AuthHeader, AuthQuery} {
+		t.Run(auth, func(t *testing.T) {
+			var svc Service
+			raw := `{"base":"https://service.example","auth":"` + auth + `","key":"PRIMARY","header":"CF-Access-Client-Id","param":"api_key","extra_headers":{"CF-Access-Client-Secret":"SECONDARY","X-Service-Token":"TERTIARY"}}`
+			if err := json.Unmarshal([]byte(raw), &svc); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.validate(); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(svc.KeyNames(), []string{"PRIMARY", "SECONDARY", "TERTIARY"}) {
+				t.Fatal("required credential dependencies were lost")
+			}
+		})
+	}
+	for _, extras := range []string{
+		`{"Authorization":"OTHER"}`, `{"Host":"OTHER"}`, `{"Connection":"OTHER"}`,
+		`{"Transfer-Encoding":"OTHER"}`, `{"Content-Length":"OTHER"}`, `{"Cookie\r\nX-Evil":"OTHER"}`,
+		`{"X-Keyring-Caller":"OTHER"}`, `{"X-Keyring-Token":"OTHER"}`,
+		`{"cf-access-client-id":"OTHER"}`, `{"X-Token":"OTHER","x-token":"ANOTHER"}`,
+		`{"X-Token":"PRIMARY"}`, `{"X-Token":"bad-name"}`,
+		`{"X-One":"ONE","X-Two":"TWO","X-Three":"THREE"}`,
+		`{"X-One":"ONE","X-Two":"ONE"}`,
+	} {
+		t.Run(extras, func(t *testing.T) {
+			var svc Service
+			if err := json.Unmarshal([]byte(`{"base":"https://service.example","auth":"header","key":"PRIMARY","header":"CF-Access-Client-Id","extra_headers":`+extras+`}`), &svc); err != nil {
+				t.Fatal(err)
+			}
+			if svc.validate() == nil {
+				t.Fatal("unsafe credential header mapping accepted")
+			}
+		})
+	}
+	for _, protected := range []string{"REFRESH", "CLIENT_SECRET"} {
+		t.Run("protected-"+protected, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Services["oauth"] = Service{Base: "https://service.example", Auth: AuthOAuth2, Key: "REFRESH", OAuth2: &OAuth2{TokenURL: "https://oauth.example/token", ClientID: "client", ClientSecretKey: "CLIENT_SECRET"}}
+			var svc Service
+			if err := json.Unmarshal([]byte(`{"base":"https://service.example","auth":"bearer","key":"PRIMARY","extra_headers":{"X-Steal":"`+protected+`"}}`), &svc); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Services["leak"] = svc
+			if cfg.Validate() == nil {
+				t.Fatal("protected OAuth material could be sent as an extra header")
+			}
+		})
+	}
+}
+
 func validConfig() *Config {
 	return &Config{
 		Rules: Rules{
