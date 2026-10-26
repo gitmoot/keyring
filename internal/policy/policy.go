@@ -214,7 +214,9 @@ type Service struct {
 	Auth   string `json:"auth"`
 	Header string `json:"header,omitempty"`
 	// ExtraHeaders maps additional upstream credential headers to store key names.
-	ExtraHeaders  map[string]string `json:"extra_headers,omitempty"`
+	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
+	// FixedHeaders contains literal nonsecret constants, never store key names.
+	FixedHeaders  map[string]string `json:"fixed_headers,omitempty"`
 	Param         string            `json:"param,omitempty"`
 	GoogleAccount string            `json:"google_account,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
@@ -871,6 +873,32 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	if len(s.FixedHeaders) > 2 {
+		return errors.New("at most two fixed nonsecret headers are allowed")
+	}
+	if len(s.FixedHeaders) != 0 {
+		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
+			return errors.New("fixed_headers requires bearer, header or query authentication")
+		}
+		seen := make(map[string]bool, len(s.FixedHeaders))
+		for header, value := range s.FixedHeaders {
+			name := strings.ToLower(header)
+			if !safeCredentialHeader(header, false) || name == "cookie" || name == "set-cookie" ||
+				seen[name] || s.Auth == AuthHeader && strings.EqualFold(header, s.Header) {
+				return errors.New("fixed_headers contains an unsafe, duplicate or credential header")
+			}
+			for credential := range s.ExtraHeaders {
+				if strings.EqualFold(header, credential) {
+					return errors.New("fixed_headers conflicts with an extra credential header")
+				}
+			}
+			if value == "" || len(value) > 512 || strings.TrimSpace(value) != value ||
+				strings.IndexFunc(value, func(r rune) bool { return r < 32 || r > 126 }) >= 0 {
+				return errors.New("fixed_headers values must be 1-512 printable ASCII bytes without surrounding whitespace")
+			}
+			seen[name] = true
+		}
+	}
 	if len(s.ExtraHeaders) > 2 {
 		return errors.New("at most two extra credential headers are allowed")
 	}

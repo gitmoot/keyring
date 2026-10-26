@@ -19,6 +19,15 @@ jobs:
       - run: go build ./...
       - run: GOOS=darwin GOARCH=arm64 go build ./...
       - run: go test -race ./... -count=1
+      - name: Build isolated smoke-test CLI
+        if: github.event_name == 'pull_request'
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/keyring" ./cmd/keyring
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: keyring-smoke-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/keyring
+          retention-days: 1
   macos-import:
     name: native macOS private-pipe import
     runs-on: macos-latest
