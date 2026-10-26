@@ -346,7 +346,7 @@ func (k instanceKeys) Delete(name string) error {
 }
 
 func (k instanceKeys) SetAll(values map[string]string) error {
-	_, err := k.in.changeBindings("", func(s *State) error {
+	_, err := k.in.changeMatchingBindings(func(name string) bool { _, exists := values[name]; return exists }, func(s *State) error {
 		for name, value := range values {
 			s.Keys[name] = value
 		}
@@ -356,7 +356,7 @@ func (k instanceKeys) SetAll(values map[string]string) error {
 }
 
 func (k instanceKeys) DeleteAll(names []string) error {
-	_, err := k.in.changeBindings("", func(s *State) error {
+	_, err := k.in.changeMatchingBindings(func(name string) bool { return slices.Contains(names, name) }, func(s *State) error {
 		for _, name := range names {
 			delete(s.Keys, name)
 		}

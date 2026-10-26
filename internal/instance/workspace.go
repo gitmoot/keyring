@@ -44,16 +44,22 @@ func (in *Instance) accountGate(id string) *workspaceGate {
 // It prevents an old credential lease crossing dispatch after a replacement.
 // Empty key means policy/client configuration: every account is affected.
 func (in *Instance) changeBindings(key string, fn func(*State) error) (uint64, error) {
+	return in.changeMatchingBindings(func(name string) bool { return key == "" || name == key }, fn)
+}
+
+// changeMatchingBindings locks only accounts whose refresh or client secret
+// is being changed; unrelated consent bundles do not join their revocation.
+func (in *Instance) changeMatchingBindings(matches func(string) bool, fn func(*State) error) (uint64, error) {
 	in.workspaceMu.Lock()
 	defer in.workspaceMu.Unlock()
 	in.mu.Lock()
 	var ids []string
 	if in.state != nil {
 		for id, a := range in.state.WorkspaceAccounts {
-			affected := key == "" || key == a.Key
+			affected := matches(a.Key)
 			for _, name := range []string{"gmail", "calendar"} {
 				svc := in.state.Services[name]
-				affected = affected || svc.OAuth2 != nil && svc.OAuth2.ClientSecretKey == key
+				affected = affected || svc.OAuth2 != nil && matches(svc.OAuth2.ClientSecretKey)
 			}
 			if affected {
 				if in.workspaceRevoking[id] {

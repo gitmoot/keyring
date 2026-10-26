@@ -267,7 +267,9 @@ A one-time consent link collects the primary credential and every extra header
 in password fields, never displays stored values, and saves the complete bundle
 atomically. Missing or multiline values leave the link usable without changing
 any credential. Changing the extra-header mapping invalidates previously issued
-links. Disconnecting the service removes the entire bundle.
+links. Disconnecting the service removes the entire bundle. Unrelated Workspace
+account revocation does not block saving or disconnecting a static bundle;
+changes to an account's own refresh or client secret still respect its gate.
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
