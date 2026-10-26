@@ -672,6 +672,16 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 		}
 		target.RawQuery = q.Encode()
 	}
+	// Replace every casing and repeated caller value, including noncanonical
+	// map keys from in-process callers. Constants are not response secrets.
+	for name, value := range svc.FixedHeaders {
+		for incoming := range header {
+			if strings.EqualFold(incoming, name) {
+				delete(header, incoming)
+			}
+		}
+		header.Set(name, value)
+	}
 	switch svc.Auth {
 	case policy.AuthBearer, policy.AuthOAuth2, policy.AuthGcloud:
 		header.Set("Authorization", "Bearer "+key)

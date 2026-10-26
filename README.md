@@ -264,6 +264,40 @@ The proxy replaces caller-supplied values, requires the complete bundle before
 dispatch (503 if a value is missing), and redacts every injected credential.
 Existing role paths, methods and quotas still apply.
 
+Static `bearer`, `header`, and `query` services also support `fixed_headers`
+for **nonsecret** constants, such as `"fixed_headers": {"CF-R2-Jurisdiction": "default"}`.
+Each configured value replaces all caller values for that header, including
+duplicate and differently cased names. The proxy and dashboard Test button use
+the same setting. These constants are not store key names and are not added to
+response-secret redaction: backup bytes containing `default` stay unchanged.
+Actual credentials remain redacted; never place a credential in `fixed_headers`.
+
+At most two fixed headers are allowed. Names must be valid HTTP header names,
+unique without regard to case, and must not collide with primary or extra
+credential headers. Authorization, cookies, routing, hop-by-hop, framing,
+encoding and `X-Keyring-*` headers are refused. Values must contain 1–512
+printable ASCII bytes with no surrounding whitespace.
+
+An authorized owner can set `fixed_headers` on a service in `access.json`, then
+reload through the normal owner-operated service procedure. In the dashboard,
+open **Keys → an existing stored key → Connect to a service → Or paste settings
+from an agent**, and include the field in the settings JSON:
+
+```json
+{
+  "service": "r2-backup",
+  "base": "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/r2/buckets/BUCKET_NAME",
+  "auth": "bearer",
+  "fixed_headers": {"CF-R2-Jurisdiction": "default"}
+}
+```
+
+Use the confirmed account, bucket and jurisdiction, and confirm with the
+dashboard password. Do not paste or replace the stored API credential. Creating
+the service does not grant agent access. Separately configure the intended role
+with only the approved methods and paths (for object backups, `GET`, `PUT`,
+`DELETE` and `/objects`), then verify the effective scope before enabling use.
+
 A one-time consent link collects the primary credential and every extra header
 in password fields, never displays stored values, and saves the complete bundle
 atomically. Missing or multiline values leave the link usable without changing
