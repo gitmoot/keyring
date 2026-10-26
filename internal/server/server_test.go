@@ -185,6 +185,53 @@ func TestExtraHeaderProxy(t *testing.T) {
 	}
 }
 
+func TestProxyDropsEdgeHeaders(t *testing.T) {
+	edgeHeaders := []string{
+		"CF-Connecting-IP", "CF-Connecting-IPv6", "CF-IPCountry", "CF-Ray",
+		"CF-Visitor", "CF-EW-Via", "CF-Pseudo-IPv4", "CDN-Loop",
+		"True-Client-IP", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP",
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Cloudflare rejects a request carrying another edge's client IP.
+		if r.Header.Get("CF-Connecting-IP") != "" {
+			http.Error(w, "error code: 1000", http.StatusForbidden)
+			return
+		}
+		for _, name := range edgeHeaders {
+			if len(r.Header.Values(name)) != 0 {
+				t.Errorf("edge metadata reached upstream: %s", name)
+			}
+		}
+		if r.Header.Get("CF-Access-Client-Id") != "stored-client-id" ||
+			r.Header.Get("CF-Access-Client-Secret") != "stored-client-secret" {
+			http.Error(w, "missing service credentials", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("CF-Custom-Service") != "keep-cf" || r.Header.Get("X-Request-Id") != "keep-request" {
+			t.Error("non-edge application headers were stripped")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
+	svc := policy.Service{
+		Auth: policy.AuthHeader, Header: "CF-Access-Client-Id",
+		ExtraHeaders: map[string]string{"CF-Access-Client-Secret": "ACCESS_SECRET"},
+	}
+	h, _ := newHandlerKey(t, up.URL, svc, allowAll, "stored-client-id")
+	h.Swap(h.Config(), map[string]string{"API_KEY": "stored-client-id", "ACCESS_SECRET": "stored-client-secret"})
+	headers := map[string]string{
+		"CF-Access-Client-Id": "forged-id", "CF-Access-Client-Secret": "forged-secret",
+		"CF-Custom-Service": "keep-cf", "X-Request-Id": "keep-request",
+	}
+	for _, name := range edgeHeaders {
+		headers[strings.ToLower(name)] = "edge-metadata"
+	}
+	w := call(h, "GET", "/api/health", testToken, headers)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("header-auth upstream rejected proxied request: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestProxyAddsKeyAndDropsCallerCredentials(t *testing.T) {
 	up, got := upstream(t)
 	h, _ := newHandler(t, up.URL, bearer, allowAll)

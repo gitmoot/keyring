@@ -809,8 +809,8 @@ var hopByHop = map[string]bool{
 	"Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
 }
 
-// outboundHeader copies the caller's headers without hop-by-hop headers, the
-// role token, and anything that could carry or replace a credential.
+// outboundHeader copies the caller's headers without hop-by-hop headers, edge
+// metadata, the role token, or anything that could replace a credential.
 func outboundHeader(in http.Header, svc policy.Service) http.Header {
 	out := in.Clone()
 	for _, field := range in.Values("Connection") {
@@ -819,6 +819,16 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 		}
 	}
 	for name := range hopByHop {
+		out.Del(name)
+	}
+	// Edge identity belongs to the inbound hop. In particular Cloudflare
+	// upstreams reject CF-Connecting-IP from another edge (Error 1000).
+	// Keep a fixed list: CF-Access-Client-* can be service credentials.
+	for _, name := range [...]string{
+		"CF-Connecting-IP", "CF-Connecting-IPv6", "CF-IPCountry", "CF-Ray",
+		"CF-Visitor", "CF-EW-Via", "CF-Pseudo-IPv4", "CDN-Loop",
+		"True-Client-IP", "X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP",
+	} {
 		out.Del(name)
 	}
 	out.Del(TokenHeader)
