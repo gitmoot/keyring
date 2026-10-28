@@ -244,6 +244,22 @@ func TestValidateOAuth2(t *testing.T) {
 		"oauth2 on a sign-only service": func(c *Config) {
 			c.Services["sign"] = Service{Key: "SIGN", Auth: AuthEd25519Sign, OAuth2: google()}
 		},
+		"minisign-sign without a trusted comment prefix": func(c *Config) {
+			c.Services["herdr"] = Service{Key: "HERDR", Auth: AuthMinisignSign}
+		},
+		"minisign-sign with an empty prefix": func(c *Config) {
+			c.Services["herdr"] = Service{Key: "HERDR", Auth: AuthMinisignSign, Minisign: &Minisign{}}
+		},
+		"minisign prefix with a newline": func(c *Config) {
+			c.Services["herdr"] = Service{Key: "HERDR", Auth: AuthMinisignSign, Minisign: &Minisign{TrustedCommentPrefix: "herdr\ntrusted comment: "}}
+		},
+		"minisign settings on raw ed25519 signing": func(c *Config) {
+			c.Services["sign"] = Service{Key: "SIGN", Auth: AuthEd25519Sign, Minisign: &Minisign{TrustedCommentPrefix: "herdr-preview "}}
+		},
+		"minisign key also usable for raw ed25519 signing": func(c *Config) {
+			c.Services["herdr"] = Service{Key: "HERDR", Auth: AuthMinisignSign, Minisign: &Minisign{TrustedCommentPrefix: "herdr-preview "}}
+			c.Services["raw"] = Service{Key: "HERDR", Auth: AuthEd25519Sign}
+		},
 		"refresh token used as another client's secret": func(c *Config) {
 			c.Services["gmail"] = gmail
 			other := gmail

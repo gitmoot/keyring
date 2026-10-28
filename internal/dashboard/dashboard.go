@@ -142,6 +142,9 @@ func providerOf(svc policy.Service) string {
 	if svc.Auth == policy.AuthAppStoreConnectSign {
 		return "App Store Connect (sign only)"
 	}
+	if svc.Auth == policy.AuthMinisignSign {
+		return "minisign (sign only)"
+	}
 	for _, p := range presets {
 		if strings.TrimSuffix(svc.Base, "/") == strings.TrimSuffix(p.Base, "/") {
 			return p.Label

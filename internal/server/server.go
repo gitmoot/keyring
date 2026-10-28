@@ -184,6 +184,10 @@ type auditRecord struct {
 	Bytes   int64  `json:"bytes"`
 	Ms      int64  `json:"ms"`
 	Note    string `json:"note,omitempty"`
+	// Digest and TrustedComment record what a minisign-sign request asked
+	// to sign (BLAKE2b-512 hex, as b2sum prints it).
+	Digest         string `json:"digest,omitempty"`
+	TrustedComment string `json:"trusted_comment,omitempty"`
 }
 
 // SetRequests turns on RequestsPath, filing into store. Call before serving.
@@ -285,6 +289,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	service, rest, ok := splitPath(r.URL, snap.config.Services, role.Access)
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
+	var minisignReq minisignRequest
 	var signingAuth string
 	switch r.URL.Path {
 	case appleAdsSignPath:
@@ -297,6 +302,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if signService := ed25519SignService(r.URL.Path); signService != "" && signingAuth == "" {
 		service, rest, ok = signService, "/", true
 		signingAuth = policy.AuthEd25519Sign
+	}
+	if signService := minisignService(r.URL.Path); signService != "" && signingAuth == "" {
+		service, rest, ok = signService, "/", true
+		signingAuth = policy.AuthMinisignSign
 	}
 	signing := signingAuth != ""
 	rec.Service, rec.Path = service, rest
@@ -319,7 +328,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusBadRequest, "signing requires the exact path without a query")
 			return
 		}
-		if r.Method != http.MethodPost {
+		minisignExport := signingAuth == policy.AuthMinisignSign && r.Method == http.MethodGet
+		if r.Method != http.MethodPost && !minisignExport {
 			fail(http.StatusMethodNotAllowed, "signing requires POST")
 			return
 		}
@@ -334,6 +344,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fail(http.StatusBadRequest, reqErr.Error())
 				return
 			}
+		} else if signingAuth == policy.AuthMinisignSign && !minisignExport {
+			var reqErr error
+			minisignReq, reqErr = decodeMinisignRequest(r.Body, svc.Minisign.TrustedCommentPrefix)
+			if reqErr != nil {
+				fail(http.StatusBadRequest, reqErr.Error())
+				return
+			}
+			rec.Digest, rec.TrustedComment = minisignReq.DigestHex, minisignReq.TrustedComment
 		} else {
 			var probe [1]byte
 			if n, err := io.ReadFull(r.Body, probe[:]); n != 0 || err != io.EOF {
@@ -460,6 +478,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.Status = http.StatusOK
 		sink := &countingWriter{w: w}
 		_ = json.NewEncoder(sink).Encode(signEd25519(signKey, signMessage))
+		rec.Bytes = sink.n
+		return
+	}
+	if signingAuth == policy.AuthMinisignSign {
+		signKey, keyErr := parseEd25519Key(key)
+		if keyErr != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "minisign signing unavailable")
+			return
+		}
+		var reply any = minisignPublic(signKey)
+		if r.Method == http.MethodPost {
+			signed, signErr := signMinisign(signKey, service, minisignReq)
+			if signErr != nil {
+				h.refund(roleName, service, access.DailyRequests, start)
+				fail(http.StatusServiceUnavailable, "minisign signing unavailable")
+				return
+			}
+			reply = signed
+		} else {
+			rec.Note = "public key"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		rec.Status = http.StatusOK
+		sink := &countingWriter{w: w}
+		_ = json.NewEncoder(sink).Encode(reply)
 		rec.Bytes = sink.n
 		return
 	}
