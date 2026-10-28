@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/fileutil"
+	"github.com/gitmoot/keyring/internal/minisign"
 	"github.com/gitmoot/keyring/internal/store"
 )
 
@@ -36,6 +37,9 @@ const (
 	AuthAppleAdsSign        = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
 	AuthAppStoreConnectSign = "app-store-connect-sign"
 	AuthEd25519Sign         = "ed25519-sign" // Local Ed25519 signing only; never proxy the key.
+	// AuthMinisignSign signs BLAKE2b-512 digests as minisign signatures with
+	// a restricted trusted comment; the Ed25519 key never leaves.
+	AuthMinisignSign = "minisign-sign"
 	// AuthOAuth2 sends Authorization: Bearer <access token>, minted from the
 	// refresh token stored under Key; the refresh token never goes upstream.
 	AuthOAuth2 = "oauth2"
@@ -233,6 +237,8 @@ type Service struct {
 	OAuth2 *OAuth2 `json:"oauth2,omitempty"`
 	// EgressProxy configures an egress-proxy service.
 	EgressProxy *EgressProxy `json:"egress_proxy,omitempty"`
+	// Minisign restricts what a minisign-sign service signs.
+	Minisign *Minisign `json:"minisign,omitempty"`
 
 	base *url.URL
 }
@@ -248,6 +254,13 @@ type AppleAds struct {
 type AppStoreConnect struct {
 	IssuerID string `json:"issuer_id"`
 	KeyID    string `json:"key_id"`
+}
+
+// Minisign limits a minisign-sign service: every trusted comment it signs
+// starts with TrustedCommentPrefix (e.g. "herdr-preview "), so the key signs
+// only that product's releases.
+type Minisign struct {
+	TrustedCommentPrefix string `json:"trusted_comment_prefix"`
 }
 
 // OAuth2 is the public half of an OAuth client: the refresh token and client
@@ -526,7 +539,7 @@ var tunnelName = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9]
 
 // SignOnly services never send their private key to an upstream.
 func (s Service) SignOnly() bool {
-	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign
+	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign || s.Auth == AuthMinisignSign
 }
 
 type Role struct {
@@ -890,6 +903,9 @@ func (s *Service) validate() error {
 			seenHeaders[name], seenKeys[key] = true, true
 		}
 	}
+	if s.Minisign != nil && s.Auth != AuthMinisignSign {
+		return errors.New("minisign settings require auth minisign-sign")
+	}
 	if s.Auth == AuthGcloudLogin {
 		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
 			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
@@ -924,6 +940,13 @@ func (s *Service) validate() error {
 		case AuthEd25519Sign:
 			if s.AppleAds != nil || s.AppStoreConnect != nil {
 				return errors.New("ed25519-sign takes no signing identity fields")
+			}
+		case AuthMinisignSign:
+			if s.AppleAds != nil || s.AppStoreConnect != nil || s.Minisign == nil {
+				return errors.New("minisign-sign requires only minisign settings")
+			}
+			if !minisign.ValidPrefix(s.Minisign.TrustedCommentPrefix) {
+				return errors.New("minisign trusted_comment_prefix must be 1-64 bytes of printable ASCII, not starting with a space")
 			}
 		}
 		for _, value := range identity {
