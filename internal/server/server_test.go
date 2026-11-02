@@ -143,6 +143,63 @@ func call(h http.Handler, method, target, token string, headers map[string]strin
 var bearer = policy.Service{Auth: policy.AuthBearer}
 var allowAll = policy.Access{Paths: []string{"/"}, Methods: []string{"GET", "POST"}}
 
+func TestFixedHeadersPreserveBytesAndCredentials(t *testing.T) {
+	const primary, extra = "private-primary-credential", "private-extra-credential"
+	payload := []byte("\x00default\xff eu\n" + primary + " " + extra)
+	want := []byte("\x00default\xff eu\n[REDACTED] [REDACTED]")
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if got := r.Header.Values("CF-R2-Jurisdiction"); len(got) != 1 || got[0] != "default" {
+			t.Errorf("jurisdiction not pinned: %q", got)
+			http.Error(w, "wrong jurisdiction", 400)
+			return
+		}
+		if r.Header.Get("CF-Access-Client-Id") != primary || r.Header.Get("CF-Access-Client-Secret") != extra {
+			t.Error("stored credential pair changed")
+		}
+		w.Header().Set("X-Public-Value", "default")
+		w.Header().Set("X-Secret-Echo", extra)
+		w.Write(payload)
+	}))
+	defer up.Close()
+	var svc policy.Service
+	if err := json.Unmarshal([]byte(`{"auth":"header","header":"CF-Access-Client-Id","test_path":"/objects/probe","extra_headers":{"CF-Access-Client-Secret":"SECONDARY"},"fixed_headers":{"cf-r2-jurisdiction":"default"}}`), &svc); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := newHandlerKey(t, up.URL, svc, policy.Access{Paths: []string{"/objects"}, Methods: []string{"GET"}}, primary)
+	keys := map[string]string{"API_KEY": primary, "SECONDARY": extra}
+	h.Swap(h.Config(), keys)
+	for _, headers := range []http.Header{
+		{},
+		{"cf-r2-jurisdiction": {"eu", "us"}, "CF-R2-JURISDICTION": {"fedramp"}, "Connection": {"cf-r2-jurisdiction"}},
+	} {
+		r := httptest.NewRequest("GET", "/api/objects/probe", nil)
+		r.RemoteAddr = caller + ":51000"
+		r.Header = headers
+		r.Header.Set(TokenHeader, testToken)
+		r.Header.Set("CF-Access-Client-Id", "forged")
+		r.Header.Set("CF-Access-Client-Secret", "forged")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), want) || w.Header().Get("X-Public-Value") != "default" || w.Header().Get("X-Secret-Echo") != "[REDACTED]" {
+			t.Fatalf("fixed values altered bytes or credential redaction: %d %q %v", w.Code, w.Body.Bytes(), w.Header())
+		}
+	}
+	if status, err := h.TestKey(context.Background(), h.Config().Services["api"], primary); err != nil || status != 200 {
+		t.Fatalf("test request lost fixed header: %d %v", status, err)
+	}
+	before := calls.Load()
+	if call(h, "DELETE", "/api/objects/probe", testToken, nil).Code != 403 ||
+		call(h, "GET", "/api/settings", testToken, nil).Code != 403 {
+		t.Fatal("fixed headers widened method/path access")
+	}
+	h.Swap(h.Config(), map[string]string{"API_KEY": primary})
+	if call(h, "GET", "/api/objects/probe", testToken, nil).Code != 503 || calls.Load() != before {
+		t.Fatal("missing credential or denied call reached upstream")
+	}
+}
+
 func TestExtraHeaderProxy(t *testing.T) {
 	const primary, extra = "primary-sensitive-value", "secondary-sensitive-value"
 	var calls atomic.Int32

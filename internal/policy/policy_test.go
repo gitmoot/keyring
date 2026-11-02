@@ -15,6 +15,41 @@ func hash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func TestFixedHeaderPolicy(t *testing.T) {
+	for _, auth := range []string{AuthBearer, AuthHeader, AuthQuery} {
+		var svc Service
+		raw := `{"base":"https://service.example","auth":"` + auth + `","header":"X-Primary","param":"key","key":"PRIMARY","extra_headers":{"X-Secret":"SECONDARY"},"fixed_headers":{"CF-R2-Jurisdiction":"default"}}`
+		if err := json.Unmarshal([]byte(raw), &svc); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.validate(); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(svc.KeyNames(), []string{"PRIMARY", "SECONDARY"}) {
+			t.Fatal("nonsecret value became a secret-store dependency")
+		}
+	}
+	for _, fixed := range []string{
+		`{"Authorization":"default"}`, `{"Cookie":"default"}`, `{"Set-Cookie":"default"}`,
+		`{"Host":"default"}`, `{"Connection":"default"}`, `{"Content-Length":"1"}`,
+		`{"X-Keyring-Token":"default"}`, `{"X-Keyring-Caller":"default"}`,
+		`{"x-primary":"default"}`, `{"x-secret":"default"}`,
+		`{"X-A":"one","x-a":"two"}`, `{"X-A":"1","X-B":"2","X-C":"3"}`,
+		`{"CF-R2-Jurisdiction":""}`, `{"CF-R2-Jurisdiction":"default\r\nX-Evil: 1"}`,
+		`{"CF-R2-Jurisdiction":"défault"}`, `{"CF-R2-Jurisdiction":"` + strings.Repeat("x", 513) + `"}`,
+	} {
+		t.Run(fixed, func(t *testing.T) {
+			var svc Service
+			if err := json.Unmarshal([]byte(`{"base":"https://service.example","auth":"header","header":"X-Primary","key":"PRIMARY","extra_headers":{"X-Secret":"SECONDARY"},"fixed_headers":`+fixed+`}`), &svc); err != nil {
+				t.Fatal(err)
+			}
+			if svc.validate() == nil {
+				t.Fatal("unsafe fixed header configuration accepted")
+			}
+		})
+	}
+}
+
 func TestExtraHeaderPolicy(t *testing.T) {
 	for _, auth := range []string{AuthBearer, AuthHeader, AuthQuery} {
 		t.Run(auth, func(t *testing.T) {

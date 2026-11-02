@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -204,14 +205,29 @@ func TestAddKeyNeedsOnlyNameAndValueAndConnectsLater(t *testing.T) {
 
 func TestConnectTakesSettingsPastedFromAnAgent(t *testing.T) {
 	e := newEnv(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("CF-R2-Jurisdiction") != "default" || r.Header.Get("X-Acme-Key") != "sk-acme-0123456789" {
+			t.Error("owner-pasted service lost its fixed header or stored credential")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
 	_, w := e.addAndConnect("ACME_KEY", "sk-acme-0123456789", url.Values{
-		"pasted": {`{"service":"acme","base":"https://api.acme.example","auth":"header","header":"X-Acme-Key","test_path":"/v1/ping"}`}})
+		"pasted": {`{"service":"acme","base":"` + up.URL + `","auth":"header","header":"X-Acme-Key","test_path":"/v1/ping","fixed_headers":{"CF-R2-Jurisdiction":"default"}}`}})
 	if w.Header().Get("Location") != "/keys/ACME_KEY?done=connected" {
 		t.Fatalf("connect with pasted settings: %d %s", w.Code, w.Body.String())
 	}
 	svc := e.proxy.Config().Services["acme"]
-	if svc.Key != "ACME_KEY" || svc.Auth != "header" || svc.Header != "X-Acme-Key" || svc.Base != "https://api.acme.example" {
+	if svc.Key != "ACME_KEY" || svc.Auth != "header" || svc.Header != "X-Acme-Key" || svc.Base != up.URL {
 		t.Fatalf("service from pasted settings: %+v", svc)
+	}
+	if status, err := e.proxy.TestKey(context.Background(), svc, "sk-acme-0123456789"); err != nil || status != http.StatusNoContent {
+		t.Fatalf("owner-pasted service cannot reach configured upstream: %d %v", status, err)
+	}
+	for _, role := range e.proxy.Config().Roles {
+		if _, granted := role.Access["acme"]; granted {
+			t.Fatal("connecting a key implicitly granted agent access")
+		}
 	}
 	// A pinned self-signed service, pasted and typed; the pin reaches the
 	// access file the running proxy loads.
