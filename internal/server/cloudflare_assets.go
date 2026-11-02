@@ -38,15 +38,21 @@ func cloudflareAssetsUpload(svc policy.Service, method, rest string) bool {
 	return base.Scheme == "https" && base.Host == "api.cloudflare.com" && strings.TrimSuffix(base.Path, "/") == "/client/v4"
 }
 
-// callerBearer returns the token of exactly one "Authorization: Bearer <token>"
-// header, or false.
+// callerBearer returns the token of exactly one Authorization header of the
+// form "<Bearer, any case> <one or more spaces><token>" (RFC 9110 11.1, RFC
+// 6750 2.1), or false. The token has no whitespace and is at most
+// maxCallerBearer bytes.
 func callerBearer(h http.Header) (string, bool) {
 	values := h.Values("Authorization")
 	if len(values) != 1 {
 		return "", false
 	}
-	token, ok := strings.CutPrefix(values[0], "Bearer ")
-	if !ok || token == "" || len(token) > maxCallerBearer || strings.ContainsAny(token, " \t\r\n") {
+	scheme, rest, found := strings.Cut(values[0], " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token := strings.TrimLeft(rest, " ")
+	if token == "" || len(token) > maxCallerBearer || strings.ContainsAny(token, " \t\r\n") {
 		return "", false
 	}
 	return token, true

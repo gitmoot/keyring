@@ -87,6 +87,22 @@ func TestAssetUploadSendsTheCallersTokenNotTheAccountToken(t *testing.T) {
 	}
 }
 
+// The scheme name is case-insensitive and more than one space may follow it
+// (RFC 9110 11.1, RFC 6750 2.1): these must reach the service, with the token
+// sent in the canonical form.
+func TestAssetUploadAcceptsValidBearerSpellings(t *testing.T) {
+	for _, header := range []string{"bearer " + cfUploadJWT, "BEARER " + cfUploadJWT, "Bearer  " + cfUploadJWT, "bEaReR   " + cfUploadJWT} {
+		h, svc := cloudflareHandler(t, cfBase, allowAll)
+		if w := call(h, "POST", "/api"+cfUploadPath, testToken, map[string]string{"Authorization": header}); w.Code != 200 {
+			t.Errorf("%q: status = %d, want 200", header, w.Code)
+			continue
+		}
+		if out, _ := svc.last(t); out.Header.Get("Authorization") != "Bearer "+cfUploadJWT {
+			t.Errorf("%q: service received %q", header, out.Header.Get("Authorization"))
+		}
+	}
+}
+
 func TestAssetUploadWithoutATokenIsRefusedAndNotCharged(t *testing.T) {
 	h, svc := cloudflareHandler(t, cfBase, policy.Access{Paths: []string{"/"}, Methods: []string{"POST"}, DailyRequests: 1})
 	for _, tc := range []struct {
