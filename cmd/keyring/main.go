@@ -48,6 +48,8 @@ const usage = `Usage:
   keyring set --store FILE [--file PATH] NAME add or replace a key; --file imports up to 1 MiB without echo
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
+  keyring minisign-keygen --store FILE NAME  make a new Ed25519 signing key in the store (never shown) and
+                                             print its minisign public key
   keyring new-token                          make a role token and its hash for the rules file
   keyring request --upstream URL --role NAME --service S [--service S ...] [--note TEXT] [--new TOKENS_DIR]
                                              ask the owner for full access to services (approved in the dashboard)
@@ -182,6 +184,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stdout, n)
 			}
 		}
+	case "minisign-keygen":
+		if !need("store") || fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "keyring minisign-keygen: pass --store FILE and one NAME")
+			return 2
+		}
+		err = minisignKeygen(*storePath, fs.Arg(0), stdout)
 	case "new-token":
 		if fs.NArg() != 0 {
 			return 2

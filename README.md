@@ -239,7 +239,7 @@ Building this image does not deploy it or authorize a role.
 
 A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
 - accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;
-- drops the caller's `Authorization`, `Cookie` and role token, and every casing of the key's header or query parameter, then adds the key;
+- drops the caller's `Authorization`, `Cookie` and role token, and every casing of the key's header or query parameter, then adds the key. The one exception is a Cloudflare Worker static-asset upload, `POST /accounts/<32 lowercase hex>/workers/assets/upload`, on a `bearer` service whose base is `https://api.cloudflare.com/client/v4`: that call is authenticated by a short-lived upload token Cloudflare returned earlier in the same `wrangler deploy`, so the keyring forwards the caller's own single `Authorization: Bearer <token>` and does not send the account token. A call to it without one is refused (401) and not counted. The role still needs access to that path, and the account token is still masked in replies;
 - drops inbound edge metadata: `CF-Connecting-IP`, `CF-Connecting-IPv6`, `CF-IPCountry`, `CF-Ray`, `CF-Visitor`, `CF-EW-Via`, `CF-Pseudo-IPv4`, `CDN-Loop`, `True-Client-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Real-IP`. This avoids Cloudflare Error 1000 at upstream services. Other `CF-*` headers are not blanket-blocked; configured `CF-Access-Client-*` credentials still work;
 - does not follow redirects;
 - replaces an echoed key with `[REDACTED]`, in headers and bodies, as sent, URL-encoded (either hex case), or with JSON-escaped slashes, even when split across chunks;
@@ -644,7 +644,45 @@ fields and no test path, and may not share a key with any other service.
 `{"signature_base64": "...", "public_key_base64": "..."}`, `Cache-Control:
 no-store`. Malformed bodies 400, missing access or a non-sign service 403, a
 key that is not a base64 64-byte key 503. The Apple paths still take their
-fixed services; this route covers every other sign-only service.
+fixed services; this route covers only `ed25519-sign` services.
+
+### Minisign release signing (not an API proxy)
+
+For release files signed with [minisign](https://jedisct1.github.io/minisign/)
+— the first use is herdr update manifests (#102). A service with
+`"auth": "minisign-sign"` holds the same kind of key as `ed25519-sign` and
+takes one setting:
+
+```json
+"herdr-release": {
+  "key": "HERDR_RELEASE_KEY",
+  "auth": "minisign-sign",
+  "minisign": {"trusted_comment_prefix": "herdr-preview "}
+}
+```
+
+Make the key on the keyring machine with `keyring minisign-keygen --store
+FILE HERDR_RELEASE_KEY`. It is generated straight into the store, never shown,
+and the command prints the minisign public key (`untrusted comment: …` and the
+`RW…` line). It refuses a name that already exists. To rotate, generate a new
+name, embed both public keys in the release, then point the service at the new
+key. One service and one key per product: the key may not be shared with any
+other service, so it cannot sign through the raw `ed25519-sign` route.
+
+`/_keyring/minisign/<service>`, exact path, no query:
+- `GET` returns `{"key_id", "public_key", "public_key_file"}` for embedding.
+- `POST {"blake2b512_hex": "<b2sum of the file>", "trusted_comment":
+  "herdr-preview <build_id> <commit>"}` returns `{"minisig", "key_id",
+  "public_key"}`. Write `minisig` to `<file>.minisig`; `minisign -Vm <file>
+  -p <pub>` verifies it. The file never leaves the caller.
+
+Only prehashed (`ED`) signatures are made; verifiers should refuse legacy ones.
+The trusted comment is signed, must start with the service's prefix and be
+longer than it, and is at most 256 bytes of printable ASCII on one line.
+Unknown body fields, other lengths and other methods are refused (400/405).
+The owner approves a role in the dashboard as for any service; both `GET` and
+`POST` count toward its daily limit. Every call is in the audit log with role,
+time, status and, for signatures, the digest and trusted comment; never the key.
 
 ## Dashboard (#15)
 
