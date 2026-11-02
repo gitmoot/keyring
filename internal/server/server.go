@@ -458,6 +458,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Cloudflare's static-asset upload is authenticated by a short-lived token
+	// that the same deploy got earlier; only that one call carries the
+	// caller's token instead of the account token (#104).
+	var callerUploadToken string
+	if cloudflareAssetsUpload(svc, r.Method, rest) {
+		token, ok := callerBearer(r.Header)
+		if !ok {
+			fail(http.StatusUnauthorized, "Cloudflare asset upload needs the deploy's upload token as Authorization: Bearer")
+			return
+		}
+		callerUploadToken = token
+	}
 	if !h.take(roleName, service, access.DailyRequests, start) {
 		fail(http.StatusTooManyRequests, "daily limit reached")
 		return
@@ -595,7 +607,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		header.Set(name, value)
 		alsoRedact = append(alsoRedact, value)
 	}
-	out, err := buildOutbound(r.Context(), svc, upstreamKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
+	// The account token (upstreamKey) stays masked in the reply either way;
+	// the upload call is the one request that does not send it.
+	sendKey := upstreamKey
+	if callerUploadToken != "" {
+		sendKey = callerUploadToken
+	}
+	out, err := buildOutbound(r.Context(), svc, sendKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
 	if errors.Is(err, errBadQuery) {
 		h.refund(roleName, service, access.DailyRequests, start)
 		fail(http.StatusBadRequest, "malformed query string")
