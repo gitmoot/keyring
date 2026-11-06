@@ -74,6 +74,7 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/leaked", b.markLeaked)
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)
 	a.Handle("POST /keys/{name}/connect", b.connectKey)
+	registerServices(b)
 	registerAccess(b)
 }
 
