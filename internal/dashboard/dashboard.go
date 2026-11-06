@@ -523,14 +523,21 @@ func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, na
 	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg})
 }
 
-// readValue takes the posted value. Only surrounding line breaks are removed.
+// errValueControl: the value has a line break or control character inside it.
+// Such a value cannot go in an HTTP header, so storing it would make every
+// call fail (#109).
+var errValueControl = errors.New("the value has a line break or control character")
+
+// readValue takes the posted value. Whitespace around it (a stray space, tab or
+// line break from copying) is removed; a value with a line break or control
+// character inside is refused.
 func readValue(r *http.Request) (string, error) {
-	v := strings.TrimRight(r.PostFormValue("value"), "\r\n")
+	v := strings.Trim(r.PostFormValue("value"), " \t\r\n")
 	if v == "" {
 		return "", errors.New("paste the key value")
 	}
-	if strings.ContainsAny(v, "\r\n") {
-		return "", errors.New("the value must be on one line")
+	if !server.HeaderSafe(v) {
+		return "", errValueControl
 	}
 	return v, nil
 }
@@ -549,7 +556,11 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	value, err := readValue(r)
 	if err != nil {
-		b.renderNewKey(w, sid, http.StatusBadRequest, name, "Paste the value, on one line.")
+		msg := "Paste the value, on one line."
+		if errors.Is(err, errValueControl) {
+			msg = "The value has a line break or control character inside it. Paste only the key itself."
+		}
+		b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
 		return
 	}
 	b.Mu.Lock()
@@ -819,7 +830,11 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	value, err := readValue(r)
 	if err != nil {
-		http.Redirect(w, r, "/keys/"+name+"?error=value", http.StatusSeeOther)
+		code := "value"
+		if errors.Is(err, errValueControl) {
+			code = "value-control"
+		}
+		http.Redirect(w, r, "/keys/"+name+"?error="+code, http.StatusSeeOther)
 		return
 	}
 	b.Mu.Lock()

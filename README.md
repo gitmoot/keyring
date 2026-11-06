@@ -262,6 +262,11 @@ collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
 The proxy replaces caller-supplied values, requires the complete bundle before
 dispatch (503 if a value is missing), and redacts every injected credential.
+A stored key sent in a header (`bearer`, `header` and extra headers) must be a legal
+header value, with no line break or other control character (tab and space are fine).
+Go will not send one that is not, so the proxy answers 503 `stored key NAME contains a
+line break or control character` instead of a network error, sends nothing, and does not
+count the call against the daily limit. The dashboard Test button says the same.
 Existing role paths, methods and quotas still apply.
 
 Static `bearer`, `header`, and `query` services also support `fixed_headers`
@@ -709,11 +714,11 @@ Safety:
 The Keys and Agents pages are sortable tables (click a column); forms are one column. Everything works on a phone (the tables scroll sideways with the name column pinned) and follows the system's light or dark mode.
 
 The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (green: full access, amber: limited), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. A value is never shown, not even in part.
-- **Add key** asks for a name and a value only. The key works as soon as a service names it.
+- **Add key** asks for a name and a value only. The key works as soon as a service names it. Space, tab or line breaks around the pasted value are removed; a value with a line break or control character inside it is refused, because such a key cannot be sent in a header. `keyring set --file` keeps the value exactly (a multi-line private key is legitimate), so a key imported that way with a stray trailing newline is caught by the proxy check above.
 - **Connect to a service** on a key's page adds the service that uses it. The API is guessed from the key's name (`OPENROUTER_API_KEY` is OpenRouter, `vCF_TOKEN` is Cloudflare), with the base URL, how the key is sent and a test request filled in from a built-in list; pick another, or "Other" and fill in the fields. An agent that works out the settings can hand them over as JSON to paste: `{"service":"acme","base":"https://api.acme.com","auth":"header","header":"X-Api-Key","test_path":"/v1/ping"}` (unknown fields are refused); add `"tls_pin_sha256"` for a pinned self-signed service. The whole access list is checked before anything is written.
 - **Edit a service** (`/services/<name>`, reached from the service chip on a key's page): change its key, base URL, how the key is sent, header or parameter, test request and pinned certificate, in the same fields as Connect or from the same pasted JSON. Agents keep their access, with the same methods, paths and limits, so a wrong base URL or key is fixed without deleting the service and asking again. The password is asked, the whole access list is checked before anything is written, and the change is audit-logged as `service_edited` with the names of the settings that changed, never their values. The key may be changed to any listed key; the service name cannot be changed. Pasted JSON replaces every field the form shows (leave out `fixed_headers` to remove them); extra credential header names are shown but their values are never. Sign-only, OAuth, Google and egress-proxy services are not edited here because they carry settings the form does not show: change those in `access.json`.
 - **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
-- **Replace** takes effect at once; it clears the leaked flag and the test result.
+- **Replace** takes effect at once; it clears the leaked flag and the test result. It trims and checks the new value the same way Add does.
 - **Mark as leaked** flags the key until it is replaced.
 - Under **Leaked or no longer needed**, **Delete value only** keeps the service settings: the key stays listed as missing and its calls answer 503.
 - **Remove completely** deletes the key's stored value and notes, every service that references it, and those services' grants from all agents. The form lists the services that will be removed. It also works when the value was already deleted, so the empty row goes away and stays gone after reload. Other keys and agents are kept; a service using several credentials may leave its other keys listed for separate removal. This removes the key from this keyring, not from the provider's account.

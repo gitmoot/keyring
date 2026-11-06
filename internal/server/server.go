@@ -458,6 +458,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A key that goes in a header must be a legal header value. Go refuses to
+	// send one with a line break or control character, and that used to come
+	// back as "upstream unreachable"; say what is wrong and name the key, never
+	// its text (#109). Nothing was sent, so nothing is charged.
+	if name := unsendableKey(svc, key, snap.keys); name != "" {
+		fail(http.StatusServiceUnavailable, "stored key "+name+" contains a line break or control character; replace it in the dashboard")
+		return
+	}
 	// Cloudflare's static-asset upload is authenticated by a short-lived token
 	// that the same deploy got earlier; only that one call carries the
 	// caller's token instead of the account token (#104).
@@ -816,6 +824,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		if googleAccount.QuotaProject != "" {
 			header.Set("X-Goog-User-Project", googleAccount.QuotaProject)
 		}
+	}
+	if name := unsendableKey(svc, key, snap.keys); name != "" {
+		return 0, errors.New("stored key " + name + " contains a line break or control character")
 	}
 	out, err := buildOutbound(ctx, svc, key, method, path, query, header, http.NoBody, 0)
 	if err != nil {

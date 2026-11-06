@@ -693,3 +693,59 @@ func TestOAuthRefreshFailureShowsOnTheKey(t *testing.T) {
 		t.Fatalf("refresh failure not shown on the key:\n%s", page)
 	}
 }
+
+// A pasted key often has stray whitespace around it; that is trimmed, not
+// stored. A value with a line break or control character inside cannot go in an
+// HTTP header, so it is refused with a clear message instead of being stored
+// and then failing every call (gitmoot/keyring#109).
+func TestKeyValuesAreTrimmedAndControlCharactersRefused(t *testing.T) {
+	e := newEnv(t)
+	stored := func() string {
+		keys, err := store.Load(e.backend.StorePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return keys["API_KEY"]
+	}
+	for _, tc := range []struct{ name, pasted string }{
+		{"trailing space", newValue + " "},
+		{"leading space", " " + newValue},
+		{"trailing tab and newline", newValue + "\t\r\n"},
+		{"leading and trailing", "  \t" + newValue + " \n"},
+	} {
+		w := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {tc.pasted}, "password": {password}})
+		if w.Header().Get("Location") != "/keys/API_KEY?done=replaced" || stored() != newValue {
+			t.Fatalf("%s: location %q, stored %q, want the trimmed value", tc.name, w.Header().Get("Location"), stored())
+		}
+		e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {oldValue}, "password": {password}})
+	}
+	for _, tc := range []struct{ name, pasted string }{
+		{"line break inside", "sk-first\nsk-second"},
+		{"escape character", "sk-abc\x1bdef"},
+		{"NUL", "sk-abc\x00def"},
+		{"DEL", "sk-abc\x7fdef"},
+	} {
+		w := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {tc.pasted}, "password": {password}})
+		if stored() != oldValue {
+			t.Fatalf("%s: the value was replaced by %q", tc.name, stored())
+		}
+		if !strings.HasPrefix(w.Header().Get("Location"), "/keys/API_KEY?error=value") {
+			t.Fatalf("%s: location %q, want a refusal", tc.name, w.Header().Get("Location"))
+		}
+		add := e.request("POST", "/keys", url.Values{"name": {"NEW_KEY"}, "value": {tc.pasted}, "password": {password}})
+		if add.Code != http.StatusBadRequest {
+			t.Fatalf("%s: adding it answered %d, want 400", tc.name, add.Code)
+		}
+		if keys, _ := store.Load(e.backend.StorePath); keys["NEW_KEY"] != "" {
+			t.Fatalf("%s: a key with a control character was stored", tc.name)
+		}
+	}
+	page := e.request("GET", "/keys/API_KEY?error=value-control", nil).Body.String()
+	if !strings.Contains(page, "line break or control character") {
+		t.Fatalf("the refusal does not explain itself:\n%s", page)
+	}
+	// A key that is only whitespace is still "no value".
+	if w := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {"  \t \n"}, "password": {password}}); !strings.Contains(w.Header().Get("Location"), "error=value") || stored() != oldValue {
+		t.Fatalf("whitespace-only value: %q, stored %q", w.Header().Get("Location"), stored())
+	}
+}
