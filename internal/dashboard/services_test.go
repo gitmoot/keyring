@@ -202,16 +202,17 @@ func TestServicesWithOtherSettingsAreNotEditedHere(t *testing.T) {
 	}
 }
 
-// A request without the session's CSRF token never reaches the handler.
+// Like every other change, an edit needs a logged-in session: without one the
+// page goes to the login and the save is refused with 401, and nothing changes.
 func TestEditNeedsASession(t *testing.T) {
 	e := newEnv(t)
 	before := e.accessBytes()
 	e.cookie = ""
 	w := e.request("POST", "/services/api", url.Values{"password": {password}, "base": {"https://x.example.com"}, "auth": {"bearer"}})
-	if w.Code == http.StatusSeeOther && strings.Contains(w.Header().Get("Location"), "done=saved") || !bytes.Equal(e.accessBytes(), before) {
-		t.Fatalf("an unauthenticated edit was applied: %d", w.Code)
+	if w.Code != http.StatusUnauthorized || !bytes.Equal(e.accessBytes(), before) {
+		t.Fatalf("an unauthenticated edit: status %d, want 401 and no change", w.Code)
 	}
-	if w := e.request("GET", "/services/api", nil); strings.Contains(w.Body.String(), `<h1 class="mono">api</h1>`) {
-		t.Fatal("the service page was served without a session")
+	if w := e.request("GET", "/services/api", nil); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Fatalf("the service page without a session: %d %q, want a redirect to /login", w.Code, w.Header().Get("Location"))
 	}
 }
