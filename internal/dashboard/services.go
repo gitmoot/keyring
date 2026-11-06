@@ -91,9 +91,13 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 		}
 	}
 	slices.Sort(agents)
+	method := svc.TestMethod
+	if method == "" {
+		method = http.MethodGet
+	}
 	b.render(w, status, "service", sid, map[string]any{
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
-		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg,
+		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method,
 	})
 }
 

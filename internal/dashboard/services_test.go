@@ -216,3 +216,30 @@ func TestEditNeedsASession(t *testing.T) {
 		t.Fatalf("the service page without a session: %d %q, want a redirect to /login", w.Code, w.Header().Get("Location"))
 	}
 }
+
+// The test request is shown with the method it will be sent with, and editing
+// its path keeps that method: a POST probe is never silently turned into a GET
+// by the form, and a GET probe is never silently a POST (review of #108).
+func TestEditShowsAndKeepsTheTestMethod(t *testing.T) {
+	e := newEnv(t)
+	e.withService("probe", policy.Service{Base: "https://api.example.com", Key: "API_KEY", Auth: policy.AuthBearer, TestMethod: "POST", TestPath: "/old-check"})
+
+	if page := e.request("GET", "/services/probe", nil).Body.String(); !strings.Contains(page, "POST /old-check") || !strings.Contains(page, "sent with the method shown above, POST") {
+		t.Fatalf("a POST probe is not shown as POST:\n%s", page)
+	}
+	if page := e.request("GET", "/services/api", nil).Body.String(); !strings.Contains(page, "GET /v1/check") || !strings.Contains(page, "sent with the method shown above, GET") {
+		t.Fatalf("a default probe is not shown as GET:\n%s", page)
+	}
+
+	w := e.edit("probe", url.Values{"base": {"https://api.example.com"}, "auth": {"query"}, "param": {"api_key"}, "test_path": {"/new-check"}})
+	if w.Header().Get("Location") != "/services/probe?done=saved" {
+		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
+	}
+	svc := e.proxy.Config().Services["probe"]
+	if svc.TestMethod != "POST" || svc.TestPath != "/new-check" || svc.Auth != policy.AuthQuery {
+		t.Fatalf("edit changed the test method or missed the new path: %+v", svc)
+	}
+	if page := e.request("GET", "/services/probe", nil).Body.String(); !strings.Contains(page, "POST /new-check") {
+		t.Fatalf("the saved page does not show the method with the new path:\n%s", page)
+	}
+}

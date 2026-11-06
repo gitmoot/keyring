@@ -220,6 +220,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
 <dt>Base URL</dt><dd class="mono">{{if .F.Base}}{{.F.Base}}{{else}}<span class="mute">none</span>{{end}}</dd>
+<dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 {{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
 {{if .F.ExtraHeaders}}<dt>Extra credentials</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
@@ -237,11 +238,11 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <option value="query"{{if eq .F.Auth "query"}} selected{{end}}>a query parameter</option></select></label>
 <div class="two"><label>Header (if a header)<input name="header" value="{{.F.Header}}" autocapitalize="none"></label>
 <label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>
-<label>Test request (optional, a harmless GET)<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
+<label>Test request path (optional; sent with the method shown above, {{.TestMethod}})<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
 <label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.F.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>
 <details{{if .F.Pasted}} open{{end}}><summary>Or paste settings from an agent</summary>
 <label>JSON like {"base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
-<p class="hint">Replaces every setting above, and the key stays as chosen. Leave "service" out; a service cannot be renamed here. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
+<p class="hint">Replaces every setting above, and the key stays as chosen. Leave "service" out; a service cannot be renamed here. The test method (shown above) is kept; change a POST test to something else in access.json. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Save</button></div>
