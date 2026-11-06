@@ -1,0 +1,207 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"maps"
+	"net/http"
+	"slices"
+	"strings"
+
+	"github.com/gitmoot/keyring/internal/policy"
+)
+
+// Editing a service in place (gitmoot/keyring#107). Deleting a service to fix
+// a wrong base URL or key also deletes every agent's grant on it; an edit
+// changes only the service's own settings, so the roles stay as they are.
+
+func registerServices(b *Backend) {
+	b.Admin.Handle("GET /services/{name}", b.servicePage)
+	b.Admin.Handle("POST /services/{name}", b.saveService)
+}
+
+// editableService reports whether the dashboard form can change the service
+// without losing settings it does not show. Sign-only, OAuth, Google and
+// egress-proxy services carry their own fields and stay in access.json.
+func editableService(svc policy.Service) bool {
+	switch svc.Auth {
+	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery:
+	default:
+		return false
+	}
+	return svc.OAuth2 == nil && svc.EgressProxy == nil && svc.GoogleAccount == "" &&
+		svc.AppleAds == nil && svc.AppStoreConnect == nil && svc.Minisign == nil
+}
+
+// serviceForm is the edit page's fields. Extra holds what the form shows but
+// does not change: fixed headers (changed by pasting JSON) and the names of
+// the extra credential headers (never their values).
+type serviceForm struct {
+	Name, Key, Base, Auth, Header, Param, TestPath, TLSPin, Pasted string
+	FixedHeaders                                                   map[string]string
+	ExtraHeaders                                                   []string
+}
+
+func formOf(name string, svc policy.Service) serviceForm {
+	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
+		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, FixedHeaders: svc.FixedHeaders}
+	for header := range svc.ExtraHeaders {
+		f.ExtraHeaders = append(f.ExtraHeaders, header)
+	}
+	slices.Sort(f.ExtraHeaders)
+	return f
+}
+
+// keyChoices are the key names the service may use: those the keys page lists.
+func (b *Backend) keyChoices() ([]string, error) {
+	rows, err := b.rows()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.Name)
+	}
+	return names, nil
+}
+
+func (b *Backend) servicePage(w http.ResponseWriter, r *http.Request, sid string) {
+	name := r.PathValue("name")
+	svc, ok := b.Proxy.Config().Services[name]
+	if !ok {
+		b.notFound(w, sid)
+		return
+	}
+	b.renderService(w, sid, http.StatusOK, formOf(name, svc), r.URL.Query().Get("done"), "")
+}
+
+func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f serviceForm, notice, msg string) {
+	cfg := b.Proxy.Config()
+	svc := cfg.Services[f.Name]
+	keys, err := b.keyChoices()
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	var agents []string
+	for role, rl := range cfg.Roles {
+		if _, granted := rl.Access[f.Name]; granted {
+			agents = append(agents, role)
+		}
+	}
+	slices.Sort(agents)
+	b.render(w, status, "service", sid, map[string]any{
+		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
+		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg,
+	})
+}
+
+func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string) {
+	name := r.PathValue("name")
+	f := serviceForm{
+		Name: name, Key: strings.TrimSpace(r.PostFormValue("key")), Base: strings.TrimSpace(r.PostFormValue("base")),
+		Auth: r.PostFormValue("auth"), Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
+		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")),
+		Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
+	}
+	again := func(status int, msg string) {
+		if svc, ok := b.Proxy.Config().Services[name]; ok {
+			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
+		}
+		b.renderService(w, sid, status, f, "", msg)
+	}
+	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
+		again(http.StatusForbidden, "Enter your dashboard password to save the changes.")
+		return
+	}
+	pasted := f.Pasted != ""
+	var fixed map[string]string
+	if pasted {
+		var a agentSettings
+		dec := json.NewDecoder(strings.NewReader(f.Pasted))
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&a)
+		if err == nil {
+			if _, extra := dec.Token(); extra != io.EOF {
+				err = errors.New("text after the settings")
+			}
+		}
+		if err != nil {
+			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
+			return
+		}
+		if a.Service != "" && a.Service != name {
+			again(http.StatusBadRequest, "The pasted settings name another service. A service cannot be renamed here; leave \"service\" out or use "+name+".")
+			return
+		}
+		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
+		fixed = a.FixedHeaders
+	}
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	next, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	cur, exists := next.Services[name]
+	if !exists {
+		b.notFound(w, sid)
+		return
+	}
+	if !editableService(cur) {
+		again(http.StatusConflict, "This kind of service is not edited here; change it in access.json.")
+		return
+	}
+	if f.Key == "" {
+		f.Key = cur.Key
+	}
+	if f.Key != cur.Key {
+		if ok, err := b.known(f.Key); err != nil {
+			b.fail(w, sid, err)
+			return
+		} else if !ok {
+			again(http.StatusBadRequest, "There is no key named "+f.Key+". Add it under Keys first.")
+			return
+		}
+	}
+	// Start from what is stored: only the fields this form owns change, so
+	// the settings it does not show (extra credential headers) survive.
+	updated := cur
+	updated.Base, updated.Key, updated.Auth, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Header, f.Param
+	updated.TestPath, updated.TLSPinSHA256 = f.TestPath, f.TLSPin
+	if pasted {
+		updated.FixedHeaders = fixed
+	}
+	changed := changedFields(cur, updated)
+	next.Services[name] = updated
+	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+		again(http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := b.saveAndApply(next); err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	b.Admin.Audit("service_edited", sid, map[string]any{"service": name, "key": updated.Key, "changed": changed})
+	http.Redirect(w, r, "/services/"+name+"?done=saved", http.StatusSeeOther)
+}
+
+// changedFields names the settings an edit changed, never their values.
+func changedFields(old, now policy.Service) []string {
+	changed := []string{}
+	for _, c := range []struct {
+		name string
+		diff bool
+	}{
+		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
+		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
+		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
+	} {
+		if c.diff {
+			changed = append(changed, c.name)
+		}
+	}
+	return changed
+}

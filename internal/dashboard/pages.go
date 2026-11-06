@@ -9,7 +9,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body>
 <header class="top"><div class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">
 <a class="brand" href="/keys">Keyring</a>
-<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a></nav>
+<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a></nav>
 <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form>
 </div></header><main class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
@@ -75,7 +75,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="head"><a class="back" href="/keys">Keys</a><h1 class="mono">{{.Row.Name}}</h1>{{template "status" .Row}}</div>
 <div class="card"><dl>
 <dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>
-<dt>Services</dt><dd>{{range .Row.Services}}<span class="chip">{{.}}</span>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
+<dt>Services</dt><dd>{{range .Row.Services}}<a class="chip" href="/services/{{.}}">{{.}}</a>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Row.UsedBy}}<a class="chip" href="/agents/{{.}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Last used</dt><dd>{{with .Row.LastUsed}}{{.}}{{else}}never{{end}} · {{.Row.CallsToday}} today</dd>
 {{if not .Meta.CheckedAt.IsZero}}<dt>Tested</dt><dd>{{.Meta.CheckedAt.Format "2006-01-02 15:04"}} UTC</dd>{{end}}
@@ -212,5 +212,40 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <details class="card danger"><summary>Revoke</summary><form method="post" action="/agents/{{.Role}}/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="check"><input type="checkbox" name="confirm" value="yes" required> Remove {{.Role}} and all its access; its calls fail at once</label>
 {{template "password" .}}<div class="actions"><button class="danger">Revoke agent</button></div></form></details>
+{{template "bottom"}}{{end}}
+
+{{define "service"}}{{template "top" .}}
+{{if eq .Notice "saved"}}<p class="notice">Saved. Agents keep their access.</p>{{end}}
+<div class="head"><a class="back" href="/keys/{{.F.Key}}">{{.F.Key}}</a><h1 class="mono">{{.Name}}</h1></div>
+<div class="card"><dl>
+<dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
+<dt>Base URL</dt><dd class="mono">{{if .F.Base}}{{.F.Base}}{{else}}<span class="mute">none</span>{{end}}</dd>
+<dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
+{{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
+{{if .F.ExtraHeaders}}<dt>Extra credentials</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
+</dl></div>
+{{if .Editable}}
+<div class="card"><h2>Edit</h2>
+<p class="hint">Changes the settings only. {{len .Agents}} agent{{if ne (len .Agents) 1}}s{{end}} keep their access, with the same methods, paths and limits. The key is sent to the base URL below, so check it.</p>
+{{with .EditError}}<p class="error">{{.}}</p>{{end}}
+<form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+<label>Base URL<input name="base" value="{{.F.Base}}" inputmode="url" autocapitalize="none" spellcheck="false"></label>
+<label>Key sent as<select name="auth">
+<option value="bearer"{{if eq .F.Auth "bearer"}} selected{{end}}>Authorization: Bearer</option>
+<option value="header"{{if eq .F.Auth "header"}} selected{{end}}>a header</option>
+<option value="query"{{if eq .F.Auth "query"}} selected{{end}}>a query parameter</option></select></label>
+<div class="two"><label>Header (if a header)<input name="header" value="{{.F.Header}}" autocapitalize="none"></label>
+<label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>
+<label>Test request (optional, a harmless GET)<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
+<label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.F.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>
+<details{{if .F.Pasted}} open{{end}}><summary>Or paste settings from an agent</summary>
+<label>JSON like {"base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
+<p class="hint">Replaces every setting above, and the key stays as chosen. Leave "service" out; a service cannot be renamed here. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
+</details>
+{{template "password" .}}
+<div class="actions"><button>Save</button></div>
+</form></div>
+{{else}}<div class="card"><p class="mute">This is a {{.Kind}} service. It carries settings this form does not show, so it is changed in access.json, not here.</p></div>{{end}}
 {{template "bottom"}}{{end}}
 `))
