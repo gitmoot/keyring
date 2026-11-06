@@ -226,7 +226,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </dl></div>
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
-<p class="hint">Changes the settings only. {{len .Agents}} agent{{if ne (len .Agents) 1}}s{{end}} keep their access, with the same methods, paths and limits. The key is sent to the base URL below, so check it.</p>
+<p class="hint">Changes the settings only. Agents who have access to this service keep it, with the same methods, paths and limits. The key is sent to the base URL below, so check it.</p>
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>
