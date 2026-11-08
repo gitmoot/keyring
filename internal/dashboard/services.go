@@ -86,7 +86,7 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	}
 	var agents []string
 	for role, rl := range cfg.Roles {
-		if _, granted := rl.Access[f.Name]; granted {
+		if _, granted := cfg.AccessFor(rl, f.Name); granted {
 			agents = append(agents, role)
 		}
 	}

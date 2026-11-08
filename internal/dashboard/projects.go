@@ -36,6 +36,13 @@ func projectNames(cfg *policy.Config) []string {
 	for name := range cfg.Projects {
 		seen[name] = true
 	}
+	// A whole-project grant keeps its project visible and revocable even when
+	// the project has no services or settings left.
+	for _, role := range cfg.Roles {
+		for name := range role.Projects {
+			seen[name] = true
+		}
+	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)

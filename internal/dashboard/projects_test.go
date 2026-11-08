@@ -391,3 +391,64 @@ func TestMovingAServiceChangesProjectGrantReach(t *testing.T) {
 		t.Fatalf("audit does not name who gained access: %s", e.audit.String())
 	}
 }
+
+// Review of #114, F1: opening the editor for access that comes through a
+// whole-project grant shows that grant's limits, and saving it unchanged
+// keeps them instead of widening to full access.
+func TestInheritedAccessEditorKeepsTheProjectLimits(t *testing.T) {
+	e := projectEnv(t)
+	e.addOps()
+	ahead := time.Now().AddDate(0, 1, 0).UTC().Format(time.DateOnly)
+	e.request("POST", "/projects/noted/grant", url.Values{"role": {"ops"}, "mode": {"read"}, "paths": {"/v1"}, "daily": {"10"}, "expires": {ahead}, "later": {"yes"}, "password": {password}})
+	page := e.request("GET", "/access/ops/noted-stripe", nil).Body.String()
+	for _, want := range []string{`value="read" checked`, `>/v1</textarea>`, `name="daily" inputmode="numeric" value="10"`, `name="expires" value="` + ahead + `"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("editor does not show the project grant's limit %q:\n%s", want, page)
+		}
+	}
+	// Submit the rendered form unchanged.
+	w := e.request("POST", "/access/ops/noted-stripe", url.Values{"on": {"yes"}, "mode": {"read"}, "paths": {"/v1"}, "daily": {"10"}, "expires": {ahead}, "password": {password}})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	acc := e.proxy.Config().Roles["ops"].Access["noted-stripe"]
+	if !slices.Equal(acc.Methods, []string{"GET", "HEAD"}) || acc.Paths[0] != "/v1" || acc.DailyRequests != 10 || acc.Expires == nil {
+		t.Fatalf("saving unchanged widened the access: %+v", acc)
+	}
+}
+
+// F2: a project referenced only by whole-project grants stays listed, has a
+// page, and its grants can be removed.
+func TestProjectWithOnlyGrantsLeftStaysManageable(t *testing.T) {
+	e := projectEnv(t)
+	e.addOps()
+	e.request("POST", "/projects/noted/grant", url.Values{"role": {"ops"}, "mode": {"full"}, "paths": {"/"}, "later": {"yes"}, "password": {password}})
+	base := e.proxy.Config().Services["api"].Base
+	for _, s := range []string{"api", "noted-stripe"} {
+		if w := e.edit(s, url.Values{"base": {base}, "auth": {"bearer"}, "project": {""}}); w.Header().Get("Location") != "/services/"+s+"?done=saved" {
+			t.Fatalf("move %s out: %d", s, w.Code)
+		}
+	}
+	if w := e.request("GET", "/projects/noted", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "whole project, services added later included") {
+		t.Fatalf("project with only grants left: %d", w.Code)
+	}
+	if !strings.Contains(e.request("GET", "/projects", nil).Body.String(), `href="/projects/noted"`) {
+		t.Fatal("project with only grants left is not listed")
+	}
+	if w := e.request("POST", "/projects/noted/revoke", url.Values{"role": {"ops"}, "password": {password}}); w.Header().Get("Location") != "/projects/noted?done=revoked" {
+		t.Fatalf("revoke: %d", w.Code)
+	}
+	if len(e.proxy.Config().Roles["ops"].Projects) != 0 {
+		t.Fatal("whole-project grant not removed")
+	}
+}
+
+// F3: the service page lists agents that reach it through a project grant.
+func TestServicePageListsProjectGrantedAgents(t *testing.T) {
+	e := projectEnv(t)
+	e.addOps()
+	e.request("POST", "/projects/noted/grant", url.Values{"role": {"ops"}, "mode": {"full"}, "paths": {"/"}, "later": {"yes"}, "password": {password}})
+	if page := e.request("GET", "/services/noted-stripe", nil).Body.String(); !strings.Contains(page, `href="/access/ops/noted-stripe"`) {
+		t.Fatalf("service page does not list the project-granted agent:\n%s", page)
+	}
+}

@@ -363,7 +363,9 @@ func (b *Backend) cellPage(w http.ResponseWriter, r *http.Request, sid string) {
 		b.notFound(w, sid)
 		return
 	}
-	acc, on := rl.Access[service]
+	// Access through a whole-project grant opens with that grant's limits, so
+	// saving the form unchanged keeps them rather than widening to full access.
+	acc, on := cfg.AccessFor(rl, service)
 	b.renderCell(w, sid, http.StatusOK, formFromAccess(role, service, acc, on), "")
 }
 

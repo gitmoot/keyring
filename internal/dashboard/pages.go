@@ -164,7 +164,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="head"><a class="back" href="/agents/{{.Form.Role}}">{{.Form.Role}}</a><h1>{{.Form.Service}}</h1></div>
 <div class="card">
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
-{{with .Via}}<p class="hint">{{$.Form.Role}} can already use this service through its grant for the whole project <a href="/projects/{{.}}">{{.}}</a>. Saving a grant here applies to this service instead of the project grant. To take the access away, remove the project grant on the project page.</p>{{end}}
+{{with .Via}}<p class="hint">{{$.Form.Role}} can already use this service through its grant for the whole project <a href="/projects/{{.}}">{{.}}</a>, with the limits shown below. Saving here makes a grant for this service only, which then applies instead of the project grant. Switching it off here does not take the access away; remove the project grant on the project page.</p>{{end}}
 <form method="post" action="/access/{{.Form.Role}}/{{.Form.Service}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="switch"><input type="checkbox" name="on" value="yes"{{if .Form.On}} checked{{end}}> <span>{{.Form.Role}} may use {{.Form.Service}}</span></label>
 <details{{if or (ne .Form.Mode "full") (ne .Form.Paths "/") .Form.Daily .Form.Expires}} open{{end}}><summary>{{if and (eq .Form.Mode "full") (eq .Form.Paths "/") (not .Form.Daily) (not .Form.Expires)}}Full access · Limit access{{else}}Limited access{{end}}</summary>
