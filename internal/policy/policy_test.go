@@ -541,3 +541,61 @@ func TestProjectStopped(t *testing.T) {
 		}
 	}
 }
+
+// A role's grant for a single service wins over its grant for the service's
+// project; a project grant covers every service in that project, now and
+// later, and nothing else (#111).
+func TestAccessForProjectGrants(t *testing.T) {
+	a := AccessList{Services: map[string]Service{
+		"noted-do": {Project: "noted"}, "noted-stripe": {Project: "noted"}, "own": {}, "other": {Project: "other"},
+	}}
+	whole := Access{Methods: []string{"GET"}, Paths: []string{"/"}}
+	narrow := Access{Methods: []string{"GET"}, Paths: []string{"/v1/balance"}}
+	role := Role{Access: map[string]Access{"noted-stripe": narrow}, Projects: map[string]Access{"noted": whole}}
+	for name, want := range map[string]*Access{"noted-do": &whole, "noted-stripe": &narrow, "own": nil, "other": nil, "missing": nil} {
+		got, ok := a.AccessFor(role, name)
+		if want == nil {
+			if ok {
+				t.Errorf("%s: granted %+v, want no access", name, got)
+			}
+			continue
+		}
+		if !ok || got.Paths[0] != want.Paths[0] {
+			t.Errorf("%s: %+v %v, want %+v", name, got, ok, *want)
+		}
+	}
+	grants := a.Grants(role)
+	if len(grants) != 2 || grants["noted-do"].Paths[0] != "/" || grants["noted-stripe"].Paths[0] != "/v1/balance" {
+		t.Errorf("grants = %+v", grants)
+	}
+	// A service added to the project later is covered without a new grant.
+	a.Services["noted-sendgrid"] = Service{Project: "noted"}
+	if _, ok := a.AccessFor(role, "noted-sendgrid"); !ok {
+		t.Error("a service added to the project later is not covered")
+	}
+}
+
+func TestValidateRoleProjectGrants(t *testing.T) {
+	c := validConfig()
+	for name, role := range c.Roles {
+		role.Projects = map[string]Access{"noted": {Paths: []string{"/"}}}
+		c.Roles[name] = role
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a project grant without services yet must be allowed: %v", err)
+	}
+	for label, acc := range map[string]map[string]Access{
+		"bad project name": {"Noted": {Paths: []string{"/"}}},
+		"no paths":         {"noted": {}},
+		"daily_bytes":      {"noted": {Paths: []string{"/"}, DailyBytes: 10}},
+	} {
+		c := validConfig()
+		for name, role := range c.Roles {
+			role.Projects = acc
+			c.Roles[name] = role
+		}
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", label)
+		}
+	}
+}

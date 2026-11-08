@@ -35,13 +35,16 @@ var fingerprint = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // agent made on its own machine. A request never changes an existing
 // agent's token.
 type Request struct {
-	ID          string    `json:"id"`
-	Role        string    `json:"role"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
-	Services    []string  `json:"services"`
-	Note        string    `json:"note,omitempty"`
-	From        string    `json:"from"` // the address that filed it
-	Filed       time.Time `json:"filed"`
+	ID          string   `json:"id"`
+	Role        string   `json:"role"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	Services    []string `json:"services"`
+	// Projects asks for access to whole projects, services added to them
+	// later included (#111).
+	Projects []string  `json:"projects,omitempty"`
+	Note     string    `json:"note,omitempty"`
+	From     string    `json:"from"` // the address that filed it
+	Filed    time.Time `json:"filed"`
 }
 
 // Store is the requests file. Its methods are safe for concurrent use.
@@ -89,8 +92,27 @@ func Check(r Request, access policy.AccessList) error {
 	if !policy.ValidRoleName(r.Role) {
 		return fmt.Errorf("role %q: letters, digits, dot, dash or underscore, starting with a letter or digit", r.Role)
 	}
-	if len(r.Services) == 0 || len(r.Services) > maxServices {
-		return fmt.Errorf("ask for 1 to %d services", maxServices)
+	if n := len(r.Services) + len(r.Projects); n == 0 || n > maxServices {
+		return fmt.Errorf("ask for 1 to %d services or projects", maxServices)
+	}
+	known := map[string]bool{}
+	for _, svc := range access.Services {
+		if svc.Project != "" {
+			known[svc.Project] = true
+		}
+	}
+	for name := range access.Projects {
+		known[name] = true
+	}
+	seenProject := map[string]bool{}
+	for _, p := range r.Projects {
+		if !known[p] {
+			return fmt.Errorf("unknown project %q", p)
+		}
+		if seenProject[p] {
+			return fmt.Errorf("project %q listed twice", p)
+		}
+		seenProject[p] = true
 	}
 	seen := map[string]bool{}
 	for _, svc := range r.Services {
@@ -125,6 +147,11 @@ func Check(r Request, access policy.AccessList) error {
 func (s *Store) File(r Request, access policy.AccessList, from string, now time.Time) (Request, error) {
 	r.Services = append([]string(nil), r.Services...)
 	sort.Strings(r.Services)
+	r.Projects = append([]string(nil), r.Projects...)
+	sort.Strings(r.Projects)
+	if len(r.Projects) == 0 {
+		r.Projects = nil
+	}
 	if err := Check(r, access); err != nil {
 		return Request{}, err
 	}
@@ -135,7 +162,7 @@ func (s *Store) File(r Request, access policy.AccessList, from string, now time.
 		return Request{}, err
 	}
 	for _, p := range list {
-		if p.Role == r.Role && p.Fingerprint == r.Fingerprint && fmt.Sprint(p.Services) == fmt.Sprint(r.Services) {
+		if p.Role == r.Role && p.Fingerprint == r.Fingerprint && fmt.Sprint(p.Services) == fmt.Sprint(r.Services) && fmt.Sprint(p.Projects) == fmt.Sprint(r.Projects) {
 			return p, nil
 		}
 		if r.Fingerprint != "" && p.Role == r.Role && p.Fingerprint != r.Fingerprint {

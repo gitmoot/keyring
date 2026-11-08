@@ -168,3 +168,79 @@ func TestEarlyRefusalsCarryTheProject(t *testing.T) {
 		t.Fatalf("no-grant audit = %+v", rec)
 	}
 }
+
+// projectGrantHandler: services "api" (project client) and "own" (no
+// project); role phobos has only a whole-project grant for "client".
+func projectGrantHandler(t *testing.T, base string, grant policy.Access) *Handler {
+	t.Helper()
+	h, _ := newHandler(t, base, policy.Service{Auth: policy.AuthBearer, Project: "client"}, allowAll)
+	cfg := *h.Config()
+	cfg.Services = map[string]policy.Service{"api": cfg.Services["api"], "own": {Base: base, Key: "API_KEY", Auth: policy.AuthBearer}}
+	cfg.Roles = map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{}, Projects: map[string]policy.Access{"client": grant}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	return h
+}
+
+// A whole-project grant lets the agent use every service of the project,
+// including one added later, with the grant's limits, and nothing outside it.
+func TestProjectGrantCoversTheProjectOnly(t *testing.T) {
+	up, seen := upstream(t)
+	h := projectGrantHandler(t, up.URL, policy.Access{Methods: []string{"GET"}, Paths: []string{"/v1"}, DailyRequests: 2})
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusOK || seen.count() != 1 {
+		t.Fatalf("project service: %d", w.Code)
+	}
+	if w := call(h, "GET", "/own/v1/x", testToken, nil); w.Code != http.StatusForbidden || seen.count() != 1 {
+		t.Fatalf("service outside the project: %d", w.Code)
+	}
+	if w := call(h, "POST", "/api/v1/x", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("method outside the grant: %d", w.Code)
+	}
+	if w := call(h, "GET", "/api/v2/x", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("path outside the grant: %d", w.Code)
+	}
+	// A service added to the project later is covered at once.
+	cfg := *h.Config()
+	cfg.Services = map[string]policy.Service{"api": cfg.Services["api"], "own": cfg.Services["own"], "later": {Base: up.URL, Key: "API_KEY", Auth: policy.AuthBearer, Project: "client"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/later/v1/x", testToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("service added later: %d %q", w.Code, w.Body.String())
+	}
+	// The daily limit applies per service.
+	call(h, "GET", "/api/v1/x", testToken, nil)
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("third call to api: %d, want 429", w.Code)
+	}
+	if w := call(h, "GET", "/later/v1/x", testToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("the limit of one service spent another's: %d", w.Code)
+	}
+	// Pausing the project still stops a project-granted agent.
+	cfg.Projects = map[string]policy.Project{"client": {Paused: true}}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/later/v1/x", testToken, nil); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "project_paused") {
+		t.Fatalf("paused project: %d %q", w.Code, w.Body.String())
+	}
+}
+
+// A grant for a single service takes precedence over the project grant, in
+// both directions: narrower and wider.
+func TestServiceGrantOverridesProjectGrant(t *testing.T) {
+	up, _ := upstream(t)
+	h := projectGrantHandler(t, up.URL, policy.Access{Methods: []string{"GET"}, Paths: []string{"/"}})
+	cfg := *h.Config()
+	role := cfg.Roles["phobos"]
+	role.Access = map[string]policy.Access{"api": {Methods: []string{"GET"}, Paths: []string{"/v1/balance"}}}
+	cfg.Roles = map[string]policy.Role{"phobos": role}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/api/v1/other", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("narrower service grant ignored: %d", w.Code)
+	}
+	if w := call(h, "GET", "/api/v1/balance", testToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("service grant path: %d", w.Code)
+	}
+}

@@ -51,7 +51,7 @@ const usage = `Usage:
   keyring minisign-keygen --store FILE NAME  make a new Ed25519 signing key in the store (never shown) and
                                              print its minisign public key
   keyring new-token                          make a role token and its hash for the rules file
-  keyring request --upstream URL --role NAME --service S [--service S ...] [--note TEXT] [--new TOKENS_DIR]
+  keyring request --upstream URL --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new TOKENS_DIR]
                                              ask the owner for full access to services (approved in the dashboard)
   keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
                                              on the agent machine: forward /<role>/<service>/... to the keyring
@@ -83,9 +83,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ifMissing := fs.Bool("if-missing", false, "admin-password: keep a password that is already set")
 	adminListen := fs.String("admin-listen", "127.0.0.1:7702", "enable-dashboard: loopback address of the dashboard")
 	httpsHost := fs.String("https-host", "", "enable-dashboard: DNS name served by the local HTTPS proxy")
-	var devices, services stringList
+	var devices, services, projects stringList
 	role := fs.String("role", "", "request: the agent (role) asking")
 	fs.Var(&services, "service", "request: a service to get full access to (repeat)")
+	fs.Var(&projects, "project", "request: a whole project to get full access to, services added later included (repeat)")
 	note := fs.String("note", "", "request: why, shown to the owner")
 	newTokens := fs.String("new", "", "request: a new agent; make or reuse <dir>/<role>.token and send its sha256")
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
@@ -204,7 +205,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "keyring request: --upstream, --role and --service are required")
 			return 2
 		}
-		err = fileRequest(*upstream, *role, services, *note, *newTokens, stdout)
+		err = fileRequest(*upstream, *role, services, projects, *note, *newTokens, stdout)
 	case "relay":
 		if *upstream == "" || *tokensDir == "" || fs.NArg() != 0 {
 			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")

@@ -169,6 +169,31 @@ type Project struct {
 	ClientOwned bool       `json:"client_owned,omitempty"`
 }
 
+// AccessFor is role's access to the named service: its own grant for the
+// service if it has one, otherwise its grant for the service's project.
+func (a AccessList) AccessFor(role Role, name string) (Access, bool) {
+	if acc, ok := role.Access[name]; ok {
+		return acc, true
+	}
+	if svc, ok := a.Services[name]; ok && svc.Project != "" {
+		acc, ok := role.Projects[svc.Project]
+		return acc, ok
+	}
+	return Access{}, false
+}
+
+// Grants lists every service role may use, with the access that applies,
+// project grants expanded to the project's current services.
+func (a AccessList) Grants(role Role) map[string]Access {
+	out := make(map[string]Access, len(role.Access))
+	for name := range a.Services {
+		if acc, ok := a.AccessFor(role, name); ok {
+			out[name] = acc
+		}
+	}
+	return out
+}
+
 // ProjectStopped reports why calls to svc are refused at now: "" when the
 // service has no project or its project is running, otherwise "paused" or
 // "expired".
@@ -581,6 +606,10 @@ type Role struct {
 	TokenSHA256 string            `json:"token_sha256"`
 	Expires     *time.Time        `json:"expires,omitempty"`
 	Access      map[string]Access `json:"access"`
+	// Projects grants access to every service of a project, including
+	// services added to it later, with the same limits (#111). A grant in
+	// Access for a single service takes precedence over its project's grant.
+	Projects map[string]Access `json:"projects,omitempty"`
 }
 
 type Access struct {
@@ -857,6 +886,17 @@ func (c *Config) Validate() error {
 			}
 			if access.DailyBytes != 0 && c.Services[svcName].Auth != AuthEgressProxy {
 				return fmt.Errorf("role %s, service %s: daily_bytes applies only to egress-proxy services", name, svcName)
+			}
+		}
+		for project, access := range role.Projects {
+			if !serviceName.MatchString(project) {
+				return fmt.Errorf("role %s: project %q: use lowercase letters, digits and -", name, project)
+			}
+			if err := access.validate(); err != nil {
+				return fmt.Errorf("role %s, project %s: %w", name, project, err)
+			}
+			if access.DailyBytes != 0 {
+				return fmt.Errorf("role %s, project %s: daily_bytes applies only to a single egress-proxy service", name, project)
 			}
 		}
 	}

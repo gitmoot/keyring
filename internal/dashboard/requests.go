@@ -55,7 +55,13 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		http.Redirect(w, r, "/access?error=gone", http.StatusSeeOther)
 		return
 	}
-	fields := map[string]any{"request": req.ID, "role": req.Role, "services": req.Services, "from": req.From}
+	fields := map[string]any{"request": req.ID, "role": req.Role, "from": req.From}
+	if len(req.Services) > 0 {
+		fields["services"] = req.Services
+	}
+	if len(req.Projects) > 0 {
+		fields["projects"] = req.Projects
+	}
 	if !approve {
 		b.Admin.Audit("request_declined", sid, fields)
 		http.Redirect(w, r, "/access?done=declined", http.StatusSeeOther)
@@ -80,6 +86,12 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 	}
 	for _, svc := range req.Services {
 		role.Access[svc] = fullAccess()
+	}
+	for _, p := range req.Projects {
+		if role.Projects == nil {
+			role.Projects = map[string]policy.Access{}
+		}
+		role.Projects[p] = fullAccess()
 	}
 	next.Roles[req.Role] = role
 	if err := b.saveAndApply(next); err != nil {
