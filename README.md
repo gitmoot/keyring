@@ -331,12 +331,21 @@ Project settings, all optional, go in the access file under `projects`:
 
 In the dashboard, the **Projects** tab lists every project with its state, and each project's page shows its services (key, API, last use, calls today) and the agents with access. From that page, with the password:
 - **Settings:** pause or resume, set or clear an end date (from the start of that day, UTC, the project counts as paused), and mark the keys client-owned. Saved as `project_changed` in the audit log with what changed.
-- **Remove an agent's access to the project:** takes away its access to every service in the project in one step, and only those; its access elsewhere stays. One `access_revoked` audit line per service.
+- **Give an agent access to the project:** in one step, with chosen methods, paths, a daily limit (applied to each service separately) and an end date. Without "Include services added to this project later" it writes an ordinary grant for each service the project has now (`access_changed` audit line per service); with it, one grant covers the whole project as it changes (`project_access_granted`).
+- **Remove an agent's access to the project:** takes away its access to every service in the project, and its whole-project grant, in one step, and only those; its access elsewhere stays. One `access_revoked` audit line per service, and `project_access_revoked` for a whole-project grant.
 - **Handover list** (client-owned projects): each project key with when it was added here and when it was last replaced, for rotating them when the engagement ends. Values are never shown; "unknown" means the key predates the dashboard keeping that date (keys added with `keyring set` also show unknown).
+
+A whole-project grant is stored on the role in the access file:
+
+```json
+"roles": {"noted": {"token_sha256": "…", "access": {}, "projects": {"noted": {"methods": ["GET"], "paths": ["/"]}}}}
+```
+
+A role's own grant for a single service takes precedence over its grant for that service's project, so one service can be narrowed (or widened). Moving a service into or out of a project changes which whole-project grants reach it; the edit's audit line names agents that gained or lost access that way (`access_gained_by`, `access_lost_by`). The agent and access pages show access that comes through a project. An agent can ask for a whole project with `keyring request ... --project noted` (with or without `--service`); approving it gives full access to the whole project, services added later included. To give less, decline and use the project page.
 
 The Keys and Agents pages filter by project: "Personal" is everything outside a project, and the filter is kept by search, status filters and sorting. Each key shows its project.
 
-The dashboard Test button refuses a stopped project the same way. Every audit line for a project's service carries `"project"`. A `projects` entry without services is allowed, so removing a project's last service never blocks. Apply changes with a reload (SIGHUP), as for any access-file edit. A keyring older than v0.14.5 refuses an access file that uses `project` or `projects`, so take them out before downgrading.
+The dashboard Test button refuses a stopped project the same way. Every audit line for a project's service carries `"project"`. A `projects` entry without services is allowed, so removing a project's last service never blocks. Apply changes with a reload (SIGHUP), as for any access-file edit. A keyring older than v0.14.5 refuses an access file that uses `project` or `projects` (on a service, at the top level, or on a role), so take them out before downgrading.
 
 ### OAuth services with refresh tokens
 
@@ -751,7 +760,7 @@ The **Keys** page (`/keys`) is a table of every key the access file names or the
 
 Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
 
-**Access requests.** An agent asks instead of the owner typing grants: `keyring request --upstream http://<keyring>:7701 --role NAME --service S [--service S ...] [--note TEXT] [--new /etc/keyring/tokens]`. With `--new` (a new agent) it makes the role's token in that directory if missing and sends only its SHA-256. The request goes to `POST /_keyring/requests` on the keyring's own listener, so only `allow_sources` can file one. It is checked (known services; a fingerprint exactly for a new agent; no token reuse), kept in `requests.json` next to the store (at most 20 pending, duplicates merged) and **grants nothing** until the owner taps Approve (with the password) at the top of the Agents page. Approving gives full access (every method and path, no limit) to the services asked for; Decline drops it. Both are audited.
+**Access requests.** An agent asks instead of the owner typing grants: `keyring request --upstream http://<keyring>:7701 --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new /etc/keyring/tokens]` (`--project` asks for a whole project; see Projects). With `--new` (a new agent) it makes the role's token in that directory if missing and sends only its SHA-256. The request goes to `POST /_keyring/requests` on the keyring's own listener, so only `allow_sources` can file one. It is checked (known services; a fingerprint exactly for a new agent; no token reuse), kept in `requests.json` next to the store (at most 20 pending, duplicates merged) and **grants nothing** until the owner taps Approve (with the password) at the top of the Agents page. Approving gives full access (every method and path, no limit) to the services asked for; Decline drops it. Both are audited.
 
 The **Agents** page (`/access`) is a table of agents: the APIs each may use (green: full access, amber: limited; after six, "+N more"), calls today, last call and end date. Click an API to change that access, or "Edit access" for the agent's page, where "Add a service…" lists the APIs it may not use yet. Calls today count every attempt, refused ones too; a daily limit counts only calls that went out.
 - **Open a service** to switch access on or off. A service not granted yet opens as full access (every method and path, no limit); "Limit access" sets the methods (read only, full, or a custom list), the allowed paths, the daily limit and an end date (UTC). A refused change leaves the access file as it was.

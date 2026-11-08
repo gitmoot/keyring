@@ -257,7 +257,7 @@ func (b *Backend) rows() ([]keyRow, error) {
 		sort.Strings(row.Projects)
 		full := map[string]bool{}
 		for role, r := range cfg.Roles {
-			for sname, acc := range r.Access {
+			for sname, acc := range cfg.Grants(r) {
 				if services[sname] {
 					if _, seen := full[role]; !seen {
 						full[role] = true

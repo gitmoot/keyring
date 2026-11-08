@@ -134,7 +134,9 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{if .Requests}}<h2 class="section">Waiting for you</h2>
 {{range .Requests}}<form method="post" action="/requests/{{.ID}}" class="card request"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <p class="reqtitle">{{if .Fingerprint}}New agent <b>{{.Role}}</b>{{else}}More access for <b>{{.Role}}</b>{{end}}</p>
-<p>Full access to {{range $i, $s := .Services}}{{if $i}}, {{end}}<span class="chip">{{$s}}</span>{{end}}</p>
+{{if .Services}}<p>Full access to {{range $i, $s := .Services}}{{if $i}}, {{end}}<span class="chip">{{$s}}</span>{{end}}</p>{{end}}
+{{if .Projects}}<p>Full access to the whole project{{if gt (len .Projects) 1}}s{{end}} {{range $i, $p := .Projects}}{{if $i}}, {{end}}<a class="chip" href="/projects/{{$p}}">{{$p}}</a>{{end}}, services added later included</p>
+<p class="hint">To give less, decline and use "Give an agent access" on the project page instead.</p>{{end}}
 {{with .Note}}<p class="mute">“{{.}}”</p>{{end}}
 <p class="hint">Asked from {{.From}}, {{.Filed.Format "2 Jan 15:04"}} UTC</p>
 {{if .Fingerprint}}<p class="hint">Token fingerprint <code class="fp">{{.Fingerprint}}</code></p>{{end}}
@@ -147,7 +149,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{template "thead" .Columns}}
 <tbody>{{range .Rows}}<tr>
 <td class="first"><a class="kname" href="/agents/{{.Role}}">{{.Role}}</a>{{if .Ended}} <span class="pill warn">ended</span>{{end}}</td>
-<td class="chips">{{range .Chips}}<a class="chip {{if .Full}}full{{else if .Ended}}ended{{else}}lim{{end}}" href="/access/{{.Role}}/{{.Service}}" title="{{if .Full}}full access{{else}}{{.Label}}{{end}} · {{.Detail}}">{{.Service}}</a>{{end}}{{if .More}}<a class="chip more" href="/agents/{{.Role}}">+{{.More}} more</a>{{end}}{{if not .Cells}}<span class="mute">no APIs yet</span>{{end}}</td>
+<td class="chips">{{range .Chips}}<a class="chip {{if .Full}}full{{else if .Ended}}ended{{else}}lim{{end}}" href="/access/{{.Role}}/{{.Service}}" title="{{if .Full}}full access{{else}}{{.Label}}{{end}} · {{.Detail}}{{with .Via}} · through project {{.}}{{end}}">{{.Service}}</a>{{end}}{{if .More}}<a class="chip more" href="/agents/{{.Role}}">+{{.More}} more</a>{{end}}{{if not .Cells}}<span class="mute">no APIs yet</span>{{end}}</td>
 <td class="num">{{len .Cells}}</td>
 <td class="num">{{.CallsToday}}</td>
 <td>{{with .LastCall}}{{.}}{{else}}<span class="mute">never</span>{{end}}</td>
@@ -162,6 +164,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="head"><a class="back" href="/agents/{{.Form.Role}}">{{.Form.Role}}</a><h1>{{.Form.Service}}</h1></div>
 <div class="card">
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
+{{with .Via}}<p class="hint">{{$.Form.Role}} can already use this service through its grant for the whole project <a href="/projects/{{.}}">{{.}}</a>. Saving a grant here applies to this service instead of the project grant. To take the access away, remove the project grant on the project page.</p>{{end}}
 <form method="post" action="/access/{{.Form.Role}}/{{.Form.Service}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="switch"><input type="checkbox" name="on" value="yes"{{if .Form.On}} checked{{end}}> <span>{{.Form.Role}} may use {{.Form.Service}}</span></label>
 <details{{if or (ne .Form.Mode "full") (ne .Form.Paths "/") .Form.Daily .Form.Expires}} open{{end}}><summary>{{if and (eq .Form.Mode "full") (eq .Form.Paths "/") (not .Form.Daily) (not .Form.Expires)}}Full access · Limit access{{else}}Limited access{{end}}</summary>
@@ -206,7 +209,8 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <div class="head"><a class="back" href="/access">Agents</a><h1>{{.Role}}</h1>{{if .Ended}}<span class="pill warn">ended</span>{{end}}</div>
 <div class="card"><h2>Services</h2>
-<ul class="grants">{{range .Services}}<li><a class="grant" href="/access/{{$.Role}}/{{.Service}}"><span class="svc">{{.Service}}</span><span class="what">{{.Label}}</span></a></li>{{else}}<li class="mute">None yet.</li>{{end}}</ul>
+{{if .ProjectGrants}}<p>Whole projects, services added later included: {{range $i, $p := .ProjectGrants}}{{if $i}}, {{end}}<a class="chip" href="/projects/{{$p}}">{{$p}}</a>{{end}}</p>{{end}}
+<ul class="grants">{{range .Services}}<li><a class="grant" href="/access/{{$.Role}}/{{.Service}}"><span class="svc">{{.Service}}</span><span class="what">{{.Label}}{{with .Via}} · through project {{.}}{{end}}</span></a></li>{{else}}<li class="mute">None yet.</li>{{end}}</ul>
 {{if .Off}}<form method="get" action="/access/{{.Role}}/-" class="add" data-pathpick><select name="service" aria-label="Add a service"><option value="">Add a service…</option>{{range .Off}}<option>{{.}}</option>{{end}}</select><noscript><button class="ghost">Open</button></noscript></form>{{end}}
 </div>
 <div class="card"><dl><dt>Ends</dt><dd>{{with .Expires}}{{.}}{{else}}never{{end}}</dd><dt>Token file</dt><dd><code>{{.File}}</code></dd></dl></div>
@@ -218,7 +222,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{template "bottom"}}{{end}}
 
 {{define "service"}}{{template "top" .}}
-{{if eq .Notice "saved"}}<p class="notice">Saved. Agents keep their access.</p>{{end}}
+{{if eq .Notice "saved"}}<p class="notice">Saved. Agents with their own grant for this service keep it.</p>{{end}}
 <div class="head"><a class="back" href="/keys/{{.F.Key}}">{{.F.Key}}</a><h1 class="mono">{{.Name}}</h1></div>
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
@@ -231,7 +235,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </dl></div>
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
-<p class="hint">Changes the settings only. Agents who have access to this service keep it, with the same methods, paths and limits. The key is sent to the base URL below, so check it.</p>
+<p class="hint">Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.</p>
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>
@@ -267,7 +271,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{template "bottom"}}{{end}}
 
 {{define "project"}}{{template "top" .}}
-{{if eq .Notice "saved"}}<p class="notice">Saved.</p>{{else if eq .Notice "revoked"}}<p class="notice">Access removed.</p>{{end}}
+{{if eq .Notice "saved"}}<p class="notice">Saved.</p>{{else if eq .Notice "revoked"}}<p class="notice">Access removed.</p>{{else if eq .Notice "granted"}}<p class="notice">Access given.</p>{{end}}
 {{with .ProjectError}}<p class="error">{{.}}</p>{{end}}
 <div class="head"><a class="back" href="/projects">Projects</a><h1 class="mono">{{.Name}}</h1>{{if ne .State "running"}}<span class="pill warn">{{.State}}</span>{{end}}</div>
 {{if ne .State "running"}}<p class="hint">Every call to this project's services is refused ({{.State}}). Keys and access are kept.</p>{{end}}
@@ -277,9 +281,25 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </tbody></table></div>{{else}}<p class="mute">No services. Its settings are kept until you clear them.</p>{{end}}</div>
 <div class="card"><h2>Agents with access</h2>
 {{range .Agents}}<form method="post" action="/projects/{{$.Name}}/revoke" class="grantrow"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="role" value="{{.Role}}">
-<p><a class="chip" href="/agents/{{.Role}}">{{.Role}}</a> {{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</p>
-<details><summary>Remove {{.Role}}'s access to this project</summary><p class="hint">Removes its access to these {{len .Services}} service(s) only. Its access to other services stays.</p>{{template "password" $}}<div class="actions"><button class="danger">Remove access</button></div></details></form>
+<p><a class="chip" href="/agents/{{.Role}}">{{.Role}}</a> {{if .Whole}}whole project, services added later included{{if .Services}}: {{end}}{{end}}{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</p>
+<details><summary>Remove {{.Role}}'s access to this project</summary><p class="hint">Removes its access to this project's services{{if .Whole}} and its grant for the whole project{{end}}. Its access to other services stays.</p>{{template "password" $}}<div class="actions"><button class="danger">Remove access</button></div></details></form>
 {{else}}<p class="mute">No agent has access to this project.</p>{{end}}</div>
+{{if .Roles}}<details class="card"><summary>Give an agent access to this project</summary>
+<form method="post" action="/projects/{{.Name}}/grant"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Agent<select name="role">{{range .Roles}}<option>{{.}}</option>{{end}}</select></label>
+<p class="lbl">Allowed</p>
+<div class="seg" role="radiogroup" aria-label="Allowed methods">
+<label><input type="radio" name="mode" value="read"><span>Read only</span></label>
+<label><input type="radio" name="mode" value="full" checked><span>Full</span></label>
+<label><input type="radio" name="mode" value="custom"><span>Custom</span></label>
+</div>
+<div class="methods">{{range .AllMethods}}<label class="check"><input type="checkbox" name="method" value="{{.}}"> {{.}}</label>{{end}}</div>
+<label>Allowed paths, one per line<textarea name="paths" spellcheck="false" autocapitalize="none">/</textarea></label>
+<div class="two"><label>Daily limit, per service<input name="daily" inputmode="numeric" placeholder="none"></label>
+<label>Ends on (UTC)<input type="date" name="expires"></label></div>
+<label class="check"><input type="checkbox" name="later" value="yes"> Include services added to this project later</label>
+<p class="hint">Without the tick, the agent gets these limits on each of the project's {{len .Services}} current service(s), and a service added later needs its own grant. With it, one grant covers the whole project as it changes. A grant for a single service on the agent's page takes precedence.</p>
+{{template "password" .}}<div class="actions"><button>Give access</button></div></form></details>{{end}}
 <div class="card"><h2>Settings</h2>
 <form method="post" action="/projects/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="check"><input type="checkbox" name="paused" value="yes"{{if .P.Paused}} checked{{end}}> Paused: refuse every call to this project's services</label>

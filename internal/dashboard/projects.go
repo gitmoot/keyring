@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -20,6 +21,7 @@ func registerProjects(b *Backend) {
 	b.Admin.Handle("GET /projects/{name}", b.projectPage)
 	b.Admin.Handle("POST /projects/{name}", b.saveProject)
 	b.Admin.Handle("POST /projects/{name}/revoke", b.revokeProject)
+	b.Admin.Handle("POST /projects/{name}/grant", b.grantProject)
 }
 
 // projectNames lists every project: those services name and those with
@@ -92,6 +94,9 @@ type projectService struct {
 type projectAgent struct {
 	Role     string
 	Services []string
+	// Whole: the agent has a grant for the whole project, services added
+	// later included.
+	Whole bool
 }
 
 type handoverKey struct {
@@ -140,11 +145,12 @@ func (b *Backend) renderProject(w http.ResponseWriter, r *http.Request, sid stri
 	for _, role := range sortedNames(cfg.Roles) {
 		a := projectAgent{Role: role}
 		for _, sname := range services {
-			if _, ok := cfg.Roles[role].Access[sname]; ok {
+			if _, ok := cfg.AccessFor(cfg.Roles[role], sname); ok {
 				a.Services = append(a.Services, sname)
 			}
 		}
-		if len(a.Services) > 0 {
+		_, a.Whole = cfg.Roles[role].Projects[name]
+		if len(a.Services) > 0 || a.Whole {
 			agents = append(agents, a)
 		}
 	}
@@ -168,6 +174,7 @@ func (b *Backend) renderProject(w http.ResponseWriter, r *http.Request, sid stri
 	}
 	b.render(w, status, "project", sid, map[string]any{
 		"Name": name, "State": projectState(cfg, name, now), "P": p, "ExpiresDate": expires,
+		"Roles": sortedNames(cfg.Roles), "AllMethods": fullMethods,
 		"Services": rows, "Agents": agents, "Handover": handover,
 		"Notice": r.URL.Query().Get("done"), "ProjectError": msg,
 	})
@@ -275,7 +282,14 @@ func (b *Backend) revokeProject(w http.ResponseWriter, r *http.Request, sid stri
 			removed = append(removed, sname)
 		}
 	}
-	if len(removed) == 0 {
+	_, whole := rl.Projects[name]
+	if whole {
+		delete(rl.Projects, name)
+		if len(rl.Projects) == 0 {
+			rl.Projects = nil
+		}
+	}
+	if len(removed) == 0 && !whole {
 		b.renderProject(w, r, sid, http.StatusBadRequest, name, role+" has no access to this project.")
 		return
 	}
@@ -286,6 +300,9 @@ func (b *Backend) revokeProject(w http.ResponseWriter, r *http.Request, sid stri
 	}
 	for _, sname := range removed {
 		b.Admin.Audit("access_revoked", sid, map[string]any{"project": name, "service": sname, "role": role})
+	}
+	if whole {
+		b.Admin.Audit("project_access_revoked", sid, map[string]any{"project": name, "role": role})
 	}
 	http.Redirect(w, r, "/projects/"+name+"?done=revoked", http.StatusSeeOther)
 }
@@ -301,4 +318,83 @@ func (b *Backend) storedNames() (map[string]bool, error) {
 		out[n] = true
 	}
 	return out, nil
+}
+
+// grantProject gives one agent access to every service in the project in one
+// step, with the same limits. With "later" it is a single grant for the whole
+// project, which also covers services added to it later; without, it writes
+// an ordinary grant for each service the project has now.
+func (b *Backend) grantProject(w http.ResponseWriter, r *http.Request, sid string) {
+	name := r.PathValue("name")
+	role := r.PostFormValue("role")
+	later := r.PostFormValue("later") == "yes"
+	f := cellForm{Role: role, On: true, Mode: r.PostFormValue("mode"), Methods: r.PostForm["method"],
+		Paths: r.PostFormValue("paths"), Daily: r.PostFormValue("daily"), Expires: r.PostFormValue("expires")}
+	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
+		b.renderProject(w, r, sid, http.StatusForbidden, name, "Enter your dashboard password to give access.")
+		return
+	}
+	acc, err := f.access(b.Now())
+	if err != nil {
+		b.renderProject(w, r, sid, http.StatusBadRequest, name, err.Error())
+		return
+	}
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	access, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	cfg := &policy.Config{Rules: b.rules(), AccessList: access}
+	if !slices.Contains(projectNames(cfg), name) {
+		b.notFound(w, sid)
+		return
+	}
+	rl, ok := access.Roles[role]
+	if !ok {
+		b.renderProject(w, r, sid, http.StatusBadRequest, name, "There is no agent named "+role+". Add it under Agents first.")
+		return
+	}
+	services := projectServices(cfg, name)
+	if !later && len(services) == 0 {
+		b.renderProject(w, r, sid, http.StatusBadRequest, name, "This project has no services yet. Tick \"services added later\" to give access to the whole project.")
+		return
+	}
+	if later {
+		if rl.Projects == nil {
+			rl.Projects = map[string]policy.Access{}
+		}
+		rl.Projects[name] = acc
+	} else {
+		if rl.Access == nil {
+			rl.Access = map[string]policy.Access{}
+		}
+		for _, sname := range services {
+			rl.Access[sname] = acc
+		}
+	}
+	access.Roles[role] = rl
+	if err := cfg.Validate(); err != nil {
+		b.renderProject(w, r, sid, http.StatusBadRequest, name, err.Error())
+		return
+	}
+	if err := b.saveAndApply(access); err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	fields := map[string]any{"project": name, "role": role, "methods": acc.Methods, "paths": acc.Paths, "daily_requests": acc.DailyRequests}
+	if acc.Expires != nil {
+		fields["expires"] = acc.Expires.Format(time.DateOnly)
+	}
+	if later {
+		b.Admin.Audit("project_access_granted", sid, fields)
+	} else {
+		for _, sname := range services {
+			f := maps.Clone(fields)
+			f["service"] = sname
+			b.Admin.Audit("access_changed", sid, f)
+		}
+	}
+	http.Redirect(w, r, "/projects/"+name+"?done=granted", http.StatusSeeOther)
 }

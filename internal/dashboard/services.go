@@ -180,6 +180,26 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		updated.FixedHeaders = fixed
 	}
 	changed := changedFields(cur, updated)
+	// Moving a service between projects changes which whole-project grants
+	// reach it: name the agents that gain or lose access that way (#111).
+	var gained, lost []string
+	if cur.Project != updated.Project {
+		for _, role := range sortedNames(next.Roles) {
+			rl := next.Roles[role]
+			if _, own := rl.Access[name]; own {
+				continue
+			}
+			_, before := rl.Projects[cur.Project]
+			_, after := rl.Projects[updated.Project]
+			before, after = before && cur.Project != "", after && updated.Project != ""
+			switch {
+			case after && !before:
+				gained = append(gained, role)
+			case before && !after:
+				lost = append(lost, role)
+			}
+		}
+	}
 	next.Services[name] = updated
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
@@ -189,7 +209,14 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		b.fail(w, sid, err)
 		return
 	}
-	b.Admin.Audit("service_edited", sid, map[string]any{"service": name, "key": updated.Key, "changed": changed})
+	fields := map[string]any{"service": name, "key": updated.Key, "changed": changed}
+	if len(gained) > 0 {
+		fields["access_gained_by"] = gained
+	}
+	if len(lost) > 0 {
+		fields["access_lost_by"] = lost
+	}
+	b.Admin.Audit("service_edited", sid, fields)
 	http.Redirect(w, r, "/services/"+name+"?done=saved", http.StatusSeeOther)
 }
 

@@ -24,15 +24,21 @@ import (
 // tokensDir (a new agent), the role's token is made there if it is missing,
 // and only its SHA-256 is sent: the token never leaves this machine. The
 // owner approves the request in the dashboard.
-func fileRequest(upstream, role string, services []string, note, tokensDir string, stdout io.Writer) error {
+func fileRequest(upstream, role string, services, projects []string, note, tokensDir string, stdout io.Writer) error {
 	u, err := relay.CheckUpstream(upstream)
 	if err != nil {
 		return err
 	}
-	if !policy.ValidRoleName(role) || len(services) == 0 {
-		return errors.New("give --role NAME and at least one --service")
+	if !policy.ValidRoleName(role) || len(services)+len(projects) == 0 {
+		return errors.New("give --role NAME and at least one --service or --project")
+	}
+	if services == nil {
+		services = []string{}
 	}
 	body := map[string]any{"role": role, "services": services}
+	if len(projects) > 0 {
+		body["projects"] = projects
+	}
 	if note != "" {
 		body["note"] = note
 	}
@@ -60,7 +66,11 @@ func fileRequest(upstream, role string, services []string, note, tokensDir strin
 	}
 	var out struct{ ID string }
 	_ = json.Unmarshal(answer, &out)
-	fmt.Fprintf(stdout, "request %s filed: %s for %s; the owner approves it under Agents in the dashboard\n", out.ID, strings.Join(services, ", "), role)
+	asked := append([]string(nil), services...)
+	for _, p := range projects {
+		asked = append(asked, "project "+p)
+	}
+	fmt.Fprintf(stdout, "request %s filed: %s for %s; the owner approves it under Agents in the dashboard\n", out.ID, strings.Join(asked, ", "), role)
 	return nil
 }
 

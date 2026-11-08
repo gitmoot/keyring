@@ -229,7 +229,7 @@ func (h *Handler) fileRequest(w http.ResponseWriter, r *http.Request, snap *snap
 		fail(http.StatusBadRequest, err.Error())
 		return
 	}
-	rec.Status, rec.Role, rec.Note = http.StatusAccepted, filed.Role, "request "+filed.ID+" filed: "+strings.Join(filed.Services, ",")
+	rec.Status, rec.Role, rec.Note = http.StatusAccepted, filed.Role, "request "+filed.ID+" filed: "+strings.Join(append(append([]string(nil), filed.Services...), projectLabels(filed.Projects)...), ",")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": filed.ID, "status": "waiting for the owner to approve it in the dashboard"})
@@ -288,7 +288,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		workspace.WriteError(w, workspace.Failure(http.StatusNotFound, "accounts_unavailable"))
 		return
 	}
-	service, rest, ok := splitPath(r.URL, snap.config.Services, role.Access)
+	service, rest, ok := splitPath(r.URL, snap.config.Services, func(name string) bool {
+		_, granted := snap.config.AccessFor(role, name)
+		return granted
+	})
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
 	var minisignReq minisignRequest
@@ -316,7 +319,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	svc, known := snap.config.Services[service]
-	access, allowed := role.Access[service]
+	access, allowed := snap.config.AccessFor(role, service)
 	if known {
 		// Every audit line for a project's service names the project, the
 		// refusals below included (#111).
@@ -872,7 +875,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 // Google account services also accept spaces (Sheets A1 tab names); other
 // services retain their existing no-whitespace rule. buildOutbound re-escapes
 // the decoded path before sending it upstream.
-func splitPath(u *url.URL, services map[string]policy.Service, grants map[string]policy.Access) (service, rest string, ok bool) {
+func splitPath(u *url.URL, services map[string]policy.Service, granted func(string) bool) (service, rest string, ok bool) {
 	escaped := u.EscapedPath()
 	lower := strings.ToLower(escaped)
 	if !strings.HasPrefix(escaped, "/") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
@@ -887,8 +890,7 @@ func splitPath(u *url.URL, services map[string]policy.Service, grants map[string
 		return service, "", false
 	}
 	// Ungranted names must not reveal their auth kind through a space probe.
-	_, granted := grants[service]
-	allowSpace := granted && services[service].Auth == policy.AuthGcloud
+	allowSpace := granted(service) && services[service].Auth == policy.AuthGcloud
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
 		if c < 0x20 || (c == 0x20 && !allowSpace) || c > 0x7e || c == '%' || c == ';' || c == '\\' {
@@ -1158,4 +1160,13 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // "project_paused" is the stable code; an expired project counts as paused.
 func projectStoppedNote(project, why string) string {
 	return "project_paused: project " + project + " is " + why
+}
+
+// projectLabels names requested projects in an audit note: "project:NAME".
+func projectLabels(projects []string) []string {
+	out := make([]string, len(projects))
+	for i, p := range projects {
+		out[i] = "project:" + p
+	}
+	return out
 }

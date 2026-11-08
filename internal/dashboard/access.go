@@ -48,6 +48,9 @@ type gridCell struct {
 	Role, Service string
 	On, Ended     bool
 	Label, Detail string
+	// Via names the project whose grant gives this access, when the agent has
+	// no grant of its own for the service.
+	Via string
 }
 
 // gridRow is one agent's line in the agents table.
@@ -175,7 +178,7 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	agentCount := func(p string) int {
 		n := 0
 		for _, rl := range cfg.Roles {
-			for svc := range rl.Access {
+			for svc := range cfg.Grants(rl) {
 				if inProject(svc, p) {
 					n++
 					break
@@ -198,9 +201,13 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	for _, role := range sortedNames(cfg.Roles) {
 		rl := cfg.Roles[role]
 		row := gridRow{Role: role, Ended: rl.Expired(now)}
+		grants := cfg.Grants(rl)
 		for _, svc := range services {
 			c := gridCell{Role: role, Service: svc}
-			if acc, ok := rl.Access[svc]; ok {
+			if acc, ok := grants[svc]; ok {
+				if _, own := rl.Access[svc]; !own {
+					c.Via = cfg.Services[svc].Project
+				}
 				c.On, c.Ended = true, row.Ended || acc.Expired(now)
 				c.Label = methodsLabel(acc.Methods)
 				n := count[[2]string{role, svc}]
@@ -217,7 +224,7 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 				}
 			}
 			if c.On {
-				c.Full = isFull(rl.Access[svc]) && !c.Ended
+				c.Full = isFull(grants[svc]) && !c.Ended
 				row.Cells = append(row.Cells, c)
 			}
 		}
@@ -361,7 +368,17 @@ func (b *Backend) cellPage(w http.ResponseWriter, r *http.Request, sid string) {
 }
 
 func (b *Backend) renderCell(w http.ResponseWriter, sid string, status int, f cellForm, msg string) {
-	b.render(w, status, "cell", sid, map[string]any{"Form": f, "Error": msg, "AllMethods": fullMethods})
+	// Via: the agent reaches this service through a whole-project grant.
+	cfg := b.Proxy.Config()
+	via := ""
+	if rl, ok := cfg.Roles[f.Role]; ok {
+		if _, own := rl.Access[f.Service]; !own {
+			if _, ok := cfg.AccessFor(rl, f.Service); ok {
+				via = cfg.Services[f.Service].Project
+			}
+		}
+	}
+	b.render(w, status, "cell", sid, map[string]any{"Form": f, "Error": msg, "AllMethods": fullMethods, "Via": via})
 }
 
 func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
@@ -526,14 +543,19 @@ func (b *Backend) agentPage(w http.ResponseWriter, r *http.Request, sid string) 
 		b.notFound(w, sid)
 		return
 	}
-	type svcRow struct{ Service, Label string }
+	type svcRow struct{ Service, Label, Via string }
+	grants := cfg.Grants(rl)
 	var services []svcRow
-	for _, s := range sortedNames(rl.Access) {
-		services = append(services, svcRow{s, methodsLabel(rl.Access[s].Methods)})
+	for _, s := range sortedNames(grants) {
+		row := svcRow{Service: s, Label: methodsLabel(grants[s].Methods)}
+		if _, own := rl.Access[s]; !own {
+			row.Via = cfg.Services[s].Project
+		}
+		services = append(services, row)
 	}
 	var off []string
 	for _, s := range sortedNames(cfg.Services) {
-		if _, on := rl.Access[s]; !on {
+		if _, on := grants[s]; !on {
 			off = append(off, s)
 		}
 	}
@@ -543,7 +565,8 @@ func (b *Backend) agentPage(w http.ResponseWriter, r *http.Request, sid string) 
 	}
 	b.render(w, http.StatusOK, "agent", sid, map[string]any{
 		"Role": role, "Services": services, "Off": off, "Expires": expires, "Ended": rl.Expired(b.Now()),
-		"File": tokenDir + "/" + role + ".token", "Current": rl.TokenSHA256[:12],
+		"ProjectGrants": sortedNames(rl.Projects),
+		"File":          tokenDir + "/" + role + ".token", "Current": rl.TokenSHA256[:12],
 		"Error": agentErrors[r.URL.Query().Get("error")], "Added": r.URL.Query().Get("done") == "added",
 	})
 }
