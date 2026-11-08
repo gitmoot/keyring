@@ -605,7 +605,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if svc.Auth == policy.AuthAPNs {
 		// The .p8 never leaves: Apple gets a provider token minted from it.
-		token, err := snap.apns[service].token(start)
+		token, err := snap.apns[service].token(h.now)
 		if err != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
 			fail(http.StatusServiceUnavailable, "stored key "+svc.Key+" is not a usable APNs .p8 key; replace it in the dashboard")

@@ -55,14 +55,18 @@ func apnsSigners(config *policy.Config, keys map[string]string, previous map[str
 }
 
 // token returns the cached provider token, minting a new one when there is
-// none or it is apnsTokenAge old.
-func (a *apnsSigner) token(now time.Time) (string, error) {
+// none or it is apnsTokenAge old. clock is read under the lock, so concurrent
+// calls see time move forward and share one token: a request that started
+// earlier but arrives later must not replace a newer token (Apple refuses
+// frequent refreshes).
+func (a *apnsSigner) token(clock func() time.Time) (string, error) {
 	if a == nil || a.key == nil {
 		return "", errAPNsKey
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cached != "" && !now.Before(a.minted) && now.Sub(a.minted) < apnsTokenAge {
+	now := clock()
+	if a.cached != "" && now.Sub(a.minted) < apnsTokenAge && now.Sub(a.minted) > -time.Minute {
 		return a.cached, nil
 	}
 	header, _ := json.Marshal(struct {

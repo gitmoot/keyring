@@ -189,3 +189,37 @@ func TestAPNsUnusableKey(t *testing.T) {
 		t.Fatal("key text in the audit log")
 	}
 }
+
+// Review of #117: requests that started earlier but reach the signer later
+// share the newest token instead of replacing it; many concurrent pushes mint
+// one token. Freshness is judged by the clock at minting, not request start.
+func TestAPNsConcurrentPushesShareOneToken(t *testing.T) {
+	_, value := apnsKey(t)
+	h, rec, _ := apnsHandler(t, value, 0)
+	var mu sync.Mutex
+	clock := time.Now()
+	h.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(time.Second) // every reading is later than the last
+		return clock
+	}
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() { defer wg.Done(); push(h) }()
+	}
+	wg.Wait()
+	first := rec.auth(0)
+	for i := 1; i < rec.count(); i++ {
+		if rec.auth(i) != first {
+			t.Fatalf("push %d used a different token: concurrent pushes replaced the cached one", i)
+		}
+	}
+	// A signer asked with an earlier time than its token's keeps the token.
+	signer := h.snap.Load().apns["api"]
+	before := clock.Add(-30 * time.Second)
+	if tok, err := signer.token(func() time.Time { return before }); err != nil || "bearer "+tok != first {
+		t.Fatal("an earlier-started request replaced the newer token")
+	}
+}
