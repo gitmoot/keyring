@@ -46,8 +46,8 @@ type serviceForm struct {
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
 		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders}
-	for header := range svc.ExtraHeaders {
-		f.ExtraHeaders = append(f.ExtraHeaders, header)
+	for header, key := range svc.ExtraHeaders {
+		f.ExtraHeaders = append(f.ExtraHeaders, header+" ← "+key)
 	}
 	slices.Sort(f.ExtraHeaders)
 	return f
@@ -111,6 +111,9 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		Pasted:  strings.TrimSpace(r.PostFormValue("pasted")),
 	}
 	again := func(status int, msg string) {
+		// Refused pasted settings are not shown again: they may hold a value
+		// pasted by mistake (as Connect already does).
+		f.Pasted = ""
 		if svc, ok := b.Proxy.Config().Services[name]; ok {
 			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
 		}
@@ -122,6 +125,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	}
 	pasted := f.Pasted != ""
 	var fixed map[string]string
+	var extra *map[string]string // nil: keep the stored extra headers
 	if pasted {
 		var a agentSettings
 		dec := json.NewDecoder(strings.NewReader(f.Pasted))
@@ -141,7 +145,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			return
 		}
 		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
-		fixed = a.FixedHeaders
+		fixed, extra = a.FixedHeaders, a.ExtraHeaders
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -178,6 +182,19 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	if pasted {
 		updated.FixedHeaders = fixed
+	}
+	if extra != nil {
+		if msg, err := b.extraHeaderKeys(*extra); err != nil {
+			b.fail(w, sid, err)
+			return
+		} else if msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
+		}
+		updated.ExtraHeaders = nil
+		if len(*extra) > 0 {
+			updated.ExtraHeaders = *extra
+		}
 	}
 	changed := changedFields(cur, updated)
 	// Moving a service between projects changes which whole-project grants
@@ -230,6 +247,7 @@ func changedFields(old, now policy.Service) []string {
 		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
 		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
+		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},
 	} {
 		if c.diff {
 			changed = append(changed, c.name)

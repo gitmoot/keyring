@@ -106,7 +106,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </details>
 <details><summary>Or paste settings from an agent</summary>
 <label>JSON like {"service":"x","base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
-<p class="hint">Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
+<p class="hint">For an API that needs a second secret, add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Connect</button></div>
@@ -231,7 +231,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 {{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
-{{if .F.ExtraHeaders}}<dt>Extra credentials</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
+{{if .F.ExtraHeaders}}<dt>Extra secret headers</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
 </dl></div>
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
@@ -251,7 +251,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <label>Project (optional: a client or engagement this service belongs to; lowercase letters, digits and -)<input name="project" value="{{.F.Project}}" placeholder="e.g. noted" autocapitalize="none" spellcheck="false"></label>
 <details{{if .F.Pasted}} open{{end}}><summary>Or paste settings from an agent</summary>
 <label>JSON like {"base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
-<p class="hint">Replaces every setting above, including the project (include "project" to keep it), and the key stays as chosen. Leave "service" out; a service cannot be renamed here. The test method (shown above) is kept; change a POST test to something else in access.json. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
+<p class="hint">Replaces every setting above, including the project (include "project" to keep it), and the key stays as chosen. Leave "service" out; a service cannot be renamed here. "extra_headers" (header name to the name of another stored key, for example {"Modal-Secret":"MODAL_PROXY_SECRET"}) replaces the extra secret headers; leave it out to keep them, or use {} to remove them. The test method (shown above) is kept; change a POST test to something else in access.json. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Save</button></div>

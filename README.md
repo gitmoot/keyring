@@ -260,6 +260,15 @@ to a distinct store key, not a credential value. For Cloudflare Access, use
 primary credential. Header names are case-insensitive; duplicates, primary
 collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
+From the dashboard: add each value as its own key, open the primary key, choose
+**Connect to a service** and paste the settings with `extra_headers` naming the other
+key. For a Modal web endpoint with a proxy token (`wk-…` and `ws-…`), add keys
+`MODAL_PROXY_ID` and `MODAL_PROXY_SECRET`, then on `MODAL_PROXY_ID` paste
+`{"service":"modal-ocr","base":"https://WORKSPACE--app-web.modal.run","auth":"header","header":"Modal-Key","test_path":"/health","extra_headers":{"Modal-Secret":"MODAL_PROXY_SECRET"}}`.
+The named keys must already have stored values; otherwise the paste is refused,
+and neither the refusal message nor the re-shown form repeats what was pasted. On a service's edit page, pasted settings without
+`extra_headers` keep the stored ones, a new map replaces them and `{}` removes them.
+The audit log names the headers and keys, never values. **Test** sends every secret.
 The proxy replaces caller-supplied values, requires the complete bundle before
 dispatch (503 if a value is missing), and redacts every injected credential.
 A stored key sent in a header (`bearer`, `header` and extra headers) must be a legal
