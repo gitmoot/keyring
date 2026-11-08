@@ -95,6 +95,7 @@ func TestExtraHeaderRefusals(t *testing.T) {
 	for name, extra := range map[string]string{
 		"key without a value":      `{"Modal-Secret":"NO_SUCH_KEY"}`,
 		"a value instead of a key": `{"Modal-Secret":"` + modalSecret + `"}`,
+		"a name-shaped value":      `{"Modal-Secret":"AbcSyntheticCredential0123456789"}`,
 		"Authorization header":     `{"Authorization":"MODAL_PROXY_SECRET"}`,
 		"the main key again":       `{"Modal-Secret":"MODAL_PROXY_ID"}`,
 		"the main header again":    `{"modal-key":"MODAL_PROXY_SECRET"}`,
@@ -104,7 +105,7 @@ func TestExtraHeaderRefusals(t *testing.T) {
 		if w.Code != http.StatusBadRequest || !bytesEqual(e.accessBytes(), before) {
 			t.Errorf("%s: status %d, want 400 and no change", name, w.Code)
 		}
-		if strings.Contains(w.Body.String(), modalSecret) {
+		if strings.Contains(w.Body.String(), modalSecret) || strings.Contains(w.Body.String(), "AbcSyntheticCredential0123456789") {
 			t.Errorf("%s: the refusal echoes a secret value", name)
 		}
 		// The setting is understood and refused for its reason, not as an
@@ -142,6 +143,14 @@ func TestEditExtraHeaders(t *testing.T) {
 	before := e.accessBytes()
 	if w := e.edit("modal-ocr", url.Values{"pasted": {`{` + base + `,"extra_headers":{"Modal-Secret":"NO_SUCH_KEY"}}`}}); w.Code != http.StatusBadRequest || !bytesEqual(e.accessBytes(), before) {
 		t.Fatalf("unknown key on edit: %d", w.Code)
+	}
+	// A secret pasted by mistake, in either shape, is never repeated in the
+	// refusal page (review of #115).
+	for _, mistaken := range []string{"ws-synthetic-review-secret", "AbcSyntheticCredential0123456789"} {
+		w := e.edit("modal-ocr", url.Values{"pasted": {`{` + base + `,"extra_headers":{"Modal-Secret":"` + mistaken + `"}}`}})
+		if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), mistaken) {
+			t.Fatalf("edit refusal %d repeats %q", w.Code, mistaken)
+		}
 	}
 	if w := e.edit("modal-ocr", url.Values{"pasted": {`{` + base + `,"extra_headers":{}}`}}); w.Header().Get("Location") != "/services/modal-ocr?done=saved" || len(extra()) != 0 {
 		t.Fatalf("remove: %d %v", w.Code, extra())

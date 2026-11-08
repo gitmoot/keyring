@@ -265,8 +265,8 @@ From the dashboard: add each value as its own key, open the primary key, choose
 key. For a Modal web endpoint with a proxy token (`wk-…` and `ws-…`), add keys
 `MODAL_PROXY_ID` and `MODAL_PROXY_SECRET`, then on `MODAL_PROXY_ID` paste
 `{"service":"modal-ocr","base":"https://WORKSPACE--app-web.modal.run","auth":"header","header":"Modal-Key","test_path":"/health","extra_headers":{"Modal-Secret":"MODAL_PROXY_SECRET"}}`.
-The named keys must already have stored values; a value pasted in place of a key
-name is refused and not repeated. On a service's edit page, pasted settings without
+The named keys must already have stored values; otherwise the paste is refused,
+and neither the refusal message nor the re-shown form repeats what was pasted. On a service's edit page, pasted settings without
 `extra_headers` keep the stored ones, a new map replaces them and `{}` removes them.
 The audit log names the headers and keys, never values. **Test** sends every secret.
 The proxy replaces caller-supplied values, requires the complete bundle before

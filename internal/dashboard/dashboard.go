@@ -661,7 +661,9 @@ func (b *Backend) extraHeaderKeys(extra map[string]string) (string, error) {
 			return "extra_headers: " + header + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here.", nil
 		}
 		if !stored[key] {
-			return "extra_headers: " + header + " names the key " + key + ", which has no stored value. Add it under Keys first.", nil
+			// The name is not repeated either: an identifier-shaped secret
+			// can pass as a name.
+			return "extra_headers: " + header + " must name a key with a stored value. Add the value under Keys first, then name that key here.", nil
 		}
 	}
 	return "", nil

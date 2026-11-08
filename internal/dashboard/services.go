@@ -111,6 +111,9 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		Pasted:  strings.TrimSpace(r.PostFormValue("pasted")),
 	}
 	again := func(status int, msg string) {
+		// Refused pasted settings are not shown again: they may hold a value
+		// pasted by mistake (as Connect already does).
+		f.Pasted = ""
 		if svc, ok := b.Proxy.Config().Services[name]; ok {
 			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
 		}
