@@ -599,3 +599,45 @@ func TestValidateRoleProjectGrants(t *testing.T) {
 		}
 	}
 }
+
+// An apns service sends its provider token only to Apple's push API and takes
+// no other credential settings; its identity must be Apple's 10-character IDs.
+func TestValidateAPNs(t *testing.T) {
+	good := func() Service {
+		return Service{Base: "https://api.push.apple.com", Key: "APNS_KEY", Auth: AuthAPNs, APNs: &APNs{KeyID: "ABC123DEFG", TeamID: "TEAM456789"}}
+	}
+	for name, mutate := range map[string]func(*Service){
+		"production": func(*Service) {},
+		"sandbox":    func(s *Service) { s.Base = "https://api.sandbox.push.apple.com" },
+		"trailing /": func(s *Service) { s.Base = "https://api.push.apple.com/" },
+	} {
+		s := good()
+		mutate(&s)
+		c := validConfig()
+		c.Services["apns"] = s
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mutate := range map[string]func(*Service){
+		"no apns settings":    func(s *Service) { s.APNs = nil },
+		"lower-case key id":   func(s *Service) { s.APNs.KeyID = "abc123defg" },
+		"short team id":       func(s *Service) { s.APNs.TeamID = "TEAM" },
+		"another host":        func(s *Service) { s.Base = "https://api.push.apple.com.evil.example" },
+		"plain http":          func(s *Service) { s.Base = "http://api.push.apple.com" },
+		"a port":              func(s *Service) { s.Base = "https://api.push.apple.com:2197" },
+		"a base path":         func(s *Service) { s.Base = "https://api.push.apple.com/3" },
+		"a test request":      func(s *Service) { s.TestPath = "/3/device/x" },
+		"a header":            func(s *Service) { s.Header = "X-Key" },
+		"extra secret header": func(s *Service) { s.ExtraHeaders = map[string]string{"X-Other": "OTHER"} },
+		"apns on bearer":      func(s *Service) { s.Auth = AuthBearer },
+	} {
+		s := good()
+		mutate(&s)
+		c := validConfig()
+		c.Services["apns"] = s
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

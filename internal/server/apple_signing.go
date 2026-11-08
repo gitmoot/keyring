@@ -3,10 +3,7 @@ package server
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -89,15 +86,9 @@ func signAppleToken(key *ecdsa.PrivateKey, service policy.Service, role policy.R
 		IssuedAt int64  `json:"iat"`
 		Expires  int64  `json:"exp"`
 	}{issuer, subject, audience, now.Unix(), expires.Unix()})
-	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
-	digest := sha256.Sum256([]byte(unsigned))
-	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	token, err := signES256(key, header, claims)
 	if err != nil {
 		return "", time.Time{}, unavailable
 	}
-	// JOSE uses fixed-width R || S, not ASN.1 DER.
-	var signature [64]byte
-	r.FillBytes(signature[:32])
-	s.FillBytes(signature[32:])
-	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature[:]), expires, nil
+	return token, expires, nil
 }
