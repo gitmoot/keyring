@@ -107,6 +107,11 @@ func TestExtraHeaderRefusals(t *testing.T) {
 		if strings.Contains(w.Body.String(), modalSecret) {
 			t.Errorf("%s: the refusal echoes a secret value", name)
 		}
+		// The setting is understood and refused for its reason, not as an
+		// unknown field.
+		if body := w.Body.String(); strings.Contains(body, "unknown field") || !strings.Contains(body, "extra_headers") {
+			t.Errorf("%s: refusal does not explain the extra header problem", name)
+		}
 	}
 }
 
