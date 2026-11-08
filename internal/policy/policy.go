@@ -50,6 +50,10 @@ const (
 	// AuthEgressProxy opens TCP tunnels through a person's own proxy; the
 	// proxy credential stored under Key goes only to that proxy.
 	AuthEgressProxy = "egress-proxy"
+	// AuthAPNs proxies to Apple Push Notification service with
+	// "authorization: bearer <JWT>", an ES256 provider token minted from the
+	// .p8 key stored under Key; the .p8 never goes upstream.
+	AuthAPNs = "apns"
 )
 
 // Rules is the root-owned rules file: the network boundary. The service can
@@ -298,6 +302,8 @@ type Service struct {
 	EgressProxy *EgressProxy `json:"egress_proxy,omitempty"`
 	// Minisign restricts what a minisign-sign service signs.
 	Minisign *Minisign `json:"minisign,omitempty"`
+	// APNs fixes the public identity of an APNs auth key (auth apns).
+	APNs *APNs `json:"apns,omitempty"`
 
 	base *url.URL
 }
@@ -314,6 +320,16 @@ type AppStoreConnect struct {
 	IssuerID string `json:"issuer_id"`
 	KeyID    string `json:"key_id"`
 }
+
+// APNs fixes the public identity of an Apple push (.p8) key: the token's kid
+// and iss.
+type APNs struct {
+	KeyID  string `json:"key_id"`
+	TeamID string `json:"team_id"`
+}
+
+// apnsID is Apple's 10-character key and team identifier form.
+var apnsID = regexp.MustCompile(`^[A-Z0-9]{10}$`)
 
 // Minisign limits a minisign-sign service: every trusted comment it signs
 // starts with TrustedCommentPrefix (e.g. "herdr-preview "), so the key signs
@@ -1017,7 +1033,7 @@ func (s *Service) validate() error {
 	if s.Auth == AuthGcloudLogin {
 		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
 			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
-			s.AppleAds != nil || s.AppStoreConnect != nil || s.EgressProxy != nil {
+			s.AppleAds != nil || s.AppStoreConnect != nil || s.EgressProxy != nil || s.APNs != nil {
 			return errors.New("Google login requires only the fixed me account and no proxy settings")
 		}
 		s.base = nil
@@ -1067,6 +1083,9 @@ func (s *Service) validate() error {
 	}
 	if s.AppleAds != nil || s.AppStoreConnect != nil {
 		return errors.New("signing identity requires the corresponding sign-only auth")
+	}
+	if s.APNs != nil && s.Auth != AuthAPNs {
+		return errors.New("apns settings require auth apns")
 	}
 	if s.Auth == AuthEgressProxy {
 		return s.validateEgress()
@@ -1133,8 +1152,20 @@ func (s *Service) validate() error {
 		if err := s.OAuth2.validateSignIn(); err != nil {
 			return err
 		}
+	case AuthAPNs:
+		// The provider token is only sent to Apple's push API, production or
+		// sandbox, and the service takes no other credential settings.
+		if s.APNs == nil || !apnsID.MatchString(s.APNs.KeyID) || !apnsID.MatchString(s.APNs.TeamID) {
+			return errors.New("auth apns needs apns settings: key_id and team_id, 10 upper-case letters or digits each")
+		}
+		if u.Scheme != "https" || u.Port() != "" || (u.Host != "api.push.apple.com" && u.Host != "api.sandbox.push.apple.com") || strings.TrimSuffix(u.Path, "/") != "" {
+			return errors.New("auth apns requires base https://api.push.apple.com or https://api.sandbox.push.apple.com")
+		}
+		if s.Header != "" || s.Param != "" || s.TLSPinSHA256 != "" || s.TestPath != "" || s.TestMethod != "" {
+			return errors.New("auth apns takes no header, param, TLS pin or test request")
+		}
 	default:
-		return fmt.Errorf("auth %q: want bearer, header, query, oauth2 or gcloud", s.Auth)
+		return fmt.Errorf("auth %q: want bearer, header, query, oauth2, gcloud or apns", s.Auth)
 	}
 	if s.OAuth2 != nil && s.Auth != AuthOAuth2 {
 		return errors.New("oauth2 settings require auth oauth2")

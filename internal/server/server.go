@@ -86,6 +86,9 @@ type snapshot struct {
 	keys               map[string]string
 	appleAdsKey        *ecdsa.PrivateKey
 	appStoreConnectKey *ecdsa.PrivateKey
+	// apns holds a token minter per apns service; one whose key and identity
+	// are unchanged is carried over by Swap, cached token included.
+	apns map[string]*apnsSigner
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -168,6 +171,11 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 	if svc, ok := config.Services["appstoreconnect"]; ok && svc.Auth == policy.AuthAppStoreConnectSign {
 		snap.appStoreConnectKey = parseAppleSigningKey(keys[svc.Key])
 	}
+	var previous map[string]*apnsSigner
+	if old := h.snap.Load(); old != nil {
+		previous = old.apns
+	}
+	snap.apns = apnsSigners(config, keys, previous)
 	h.snap.Store(snap)
 	h.retainOAuth(config, keys)
 	h.retainGoogle(config)
@@ -595,6 +603,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// masked too in case a service mirrors something unexpected.
 		upstreamKey, alsoRedact = token, []string{refresh, secret}
 	}
+	if svc.Auth == policy.AuthAPNs {
+		// The .p8 never leaves: Apple gets a provider token minted from it.
+		token, err := snap.apns[service].token(h.now)
+		if err != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "stored key "+svc.Key+" is not a usable APNs .p8 key; replace it in the dashboard")
+			return
+		}
+		upstreamKey, alsoRedact = token, []string{key}
+	}
 	header := outboundHeader(r.Header, svc)
 	if svc.Auth == policy.AuthGcloud {
 		account := snap.config.GoogleAccounts[svc.GoogleAccount]
@@ -770,6 +788,8 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 		header.Set(name, value)
 	}
 	switch svc.Auth {
+	case policy.AuthAPNs:
+		header.Set("Authorization", "bearer "+key)
 	case policy.AuthBearer, policy.AuthOAuth2, policy.AuthGcloud:
 		header.Set("Authorization", "Bearer "+key)
 	case policy.AuthHeader:

@@ -322,6 +322,40 @@ changes to an account's own refresh or client secret still respect its gate.
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
+### Apple Push Notification service (APNs)
+
+Auth `apns` proxies push requests to Apple with a provider token minted from an Apple
+push key (`.p8`); the `.p8` itself never leaves the keyring and is never logged.
+
+```json
+"apns": {"base": "https://api.push.apple.com", "key": "TANDEM_APNS_KEY", "auth": "apns",
+         "apns": {"key_id": "ABC123DEFG", "team_id": "TEAM456789"}}
+```
+
+- `base` is exactly `https://api.push.apple.com`, or `https://api.sandbox.push.apple.com`
+  for development builds (use a second service, e.g. `apns-sandbox`, with the same key).
+  No other host, port or path is accepted, nor `header`, `param`, a TLS pin, extra
+  headers or a test request.
+- `key_id` and `team_id` are Apple's 10-character IDs (Certificates, Identifiers & Profiles).
+- Each call carries `authorization: bearer <JWT>`: ES256, header `kid` = key ID, claims
+  `iss` = team ID and `iat` only. One token is reused for 40 minutes, across reloads
+  with the same key, then replaced (Apple accepts tokens up to an hour old and refuses
+  refreshes more often than every 20 minutes). A caller's own `Authorization` is
+  dropped; `apns-*` headers and the JSON body pass through unchanged. The request goes
+  out over HTTP/2, which APNs requires.
+- Import the `.p8` with `keyring set --file` (it is multi-line, so the dashboard's
+  one-line value box cannot take it), as in
+  [the Mac operator instructions](deploy/mac/README.md#apple-ads-signing-upgrade-and-key-import).
+  Then, on the key's dashboard page, **Connect to a service** with pasted settings
+  `{"service":"apns","base":"https://api.push.apple.com","auth":"apns","apns":{"key_id":"…","team_id":"…"}}`.
+- A stored value that is not an ES256 `.p8` gets 503 `stored key NAME is not a usable
+  APNs .p8 key`; nothing is sent and the call is not counted.
+- Grant a role `POST` on path `/3/device`. It calls
+  `POST http://127.0.0.1:7700/<role>/apns/3/device/<device token>` with the usual
+  `apns-topic`, `apns-push-type`, `apns-priority`, `apns-expiration` and
+  `apns-collapse-id` headers; Apple's status, `apns-id` header and JSON `reason` come
+  back unchanged.
+
 ### Projects: a client's services, paused or expired together
 
 Services that belong to one client or engagement can be grouped in a **project** (#111). A service joins one with `"project": "noted"` (lowercase letters, digits and `-`, like a service name); set it on the service's edit page in the dashboard, or in pasted settings. A project exists as soon as a service names it. Services without a project behave exactly as before, and existing access files need no change.

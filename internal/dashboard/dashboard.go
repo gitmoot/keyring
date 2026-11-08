@@ -624,6 +624,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 type connectForm struct {
 	Preset, Service, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
 	FixedHeaders, ExtraHeaders                                                    map[string]string
+	APNs                                                                          *policy.APNs
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -642,6 +643,8 @@ type agentSettings struct {
 	// name of another stored key, never a value. A pointer, so an edit can
 	// tell "left out" (keep) from {} (remove).
 	ExtraHeaders *map[string]string `json:"extra_headers,omitempty"`
+	// APNs is the key and team ID of an Apple push key (auth "apns").
+	APNs *policy.APNs `json:"apns,omitempty"`
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -714,6 +717,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
+		f.APNs = a.APNs
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -741,7 +745,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
