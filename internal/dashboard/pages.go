@@ -9,7 +9,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body>
 <header class="top"><div class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">
 <a class="brand" href="/keys">Keyring</a>
-<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a></nav>
+<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a><a href="/projects"{{if or (eq .Page "projects") (eq .Page "project")}} class="on"{{end}}>Projects</a></nav>
 <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form>
 </div></header><main class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
@@ -20,16 +20,18 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "status"}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}
 
+{{define "projectfilters"}}{{if .}}<nav class="filters" aria-label="Project">{{range .}}<a class="f{{if .On}} on{{end}}" href="{{.Href}}">{{.Label}}{{if ge .Count 0}} <b>{{.Count}}</b>{{end}}</a>{{end}}</nav>{{end}}{{end}}
 {{define "keys"}}{{template "top" .}}
 {{if eq .Notice "deleted"}}<p class="notice">Key deleted.</p>{{end}}
 <div class="bar"><h1>Keys <span class="count">{{len .Rows}}</span></h1>
-<form method="get" action="/keys" class="tsearch">{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{if .Desc}}<input type="hidden" name="desc" value="1">{{end}}<input type="search" name="q" value="{{.Query}}" placeholder="Search keys or APIs" aria-label="Search"></form>
+<form method="get" action="/keys" class="tsearch">{{with .Project}}<input type="hidden" name="project" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{if .Desc}}<input type="hidden" name="desc" value="1">{{end}}<input type="search" name="q" value="{{.Query}}" placeholder="Search keys or APIs" aria-label="Search"></form>
 <a class="btn" href="/new/key">Add key</a></div>
-<nav class="filters" aria-label="Show">{{$q := .Query}}{{range .Filters}}<a class="f{{with .Class}} {{.}}{{end}}{{if .On}} on{{end}}" href="/keys?{{if .ID}}show={{.ID}}{{end}}{{if $q}}{{if .ID}}&amp;{{end}}q={{$q}}{{end}}">{{.Label}} <b>{{.Count}}</b></a>{{end}}</nav>
+{{template "projectfilters" .ProjectFilters}}
+<nav class="filters" aria-label="Show">{{$q := .Query}}{{$p := .Project}}{{range .Filters}}<a class="f{{with .Class}} {{.}}{{end}}{{if .On}} on{{end}}" href="/keys?{{if .ID}}show={{.ID}}{{end}}{{if $q}}{{if .ID}}&amp;{{end}}q={{$q}}{{end}}{{if $p}}{{if or .ID $q}}&amp;{{end}}project={{$p}}{{end}}">{{.Label}} <b>{{.Count}}</b></a>{{end}}</nav>
 <div class="tablewrap"><table class="t">
 {{template "thead" .Columns}}
 <tbody>{{range .Rows}}<tr>
-<td class="first"><a class="kname" href="/keys/{{.Name}}">{{.Name}}</a></td>
+<td class="first"><a class="kname" href="/keys/{{.Name}}">{{.Name}}</a>{{range .Projects}} <a class="chip" href="/projects/{{.}}">{{.}}</a>{{end}}</td>
 <td>{{if .Services}}{{.Provider}}<div class="sub">{{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</div>{{else}}<a class="sub link" href="/keys/{{.Name}}">not connected · connect</a>{{end}}</td>
 <td>{{template "status" .}}</td>
 <td class="chips">{{range .Grants}}<a class="chip {{if .Full}}full{{else}}lim{{end}}" href="/agents/{{.Role}}" title="{{if .Full}}full access{{else}}limited access{{end}}">{{.Role}}</a>{{else}}<span class="mute">nobody</span>{{end}}</td>
@@ -140,6 +142,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="actions"><button name="answer" value="approve">Approve</button><button class="ghost" name="answer" value="decline">Decline</button></div>
 </form>{{end}}{{end}}
 <div class="bar"><h1>Agents <span class="count">{{len .Rows}}</span></h1><a class="btn" href="/new/agent">Add agent</a></div>
+{{template "projectfilters" .ProjectFilters}}
 <div class="tablewrap"><table class="t">
 {{template "thead" .Columns}}
 <tbody>{{range .Rows}}<tr>
@@ -220,7 +223,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
 <dt>Base URL</dt><dd class="mono">{{if .F.Base}}{{.F.Base}}{{else}}<span class="mute">none</span>{{end}}</dd>
-<dt>Project</dt><dd>{{with .F.Project}}<span class="chip">{{.}}</span>{{if $.ProjectStopped}} <span class="pill warn">{{$.ProjectStopped}}</span>{{end}}{{else}}<span class="mute">none</span>{{end}}</dd>
+<dt>Project</dt><dd>{{with .F.Project}}<a class="chip" href="/projects/{{.}}">{{.}}</a>{{if $.ProjectStopped}} <span class="pill warn">{{$.ProjectStopped}}</span>{{end}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 {{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
@@ -250,5 +253,43 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="actions"><button>Save</button></div>
 </form></div>
 {{else}}<div class="card"><p class="mute">This is a {{.Kind}} service. It carries settings this form does not show, so it is changed in access.json, not here.</p></div>{{end}}
+{{template "bottom"}}{{end}}
+
+{{define "projects"}}{{template "top" .}}
+<div class="bar"><h1>Projects <span class="count">{{len .Projects}}</span></h1></div>
+{{if .Projects}}<div class="tablewrap"><table class="t"><thead><tr><th>Project</th><th>State</th><th class="num">Services</th><th>Ends</th><th>Keys</th></tr></thead><tbody>
+{{range .Projects}}<tr><td class="first"><a class="kname" href="/projects/{{.Name}}">{{.Name}}</a></td>
+<td>{{if eq .State "running"}}running{{else}}<span class="pill warn">{{.State}}</span>{{end}}</td>
+<td class="num">{{.Services}}</td><td class="mute">{{with .Expires}}{{.}}{{else}}—{{end}}</td><td>{{if .ClientOwned}}client-owned{{else}}<span class="mute">—</span>{{end}}</td></tr>{{end}}
+</tbody></table></div>
+{{else}}<p class="mute">No projects yet.</p>{{end}}
+<p class="hint">A project groups a client's services. Put a service in one on its page (Keys, the key, the service, then Project).</p>
+{{template "bottom"}}{{end}}
+
+{{define "project"}}{{template "top" .}}
+{{if eq .Notice "saved"}}<p class="notice">Saved.</p>{{else if eq .Notice "revoked"}}<p class="notice">Access removed.</p>{{end}}
+{{with .ProjectError}}<p class="error">{{.}}</p>{{end}}
+<div class="head"><a class="back" href="/projects">Projects</a><h1 class="mono">{{.Name}}</h1>{{if ne .State "running"}}<span class="pill warn">{{.State}}</span>{{end}}</div>
+{{if ne .State "running"}}<p class="error">Every call to this project's services is refused ({{.State}}). Keys and access are kept.</p>{{end}}
+<div class="card"><h2>Services</h2>
+{{if .Services}}<div class="tablewrap"><table class="t"><thead><tr><th>Service</th><th>Key</th><th>API</th><th>Last used</th><th class="num">Calls today</th></tr></thead><tbody>
+{{range .Services}}<tr><td class="first"><a class="kname" href="/services/{{.Name}}">{{.Name}}</a></td><td><a href="/keys/{{.Key}}">{{.Key}}</a></td><td>{{.Provider}}</td><td>{{with .LastUsed}}{{.}}{{else}}<span class="mute">never</span>{{end}}</td><td class="num">{{.CallsToday}}</td></tr>{{end}}
+</tbody></table></div>{{else}}<p class="mute">No services. Its settings are kept until you clear them.</p>{{end}}</div>
+<div class="card"><h2>Agents with access</h2>
+{{range .Agents}}<form method="post" action="/projects/{{$.Name}}/revoke" class="grantrow"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="role" value="{{.Role}}">
+<p><a class="chip" href="/agents/{{.Role}}">{{.Role}}</a> {{range $i, $s := .Services}}{{if $i}}, {{end}}{{$s}}{{end}}</p>
+<details><summary>Remove {{.Role}}'s access to this project</summary><p class="hint">Removes its access to these {{len .Services}} service(s) only. Its access to other services stays.</p>{{template "password" $}}<div class="actions"><button class="danger">Remove access</button></div></details></form>
+{{else}}<p class="mute">No agent has access to this project.</p>{{end}}</div>
+<div class="card"><h2>Settings</h2>
+<form method="post" action="/projects/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label class="check"><input type="checkbox" name="paused" value="yes"{{if .P.Paused}} checked{{end}}> Paused: refuse every call to this project's services</label>
+<label>Ends (optional; from the start of this day, UTC, the project counts as paused)<input type="date" name="expires" value="{{.ExpiresDate}}"></label>
+<label class="check"><input type="checkbox" name="client_owned" value="yes"{{if .P.ClientOwned}} checked{{end}}> Keys belong to the client (shows the handover list)</label>
+{{template "password" .}}<div class="actions"><button>Save</button></div></form></div>
+{{if .P.ClientOwned}}<div class="card"><h2>Handover: keys to rotate when the engagement ends</h2>
+{{if .Handover}}<div class="tablewrap"><table class="t"><thead><tr><th>Key</th><th>Added here</th><th>Last replaced</th></tr></thead><tbody>
+{{range .Handover}}<tr><td class="first"><a class="kname" href="/keys/{{.Name}}">{{.Name}}</a>{{if not .HasValue}} <span class="mute">no value</span>{{end}}</td><td>{{.Created}}</td><td>{{.Replaced}}</td></tr>{{end}}
+</tbody></table></div>{{else}}<p class="mute">No keys.</p>{{end}}
+<p class="hint">Ask the client to rotate each key, then replace or delete it here. Values are never shown. "unknown" means the key was added before the dashboard kept that date.</p></div>{{end}}
 {{template "bottom"}}{{end}}
 `))
