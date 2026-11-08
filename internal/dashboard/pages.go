@@ -270,7 +270,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{if eq .Notice "saved"}}<p class="notice">Saved.</p>{{else if eq .Notice "revoked"}}<p class="notice">Access removed.</p>{{end}}
 {{with .ProjectError}}<p class="error">{{.}}</p>{{end}}
 <div class="head"><a class="back" href="/projects">Projects</a><h1 class="mono">{{.Name}}</h1>{{if ne .State "running"}}<span class="pill warn">{{.State}}</span>{{end}}</div>
-{{if ne .State "running"}}<p class="error">Every call to this project's services is refused ({{.State}}). Keys and access are kept.</p>{{end}}
+{{if ne .State "running"}}<p class="hint">Every call to this project's services is refused ({{.State}}). Keys and access are kept.</p>{{end}}
 <div class="card"><h2>Services</h2>
 {{if .Services}}<div class="tablewrap"><table class="t"><thead><tr><th>Service</th><th>Key</th><th>API</th><th>Last used</th><th class="num">Calls today</th></tr></thead><tbody>
 {{range .Services}}<tr><td class="first"><a class="kname" href="/services/{{.Name}}">{{.Name}}</a></td><td><a href="/keys/{{.Key}}">{{.Key}}</a></td><td>{{.Provider}}</td><td>{{with .LastUsed}}{{.}}{{else}}<span class="mute">never</span>{{end}}</td><td class="num">{{.CallsToday}}</td></tr>{{end}}
