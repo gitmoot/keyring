@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func hash(token string) string {
@@ -477,5 +478,66 @@ func TestContainerMode(t *testing.T) {
 	f.Consent.APIAllowSources = []string{"10.0.0.5"}
 	if err := f.Validate(); err == nil {
 		t.Fatal("wildcard consent listen accepted outside container mode")
+	}
+}
+
+// Project names use the service-name characters, both on a service and as a
+// key of the projects settings; a project needs no settings to exist, and a
+// settings entry without services is allowed so removing a project's last
+// service never blocks (#111).
+func TestValidateProjects(t *testing.T) {
+	ok := map[string]func(*Config){
+		"service in a project without settings": func(c *Config) {
+			s := c.Services["openrouter"]
+			s.Project = "noted"
+			c.Services["openrouter"] = s
+		},
+		"settings for a project with no services": func(c *Config) {
+			c.Projects = map[string]Project{"old-client": {Paused: true}}
+		},
+		"no projects at all": func(c *Config) {},
+	}
+	for name, mutate := range ok {
+		c := validConfig()
+		mutate(c)
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	bad := map[string]func(*Config){
+		"upper-case project on a service": func(c *Config) {
+			s := c.Services["openrouter"]
+			s.Project = "NOTED"
+			c.Services["openrouter"] = s
+		},
+		"space in a project on a service": func(c *Config) {
+			s := c.Services["openrouter"]
+			s.Project = "noted ae"
+			c.Services["openrouter"] = s
+		},
+		"project setting name with a dot": func(c *Config) { c.Projects = map[string]Project{"noted.ae": {}} },
+		"project setting name empty":      func(c *Config) { c.Projects = map[string]Project{"": {}} },
+	}
+	for name, mutate := range bad {
+		c := validConfig()
+		mutate(c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "project") {
+			t.Errorf("%s: err = %v, want a project error", name, err)
+		}
+	}
+}
+
+func TestProjectStopped(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	before, after := now.Add(-time.Second), now.Add(time.Second)
+	a := AccessList{Projects: map[string]Project{
+		"paused": {Paused: true}, "ended": {Expires: &before}, "endsnow": {Expires: &now}, "later": {Expires: &after},
+	}}
+	for project, want := range map[string]string{
+		"": "", "paused": "paused", "ended": "expired", "endsnow": "expired", "later": "", "nosettings": "",
+	} {
+		if got := a.ProjectStopped(Service{Project: project}, now); got != want {
+			t.Errorf("project %q: %q, want %q", project, got, want)
+		}
 	}
 }

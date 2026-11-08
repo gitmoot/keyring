@@ -178,6 +178,8 @@ type auditRecord struct {
 	Source  string `json:"source"`
 	Role    string `json:"role,omitempty"`
 	Service string `json:"service,omitempty"`
+	// Project is the service's project, if it has one (#111).
+	Project string `json:"project,omitempty"`
 	Method  string `json:"method"`
 	Path    string `json:"path,omitempty"`
 	Status  int    `json:"status"`
@@ -315,12 +317,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	svc, known := snap.config.Services[service]
 	access, allowed := role.Access[service]
+	if known {
+		// Every audit line for a project's service names the project, the
+		// refusals below included (#111).
+		rec.Project = svc.Project
+	}
 	if !known || !allowed {
 		fail(http.StatusForbidden, "role may not use this service")
 		return
 	}
 	if access.Expired(start) {
 		fail(http.StatusForbidden, "access to this service expired")
+		return
+	}
+	// A paused or expired project refuses every call to its services before
+	// any key is used or any quota is spent; keys and access stay as they are.
+	if why := snap.config.ProjectStopped(svc, start); why != "" {
+		fail(http.StatusForbidden, projectStoppedNote(svc.Project, why))
 		return
 	}
 	if signing {
@@ -791,6 +804,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	if svc.TestPath == "" {
 		return 0, errors.New("the service has no test request")
 	}
+	if why := h.snap.Load().config.ProjectStopped(svc, h.now()); why != "" {
+		return 0, errors.New(projectStoppedNote(svc.Project, why))
+	}
 	snap := h.snap.Load()
 	if svc.Auth == policy.AuthOAuth2 {
 		_, secret := oauthSecrets(svc, snap.keys)
@@ -1136,4 +1152,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// projectStoppedNote is the fixed refusal for a call to a stopped project.
+// "project_paused" is the stable code; an expired project counts as paused.
+func projectStoppedNote(project, why string) string {
+	return "project_paused: project " + project + " is " + why
 }

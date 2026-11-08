@@ -313,6 +313,24 @@ changes to an account's own refresh or client secret still respect its gate.
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
+### Projects: a client's services, paused or expired together
+
+Services that belong to one client or engagement can be grouped in a **project** (#111). A service joins one with `"project": "noted"` (lowercase letters, digits and `-`, like a service name); set it on the service's edit page in the dashboard, or in pasted settings. A project exists as soon as a service names it. Services without a project behave exactly as before, and existing access files need no change.
+
+Project settings, all optional, go in the access file under `projects`:
+
+```json
+"projects": {
+  "noted": {"paused": true, "expires": "2027-03-31T00:00:00Z", "client_owned": true}
+}
+```
+
+- `paused`: every call to the project's services is refused with **403 `project_paused: project noted is paused`**, before any key is used, any quota spent or anything sent. Keys and agent access stay as they are; removing `paused` restores everything.
+- `expires`: from that moment the project counts as paused (`project noted is expired`) until the date is moved or removed.
+- `client_owned`: marks the project's keys as belonging to the client. It changes no call today; it is stored for the dashboard's project page and handover list, which come next.
+
+The dashboard Test button refuses a stopped project the same way. Every audit line for a project's service carries `"project"`. A `projects` entry without services is allowed, so removing a project's last service never blocks. Apply changes with a reload (SIGHUP), as for any access-file edit. A keyring older than v0.14.5 refuses an access file that uses `project` or `projects`, so take them out before downgrading.
+
 ### OAuth services with refresh tokens
 
 Google (Gmail, Drive, Sheets, Calendar) and similar APIs give a long-lived refresh token and access tokens that expire after about an hour. A service with `"auth": "oauth2"` stores the refresh token under its `key`; the keyring mints access tokens from it and sends `Authorization: Bearer <access token>`:

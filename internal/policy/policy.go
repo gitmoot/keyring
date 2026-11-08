@@ -154,6 +154,36 @@ func (a *Consent) APITokenMatches(token string) bool {
 type AccessList struct {
 	Services map[string]Service `json:"services"`
 	Roles    map[string]Role    `json:"roles"`
+	// Projects holds the settings of projects that need any: pause, expiry,
+	// client ownership. A project exists as soon as a service names it; one
+	// without settings is simply running (#111).
+	Projects map[string]Project `json:"projects,omitempty"`
+}
+
+// Project groups services that belong to one client or engagement. Pausing it,
+// or letting it expire, refuses every call to its services without deleting
+// any key or access.
+type Project struct {
+	Paused      bool       `json:"paused,omitempty"`
+	Expires     *time.Time `json:"expires,omitempty"`
+	ClientOwned bool       `json:"client_owned,omitempty"`
+}
+
+// ProjectStopped reports why calls to svc are refused at now: "" when the
+// service has no project or its project is running, otherwise "paused" or
+// "expired".
+func (a AccessList) ProjectStopped(svc Service, now time.Time) string {
+	if svc.Project == "" {
+		return ""
+	}
+	p := a.Projects[svc.Project]
+	switch {
+	case p.Paused:
+		return "paused"
+	case p.Expires != nil && !now.Before(*p.Expires):
+		return "expired"
+	}
+	return ""
 }
 
 // Config is the rules and the access list together, validated.
@@ -220,9 +250,11 @@ type Service struct {
 	// ExtraHeaders maps additional upstream credential headers to store key names.
 	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
 	// FixedHeaders contains literal nonsecret constants, never store key names.
-	FixedHeaders  map[string]string `json:"fixed_headers,omitempty"`
-	Param         string            `json:"param,omitempty"`
-	GoogleAccount string            `json:"google_account,omitempty"`
+	FixedHeaders map[string]string `json:"fixed_headers,omitempty"`
+	// Project names the project the service belongs to, if any (#111).
+	Project       string `json:"project,omitempty"`
+	Param         string `json:"param,omitempty"`
+	GoogleAccount string `json:"google_account,omitempty"`
 	// TestMethod and TestPath make a harmless request that shows whether the
 	// key works (the dashboard's Test button). TestPath may carry a query.
 	TestMethod      string           `json:"test_method,omitempty"`
@@ -731,9 +763,17 @@ func (c *Config) Validate() error {
 	if err := c.validateGoogleAccounts(); err != nil {
 		return err
 	}
+	for name := range c.Projects {
+		if !serviceName.MatchString(name) {
+			return fmt.Errorf("project %q: use lowercase letters, digits and -", name)
+		}
+	}
 	for name, svc := range c.Services {
 		if !serviceName.MatchString(name) {
 			return fmt.Errorf("service %q: use lowercase letters, digits and -", name)
+		}
+		if svc.Project != "" && !serviceName.MatchString(svc.Project) {
+			return fmt.Errorf("service %s: project %q: use lowercase letters, digits and -", name, svc.Project)
 		}
 		if svc.Auth == AuthAppleAdsSign && name != "apple-ads" {
 			return errors.New("apple-ads-sign requires service name apple-ads")
