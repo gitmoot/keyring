@@ -243,3 +243,59 @@ func TestEditShowsAndKeepsTheTestMethod(t *testing.T) {
 		t.Fatalf("the saved page does not show the method with the new path:\n%s", page)
 	}
 }
+
+// A service is put into a project from its edit page, typed or pasted, and
+// connected straight into one from pasted settings; grants are untouched and
+// the page shows when the project is paused (#111).
+func TestServiceProjectFromTheDashboard(t *testing.T) {
+	e := newEnv(t)
+	grants := e.proxy.Config().Roles["phobos"].Access
+	base := e.proxy.Config().Services["api"].Base
+
+	w := e.edit("api", url.Values{"base": {base}, "auth": {"bearer"}, "test_path": {"/v1/check"}, "project": {"noted"}})
+	if w.Header().Get("Location") != "/services/api?done=saved" || e.proxy.Config().Services["api"].Project != "noted" {
+		t.Fatalf("typed project: %d %s / %+v", w.Code, w.Body.String(), e.proxy.Config().Services["api"])
+	}
+	if !reflect.DeepEqual(e.proxy.Config().Roles["phobos"].Access, grants) {
+		t.Fatal("moving a service into a project changed an agent's access")
+	}
+	if !strings.Contains(e.audit.String(), `"changed":["project"]`) {
+		t.Fatalf("audit does not name the project change: %s", e.audit.String())
+	}
+	if page := e.request("GET", "/services/api", nil).Body.String(); !strings.Contains(page, `<span class="chip">noted</span>`) || !strings.Contains(page, `name="project" value="noted"`) {
+		t.Fatalf("service page does not show the project:\n%s", page)
+	}
+	// Invalid name refused, nothing changed.
+	before := e.accessBytes()
+	if w := e.edit("api", url.Values{"base": {base}, "auth": {"bearer"}, "project": {"Noted AE"}}); w.Code != http.StatusBadRequest || !bytes.Equal(e.accessBytes(), before) {
+		t.Fatalf("bad project name: %d", w.Code)
+	}
+	// Pasted settings without "project" take the service out of it, as the page says.
+	if w := e.edit("api", url.Values{"pasted": {`{"base":"` + base + `","auth":"bearer"}`}}); w.Header().Get("Location") != "/services/api?done=saved" || e.proxy.Config().Services["api"].Project != "" {
+		t.Fatalf("pasted without project: %d / %+v", w.Code, e.proxy.Config().Services["api"])
+	}
+	if w := e.edit("api", url.Values{"pasted": {`{"base":"` + base + `","auth":"bearer","project":"noted"}`}}); w.Header().Get("Location") != "/services/api?done=saved" || e.proxy.Config().Services["api"].Project != "noted" {
+		t.Fatalf("pasted with project: %d / %+v", w.Code, e.proxy.Config().Services["api"])
+	}
+	// Connect from pasted settings puts a new service straight in a project.
+	_, w = e.addAndConnect("NOTED_STRIPE", "sk-noted-test-0123456789", url.Values{
+		"pasted": {`{"service":"noted-stripe-test","base":"https://api.stripe.com","auth":"bearer","project":"noted"}`}})
+	if w.Header().Get("Location") != "/keys/NOTED_STRIPE?done=connected" || e.proxy.Config().Services["noted-stripe-test"].Project != "noted" {
+		t.Fatalf("connect into a project: %d %s", w.Code, w.Body.String())
+	}
+	// A paused project shows on the service page.
+	access, _ := policy.LoadAccess(e.proxy.Config().AccessFile)
+	access.Projects = map[string]policy.Project{"noted": {Paused: true}}
+	cfg, err := policy.SaveAccess(e.proxy.Config().Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(cfg, keys)
+	if page := e.request("GET", "/services/api", nil).Body.String(); !strings.Contains(page, `<span class="pill warn">paused</span>`) {
+		t.Fatalf("a paused project is not shown:\n%s", page)
+	}
+	if e.proxyCall() != http.StatusForbidden {
+		t.Fatal("a call to a service in a paused project was not refused")
+	}
+}

@@ -38,14 +38,14 @@ func editableService(svc policy.Service) bool {
 // does not change: fixed headers (changed by pasting JSON) and the names of
 // the extra credential headers (never their values).
 type serviceForm struct {
-	Name, Key, Base, Auth, Header, Param, TestPath, TLSPin, Pasted string
-	FixedHeaders                                                   map[string]string
-	ExtraHeaders                                                   []string
+	Name, Key, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
+	FixedHeaders                                                            map[string]string
+	ExtraHeaders                                                            []string
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
-		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, FixedHeaders: svc.FixedHeaders}
+		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders}
 	for header := range svc.ExtraHeaders {
 		f.ExtraHeaders = append(f.ExtraHeaders, header)
 	}
@@ -97,7 +97,7 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	}
 	b.render(w, status, "service", sid, map[string]any{
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
-		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method,
+		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
 	})
 }
 
@@ -107,7 +107,8 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		Name: name, Key: strings.TrimSpace(r.PostFormValue("key")), Base: strings.TrimSpace(r.PostFormValue("base")),
 		Auth: r.PostFormValue("auth"), Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
 		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")),
-		Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
+		Project: strings.TrimSpace(r.PostFormValue("project")),
+		Pasted:  strings.TrimSpace(r.PostFormValue("pasted")),
 	}
 	again := func(status int, msg string) {
 		if svc, ok := b.Proxy.Config().Services[name]; ok {
@@ -139,7 +140,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			again(http.StatusBadRequest, "The pasted settings name another service. A service cannot be renamed here; leave \"service\" out or use "+name+".")
 			return
 		}
-		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
+		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
 		fixed = a.FixedHeaders
 	}
 	b.Mu.Lock()
@@ -174,7 +175,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	// the settings it does not show (extra credential headers) survive.
 	updated := cur
 	updated.Base, updated.Key, updated.Auth, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Header, f.Param
-	updated.TestPath, updated.TLSPinSHA256 = f.TestPath, f.TLSPin
+	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	if pasted {
 		updated.FixedHeaders = fixed
 	}
@@ -201,7 +202,7 @@ func changedFields(old, now policy.Service) []string {
 	}{
 		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
-		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
+		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
 	} {
 		if c.diff {
 			changed = append(changed, c.name)
