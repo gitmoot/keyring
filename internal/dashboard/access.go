@@ -164,6 +164,36 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 		}
 	}
 	services := sortedNames(cfg.Services)
+	query := r.URL.Query()
+	project := query.Get("project")
+	inProject := func(svc, p string) bool {
+		if p == "-" {
+			return cfg.Services[svc].Project == ""
+		}
+		return cfg.Services[svc].Project == p
+	}
+	agentCount := func(p string) int {
+		n := 0
+		for _, rl := range cfg.Roles {
+			for svc := range rl.Access {
+				if inProject(svc, p) {
+					n++
+					break
+				}
+			}
+		}
+		return n
+	}
+	projectChips := projectFilters(cfg, "/access", query, project, agentCount)
+	if project != "" {
+		kept := services[:0:0]
+		for _, svc := range services {
+			if inProject(svc, project) {
+				kept = append(kept, svc)
+			}
+		}
+		services = kept
+	}
 	var rows []gridRow
 	for _, role := range sortedNames(cfg.Roles) {
 		rl := cfg.Roles[role]
@@ -196,6 +226,9 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 		if len(row.Chips) > maxChips {
 			row.More, row.Chips = len(row.Chips)-maxChips, row.Chips[:maxChips]
 		}
+		if project != "" && len(row.Cells) == 0 {
+			continue // no access in this project
+		}
 		if at, ok := lastCall[role]; ok {
 			row.lastCallAt, row.LastCall = at, ago(now, at)
 		}
@@ -216,13 +249,13 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	if err != nil {
 		errMsg = "Access requests cannot be read: " + err.Error()
 	}
-	query := r.URL.Query()
 	by, desc := query.Get("sort"), query.Get("desc") == "1"
 	sortAgents(rows, by, desc)
 	cols := columns("/access", query, by, desc, [][3]string{{"name", "Agent", ""}, {"", "Can use", ""}, {"apis", "APIs", "num"},
 		{"today", "Calls today", "num"}, {"last", "Last call", ""}, {"", "Ends", ""}, {"", "", ""}})
 	b.render(w, http.StatusOK, "access", sid, map[string]any{
 		"Services": services, "Rows": rows, "Notice": notice, "Requests": pending, "Error": errMsg, "Columns": cols,
+		"Project": project, "ProjectFilters": projectChips,
 	})
 }
 

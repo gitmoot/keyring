@@ -262,7 +262,7 @@ func TestServiceProjectFromTheDashboard(t *testing.T) {
 	if !strings.Contains(e.audit.String(), `"changed":["project"]`) {
 		t.Fatalf("audit does not name the project change: %s", e.audit.String())
 	}
-	if page := e.request("GET", "/services/api", nil).Body.String(); !strings.Contains(page, `<span class="chip">noted</span>`) || !strings.Contains(page, `name="project" value="noted"`) {
+	if page := e.request("GET", "/services/api", nil).Body.String(); !strings.Contains(page, `<a class="chip" href="/projects/noted">noted</a>`) || !strings.Contains(page, `name="project" value="noted"`) {
 		t.Fatalf("service page does not show the project:\n%s", page)
 	}
 	// Invalid name refused, nothing changed.

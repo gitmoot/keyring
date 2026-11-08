@@ -52,6 +52,9 @@ type KeyMeta struct {
 	// UpdatedAt is when the value was last added or replaced here (nil for
 	// keys stored before the dashboard kept this).
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	// CreatedAt is when the key was added in the dashboard (nil for keys
+	// added before it kept this, or with keyring set). It survives a replace.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
 }
 
 // rules are the running rules: a SIGHUP may have changed allow_sources since
@@ -75,6 +78,7 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)
 	a.Handle("POST /keys/{name}/connect", b.connectKey)
 	registerServices(b)
+	registerProjects(b)
 	registerAccess(b)
 }
 
@@ -94,6 +98,8 @@ type keyRow struct {
 	Week       [7]int
 	Updated    string
 	HasValue   bool
+	// Projects are the projects of the key's services (#111).
+	Projects []string
 }
 
 // grant is an agent's access to a key, for the chips in the keys table.
@@ -196,7 +202,7 @@ func NoteKeyChange(metaPath, name string, deleted bool, now time.Time) error {
 		delete(meta, name)
 	} else {
 		at := now.UTC()
-		meta[name] = KeyMeta{UpdatedAt: &at}
+		meta[name] = KeyMeta{UpdatedAt: &at, CreatedAt: meta[name].CreatedAt}
 	}
 	return b.saveMeta(meta)
 }
@@ -244,7 +250,11 @@ func (b *Backend) rows() ([]keyRow, error) {
 			if row.Provider == "" {
 				row.Provider = providerOf(cfg.Services[sname])
 			}
+			if p := cfg.Services[sname].Project; p != "" && !slices.Contains(row.Projects, p) {
+				row.Projects = append(row.Projects, p)
+			}
 		}
+		sort.Strings(row.Projects)
 		full := map[string]bool{}
 		for role, r := range cfg.Roles {
 			for sname, acc := range r.Access {
@@ -411,7 +421,7 @@ func columns(base string, q url.Values, by string, desc bool, cols [][3]string) 
 		col := column{ID: c[0], Label: c[1], Class: c[2]}
 		if col.ID != "" {
 			v := url.Values{}
-			for _, k := range []string{"q", "show"} { // not done= or error=: a notice shows once
+			for _, k := range []string{"q", "show", "project"} { // not done= or error=: a notice shows once
 				if q.Get(k) != "" {
 					v.Set(k, q.Get(k))
 				}
@@ -466,6 +476,25 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 		}
 		rows = kept
 	}
+	project := query.Get("project")
+	projectChips := projectFilters(b.Proxy.Config(), "/keys", query, project, func(p string) int {
+		n := 0
+		for _, row := range rows {
+			if keyInProject(row, p) {
+				n++
+			}
+		}
+		return n
+	})
+	if project != "" {
+		kept := rows[:0]
+		for _, row := range rows {
+			if keyInProject(row, project) {
+				kept = append(kept, row)
+			}
+		}
+		rows = kept
+	}
 	show := query.Get("show")
 	filters := keyFilters(rows, show)
 	kept := rows[:0]
@@ -512,7 +541,8 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Name < accounts[j].Name })
 	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Show": show, "Sort": by, "Desc": desc,
-		"GoogleAccounts": accounts, "Filters": filters, "Columns": cols, "Notice": query.Get("done")})
+		"GoogleAccounts": accounts, "Filters": filters, "Columns": cols, "Notice": query.Get("done"),
+		"Project": project, "ProjectFilters": projectChips})
 }
 
 func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string) {
@@ -583,7 +613,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	// Only the date: a failure here leaves the key stored and working.
 	if meta, err := b.loadMeta(); err == nil {
 		now := b.Now().UTC()
-		meta[name] = KeyMeta{UpdatedAt: &now}
+		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now}
 		_ = b.saveMeta(meta)
 	}
 	b.Admin.Audit("key_added", sid, map[string]any{"key": name})
@@ -807,7 +837,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	meta, err := b.loadMeta()
 	if err == nil {
-		m.LeakedAt, m.UpdatedAt = meta[name].LeakedAt, meta[name].UpdatedAt
+		m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
 		meta[name] = m
 		err = b.saveMeta(meta)
 	}
@@ -851,7 +881,7 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	meta, err := b.loadMeta()
 	if err == nil {
 		now := b.Now().UTC()
-		meta[name] = KeyMeta{UpdatedAt: &now} // new value: not tested, no longer leaked
+		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: meta[name].CreatedAt} // new value: not tested, no longer leaked
 		err = b.saveMeta(meta)
 	}
 	if err == nil {
@@ -994,4 +1024,49 @@ func (b *Backend) unknownKey(w http.ResponseWriter, r *http.Request, sid string,
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// keyInProject reports whether a key belongs in a project filter: "-" is the
+// keys with no project (personal), otherwise keys a service of that project uses.
+func keyInProject(row keyRow, project string) bool {
+	if project == "-" {
+		return len(row.Projects) == 0
+	}
+	return slices.Contains(row.Projects, project)
+}
+
+// projectFilter is one chip of the project filter row.
+type projectFilter struct {
+	Label, Href string
+	Count       int
+	On          bool
+}
+
+// projectFilters builds the project chips: All, Personal (no project) and one
+// per project, each keeping the page's other filters and sort.
+func projectFilters(cfg *policy.Config, base string, q url.Values, on string, count func(string) int) []projectFilter {
+	names := projectNames(cfg)
+	if len(names) == 0 {
+		return nil
+	}
+	link := func(project string) string {
+		v := url.Values{}
+		for _, k := range []string{"q", "show", "sort", "desc"} {
+			if q.Get(k) != "" {
+				v.Set(k, q.Get(k))
+			}
+		}
+		if project != "" {
+			v.Set("project", project)
+		}
+		if len(v) == 0 {
+			return base
+		}
+		return base + "?" + v.Encode()
+	}
+	out := []projectFilter{{Label: "All projects", Href: link(""), On: on == "", Count: -1}, {Label: "Personal", Href: link("-"), On: on == "-", Count: count("-")}}
+	for _, name := range names {
+		out = append(out, projectFilter{Label: name, Href: link(name), On: on == name, Count: count(name)})
+	}
+	return out
 }

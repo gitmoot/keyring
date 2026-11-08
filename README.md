@@ -327,7 +327,14 @@ Project settings, all optional, go in the access file under `projects`:
 
 - `paused`: every call to the project's services is refused with **403 `project_paused: project noted is paused`**, before any key is used, any quota spent or anything sent. Keys and agent access stay as they are; removing `paused` restores everything.
 - `expires`: from that moment the project counts as paused (`project noted is expired`) until the date is moved or removed.
-- `client_owned`: marks the project's keys as belonging to the client. It changes no call today; it is stored for the dashboard's project page and handover list, which come next.
+- `client_owned`: marks the project's keys as belonging to the client. It changes no call; the project page then shows a handover list.
+
+In the dashboard, the **Projects** tab lists every project with its state, and each project's page shows its services (key, API, last use, calls today) and the agents with access. From that page, with the password:
+- **Settings:** pause or resume, set or clear an end date (from the start of that day, UTC, the project counts as paused), and mark the keys client-owned. Saved as `project_changed` in the audit log with what changed.
+- **Remove an agent's access to the project:** takes away its access to every service in the project in one step, and only those; its access elsewhere stays. One `access_revoked` audit line per service.
+- **Handover list** (client-owned projects): each project key with when it was added here and when it was last replaced, for rotating them when the engagement ends. Values are never shown; "unknown" means the key predates the dashboard keeping that date (keys added with `keyring set` also show unknown).
+
+The Keys and Agents pages filter by project: "Personal" is everything outside a project, and the filter is kept by search, status filters and sorting. Each key shows its project.
 
 The dashboard Test button refuses a stopped project the same way. Every audit line for a project's service carries `"project"`. A `projects` entry without services is allowed, so removing a project's last service never blocks. Apply changes with a reload (SIGHUP), as for any access-file edit. A keyring older than v0.14.5 refuses an access file that uses `project` or `projects`, so take them out before downgrading.
 
