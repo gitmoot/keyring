@@ -136,3 +136,35 @@ func TestKeyTestRefusesAStoppedProject(t *testing.T) {
 		t.Fatalf("TestKey on a paused project: err %v, calls %d", err, seen.count())
 	}
 }
+
+// Refusals before the project check (no access to the service, an expired
+// grant) also carry the project, so filtering the log by project finds them
+// (review of #112).
+func TestEarlyRefusalsCarryTheProject(t *testing.T) {
+	up, _ := upstream(t)
+	h, audit := projectHandler(t, up.URL, policy.Project{}, 0)
+	past := time.Now().Add(-time.Hour)
+	cfg := *h.Config()
+	cfg.Roles = map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"api": {Paths: []string{"/"}, Methods: []string{"GET"}, Expires: &past}}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("expired grant: %d", w.Code)
+	}
+	if rec := lastAudit(t, audit); rec.Project != "client" || rec.Note != "access to this service expired" {
+		t.Fatalf("expired-grant audit = %+v", rec)
+	}
+	cfg.Roles = map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{}}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.Swap(&cfg, map[string]string{"API_KEY": testKey})
+	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("no grant: %d", w.Code)
+	}
+	if rec := lastAudit(t, audit); rec.Project != "client" || rec.Note != "role may not use this service" {
+		t.Fatalf("no-grant audit = %+v", rec)
+	}
+}

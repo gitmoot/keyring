@@ -317,6 +317,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	svc, known := snap.config.Services[service]
 	access, allowed := role.Access[service]
+	if known {
+		// Every audit line for a project's service names the project, the
+		// refusals below included (#111).
+		rec.Project = svc.Project
+	}
 	if !known || !allowed {
 		fail(http.StatusForbidden, "role may not use this service")
 		return
@@ -327,7 +332,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A paused or expired project refuses every call to its services before
 	// any key is used or any quota is spent; keys and access stay as they are.
-	rec.Project = svc.Project
 	if why := snap.config.ProjectStopped(svc, start); why != "" {
 		fail(http.StatusForbidden, projectStoppedNote(svc.Project, why))
 		return
