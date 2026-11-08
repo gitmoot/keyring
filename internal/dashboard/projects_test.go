@@ -169,11 +169,12 @@ func TestHandoverList(t *testing.T) {
 	if strings.Contains(page, "sk-") {
 		t.Fatal("a value appears in the handover list")
 	}
-	// Replacing keeps when it was added.
+	// Replacing keeps when it was added: the row still shows both dates, not
+	// "unknown".
 	e.request("POST", "/keys/STRIPE_KEY/replace", url.Values{"value": {"sk-stripe-test-rotated-9876"}, "password": {password}})
-	meta, _ := e.backend.loadMeta()
-	if meta["STRIPE_KEY"].CreatedAt == nil || meta["STRIPE_KEY"].UpdatedAt == nil {
-		t.Fatalf("replace lost the added date: %+v", meta["STRIPE_KEY"])
+	page = e.request("GET", "/projects/noted", nil).Body.String()
+	if !strings.Contains(page, `href="/keys/STRIPE_KEY">STRIPE_KEY</a></td><td>`+today+"</td><td>"+today+"</td>") {
+		t.Fatalf("replace lost the added date:\n%s", page)
 	}
 }
 
