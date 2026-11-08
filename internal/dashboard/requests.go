@@ -55,7 +55,10 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		http.Redirect(w, r, "/access?error=gone", http.StatusSeeOther)
 		return
 	}
-	fields := map[string]any{"request": req.ID, "role": req.Role, "services": req.Services, "from": req.From}
+	fields := map[string]any{"request": req.ID, "role": req.Role, "from": req.From}
+	if len(req.Services) > 0 {
+		fields["services"] = req.Services
+	}
 	if len(req.Projects) > 0 {
 		fields["projects"] = req.Projects
 	}
