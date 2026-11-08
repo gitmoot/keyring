@@ -623,7 +623,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 // connectForm is "Connect to a service" on a key's page.
 type connectForm struct {
 	Preset, Service, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
-	FixedHeaders                                                                  map[string]string
+	FixedHeaders, ExtraHeaders                                                    map[string]string
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -638,6 +638,33 @@ type agentSettings struct {
 	TLSPin       string            `json:"tls_pin_sha256,omitempty"`
 	FixedHeaders map[string]string `json:"fixed_headers,omitempty"`
 	Project      string            `json:"project,omitempty"`
+	// ExtraHeaders sends more secret values with each call: header name ->
+	// name of another stored key, never a value. A pointer, so an edit can
+	// tell "left out" (keep) from {} (remove).
+	ExtraHeaders *map[string]string `json:"extra_headers,omitempty"`
+}
+
+// extraHeaderKeys checks that every key named in extra (header -> key name)
+// has a stored value, and returns the message to show if one does not.
+func (b *Backend) extraHeaderKeys(extra map[string]string) (string, error) {
+	if len(extra) == 0 {
+		return "", nil
+	}
+	stored, err := b.storedNames()
+	if err != nil {
+		return "", err
+	}
+	for _, header := range sortedNames(extra) {
+		key := extra[header]
+		if !store.ValidName(key) {
+			// Never repeat it: it may be a secret pasted by mistake.
+			return "extra_headers: " + header + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here.", nil
+		}
+		if !stored[key] {
+			return "extra_headers: " + header + " names the key " + key + ", which has no stored value. Add it under Keys first.", nil
+		}
+	}
+	return "", nil
 }
 
 // connectFormFor fills the form from a preset for key name.
@@ -682,6 +709,9 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		}
 		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
 		f.FixedHeaders, f.Project = a.FixedHeaders, a.Project
+		if a.ExtraHeaders != nil {
+			f.ExtraHeaders = *a.ExtraHeaders
+		}
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -698,7 +728,18 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusConflict, "A service named "+f.Service+" exists already. Pick another name.")
 		return
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, Project: f.Project}
+	if msg, err := b.extraHeaderKeys(f.ExtraHeaders); err != nil {
+		b.fail(w, sid, err)
+		return
+	} else if msg != "" {
+		again(http.StatusBadRequest, msg)
+		return
+	}
+	var extra map[string]string
+	if len(f.ExtraHeaders) > 0 {
+		extra = f.ExtraHeaders
+	}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
@@ -707,7 +748,11 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.fail(w, sid, err)
 		return
 	}
-	b.Admin.Audit("key_connected", sid, map[string]any{"key": name, "service": f.Service, "base": f.Base})
+	fields := map[string]any{"key": name, "service": f.Service, "base": f.Base}
+	if len(extra) > 0 {
+		fields["extra_headers"] = extra // header and key names only, never values
+	}
+	b.Admin.Audit("key_connected", sid, fields)
 	http.Redirect(w, r, "/keys/"+name+"?done=connected", http.StatusSeeOther)
 }
 
