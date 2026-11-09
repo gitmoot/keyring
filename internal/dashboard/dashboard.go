@@ -62,8 +62,19 @@ type nav struct {
 func (b *Backend) nav() nav {
 	cfg := b.Proxy.Config()
 	n := nav{Agents: len(cfg.Roles), Version: b.Version}
-	if keys, err := store.Load(b.StorePath); err == nil {
-		n.Keys = len(keys)
+	// The same set the Keys page lists: stored values plus keys a service
+	// names that have none yet.
+	if names, err := store.Names(b.StorePath); err == nil {
+		set := map[string]bool{}
+		for _, name := range names {
+			set[name] = true
+		}
+		for _, svc := range cfg.Services {
+			for _, name := range svc.KeyNames() {
+				set[name] = true
+			}
+		}
+		n.Keys = len(set)
 	}
 	now := b.Now()
 	for _, p := range projectNames(cfg) {
@@ -508,8 +519,15 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	stats := keyStats{Keys: len(rows)}
+	// Once per usage record: a row's count covers every service using that
+	// key, so a service with two keys would be counted twice.
+	keyed := b.Proxy.Config()
+	for _, u := range b.Proxy.Usage() {
+		if svc, ok := keyed.Services[u.Service]; ok && len(svc.KeyNames()) > 0 {
+			stats.CallsToday += u.Calls
+		}
+	}
 	for _, row := range rows {
-		stats.CallsToday += row.CallsToday
 		if row.StatusClass == "bad" {
 			if row.HasValue {
 				stats.Failing++
