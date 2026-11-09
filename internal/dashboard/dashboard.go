@@ -152,6 +152,9 @@ type keyRow struct {
 	// Parts are the named values of a key that has several (MODAL.id,
 	// MODAL.secret); empty for a key with one value.
 	Parts []keyPart
+	// baseStored: the plain name has a stored value too (the CLI can store
+	// API_KEY next to API_KEY.id); it is one of the row's values.
+	baseStored bool
 }
 
 // keyPart is one named value of a key.
@@ -166,9 +169,12 @@ func (r keyRow) valueNames() []string {
 	if len(r.Parts) == 0 {
 		return []string{r.Name}
 	}
-	out := make([]string, len(r.Parts))
-	for i, p := range r.Parts {
-		out[i] = p.Full
+	out := make([]string, 0, len(r.Parts)+1)
+	if r.baseStored {
+		out = append(out, r.Name)
+	}
+	for _, p := range r.Parts {
+		out = append(out, p.Full)
 	}
 	return out
 }
@@ -324,7 +330,7 @@ func (b *Backend) rows() ([]keyRow, error) {
 	bases = compact(bases)
 	rows := make([]keyRow, 0, len(bases))
 	for _, name := range bases {
-		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name]}
+		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name], baseStored: has[name]}
 		if len(row.Parts) > 0 {
 			row.HasValue = true
 			for _, p := range row.Parts {
@@ -1019,6 +1025,11 @@ func (b *Backend) apply() error {
 
 func (b *Backend) keyPage(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
+	// Links built from a service's key name (MODAL.id) open the key, MODAL.
+	if base, part := store.SplitPart(name); part != "" {
+		http.Redirect(w, r, "/keys/"+base, http.StatusSeeOther)
+		return
+	}
 	id := r.URL.Query().Get("preset")
 	if id == "" {
 		id = suggestPreset(name)
@@ -1053,6 +1064,13 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 func (b *Backend) known(name string) (bool, error) {
 	_, ok, err := b.row(name)
 	return ok, err
+}
+
+// knownValue reports whether name is one of the values the keys page lists:
+// a key with one value, or one value of a key with several (MODAL.id).
+func (b *Backend) knownValue(name string) (bool, error) {
+	names, err := b.keyChoices()
+	return slices.Contains(names, name), err
 }
 
 // row is the keys page row of name.

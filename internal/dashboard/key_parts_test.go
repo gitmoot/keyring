@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 func addModal(e *env) *http.Response {
@@ -145,5 +146,64 @@ func TestPasteNamesValuesByPart(t *testing.T) {
 	}
 	if svc := e.proxy.Config().Services["modal-ocr"]; svc.Key != "MODAL.id" || svc.ExtraHeaders["Modal-Secret"] != "MODAL.secret" {
 		t.Fatalf("service = %s %v", svc.Key, svc.ExtraHeaders)
+	}
+}
+
+// Review of #125, F1: the service editor accepts the values its key picker
+// offers.
+func TestServiceEditorAcceptsANamedValue(t *testing.T) {
+	e := newEnv(t)
+	addModal(e)
+	base := e.proxy.Config().Services["api"].Base
+	if loc := e.edit("api", url.Values{"key": {"MODAL.secret"}, "base": {base}, "auth": {"bearer"}}).Header().Get("Location"); loc != "/services/api?done=saved" {
+		t.Fatalf("edit to MODAL.secret: %s", loc)
+	}
+	if got := e.proxy.Config().Services["api"].Key; got != "MODAL.secret" {
+		t.Fatalf("key = %s", got)
+	}
+}
+
+// F2: a key left with one value (the other removed) still renders its page
+// in full, so it can be repaired.
+func TestKeyWithOneRemainingValueRendersInFull(t *testing.T) {
+	e := newEnv(t)
+	addModal(e)
+	e.request("POST", "/keys/MODAL/connect", url.Values{"service": {"m"}, "base": {"https://ws.modal.run"}, "auth": {"bearer"}, "key_part": {"id"}, "password": {password}})
+	if err := store.Delete(e.backend.StorePath, "MODAL.secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(e.backend.StorePath, "MODAL.id"); err != nil {
+		t.Fatal(err)
+	}
+	page := e.request("GET", "/keys/MODAL", nil).Body.String()
+	if !strings.Contains(page, `action="/keys/MODAL/replace"`) || !strings.Contains(page, `action="/keys/MODAL/delete"`) || !strings.HasSuffix(strings.TrimSpace(page), "</html>") {
+		t.Fatal("the page of a key with one value is cut short")
+	}
+}
+
+// F3: removing a key removes every stored value it shows, including a plain
+// value stored next to named ones.
+func TestDeleteRemovesAPlainValueStoredNextToParts(t *testing.T) {
+	e := newEnv(t)
+	addModal(e)
+	if err := store.Set(e.backend.StorePath, "MODAL", "plain-value-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if loc := e.request("POST", "/keys/MODAL/delete", url.Values{"password": {password}, "remove_services": {"yes"}}).Header().Get("Location"); loc != "/keys?done=deleted" {
+		t.Fatalf("delete: %s", loc)
+	}
+	for name := range mustKeys(t, e) {
+		if name == "MODAL" || strings.HasPrefix(name, "MODAL.") {
+			t.Fatalf("%s left after delete", name)
+		}
+	}
+}
+
+// F4: links built from a service's key (MODAL.id) open the key's page.
+func TestValueLinkOpensItsKey(t *testing.T) {
+	e := newEnv(t)
+	addModal(e)
+	if w := e.request("GET", "/keys/MODAL.id", nil); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/keys/MODAL" {
+		t.Fatalf("/keys/MODAL.id: %d %s", w.Code, w.Header().Get("Location"))
 	}
 }

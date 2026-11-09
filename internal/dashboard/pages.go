@@ -127,7 +127,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </details>
 <details><summary>Or paste settings from an agent</summary>
 <label>JSON like {"service":"x","base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
-{{if .Row.Parts}}<p class="hint">For this key add "key_part" (which value is the key) and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}","extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}}</p>{{end}}
+{{if gt (len .Row.Parts) 1}}<p class="hint">For this key add "key_part" (which value is the key) and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}","extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}}</p>{{end}}
 <p class="hint">For an API that needs a second secret, either give one key several values, or add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
 </details>
 {{template "password" .}}

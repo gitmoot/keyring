@@ -167,7 +167,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		f.Key = cur.Key
 	}
 	if f.Key != cur.Key {
-		if ok, err := b.known(f.Key); err != nil {
+		if ok, err := b.knownValue(f.Key); err != nil {
 			b.fail(w, sid, err)
 			return
 		} else if !ok {
