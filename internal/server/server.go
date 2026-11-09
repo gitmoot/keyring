@@ -86,6 +86,9 @@ type snapshot struct {
 	keys               map[string]string
 	appleAdsKey        *ecdsa.PrivateKey
 	appStoreConnectKey *ecdsa.PrivateKey
+	// signInWithAppleKeys holds the parsed key of each sign-in-with-apple-sign
+	// service; a missing or unusable key is nil.
+	signInWithAppleKeys map[string]*ecdsa.PrivateKey
 	// apns holds a token minter per apns service; one whose key and identity
 	// are unchanged is carried over by Swap, cached token included.
 	apns map[string]*apnsSigner
@@ -170,6 +173,12 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 	}
 	if svc, ok := config.Services["appstoreconnect"]; ok && svc.Auth == policy.AuthAppStoreConnectSign {
 		snap.appStoreConnectKey = parseAppleSigningKey(keys[svc.Key])
+	}
+	snap.signInWithAppleKeys = map[string]*ecdsa.PrivateKey{}
+	for name, svc := range config.Services {
+		if svc.Auth == policy.AuthSignInWithAppleSign {
+			snap.signInWithAppleKeys[name] = parseAppleSigningKey(keys[svc.Key])
+		}
 	}
 	var previous map[string]*apnsSigner
 	if old := h.snap.Load(); old != nil {
@@ -315,6 +324,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if signService := ed25519SignService(r.URL.Path); signService != "" && signingAuth == "" {
 		service, rest, ok = signService, "/", true
 		signingAuth = policy.AuthEd25519Sign
+		// The same path shape signs a Sign in with Apple client secret when
+		// that is what the named service is.
+		if svc, exists := snap.config.Services[signService]; exists && svc.Auth == policy.AuthSignInWithAppleSign {
+			signingAuth, signingKey = policy.AuthSignInWithAppleSign, snap.signInWithAppleKeys[signService]
+		}
 	}
 	if signService := minisignService(r.URL.Path); signService != "" && signingAuth == "" {
 		service, rest, ok = signService, "/", true

@@ -56,6 +56,9 @@ func signAppleToken(key *ecdsa.PrivateKey, service policy.Service, role policy.R
 	case service.Auth == policy.AuthAppleAdsSign && service.AppleAds != nil:
 		keyID, issuer, subject = service.AppleAds.KeyID, service.AppleAds.TeamID, service.AppleAds.ClientID
 		audience = "https://appleid.apple.com"
+	case service.Auth == policy.AuthSignInWithAppleSign && service.SignInWithApple != nil:
+		keyID, issuer, subject = service.SignInWithApple.KeyID, service.SignInWithApple.TeamID, service.SignInWithApple.ClientID
+		audience = "https://appleid.apple.com"
 	case service.Auth == policy.AuthAppStoreConnectSign && service.AppStoreConnect != nil:
 		keyID, issuer = service.AppStoreConnect.KeyID, service.AppStoreConnect.IssuerID
 		audience = "appstoreconnect-v1"

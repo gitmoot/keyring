@@ -31,10 +31,13 @@ import (
 
 // Auth kinds: how a service expects its key.
 const (
-	AuthBearer              = "bearer"         // Authorization: Bearer <key>
-	AuthHeader              = "header"         // <Header>: <key>
-	AuthQuery               = "query"          // ?<Param>=<key>
-	AuthAppleAdsSign        = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
+	AuthBearer       = "bearer"         // Authorization: Bearer <key>
+	AuthHeader       = "header"         // <Header>: <key>
+	AuthQuery        = "query"          // ?<Param>=<key>
+	AuthAppleAdsSign = "apple-ads-sign" // Local ES256 signing only; never proxy the key.
+	// AuthSignInWithAppleSign signs a Sign in with Apple client secret
+	// (ES256, aud https://appleid.apple.com) locally; never proxies the key.
+	AuthSignInWithAppleSign = "sign-in-with-apple-sign"
 	AuthAppStoreConnectSign = "app-store-connect-sign"
 	AuthEd25519Sign         = "ed25519-sign" // Local Ed25519 signing only; never proxy the key.
 	// AuthMinisignSign signs BLAKE2b-512 digests as minisign signatures with
@@ -289,6 +292,7 @@ type Service struct {
 	TestMethod      string           `json:"test_method,omitempty"`
 	TestPath        string           `json:"test_path,omitempty"`
 	AppleAds        *AppleAds        `json:"apple_ads,omitempty"`
+	SignInWithApple *SignInWithApple `json:"sign_in_with_apple,omitempty"`
 	AppStoreConnect *AppStoreConnect `json:"app_store_connect,omitempty"`
 	// TLSPinSHA256, when set, is the lowercase hex SHA-256 of the upstream's
 	// leaf certificate (DER). The keyring then trusts exactly that
@@ -314,6 +318,19 @@ type AppleAds struct {
 	TeamID   string `json:"team_id"`
 	KeyID    string `json:"key_id"`
 }
+
+// SignInWithApple fixes the public identity of a Sign in with Apple client
+// secret: the token's sub (the app's bundle ID or Services ID), iss (team ID)
+// and kid (key ID).
+type SignInWithApple struct {
+	ClientID string `json:"client_id"`
+	TeamID   string `json:"team_id"`
+	KeyID    string `json:"key_id"`
+}
+
+// appleClientID is a bundle ID or Services ID: reverse-DNS letters, digits,
+// '.' and '-'.
+var appleClientID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,154}$`)
 
 // AppStoreConnect fixes the public identity of an App Store Connect API key.
 type AppStoreConnect struct {
@@ -614,7 +631,7 @@ var tunnelName = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9]
 
 // SignOnly services never send their private key to an upstream.
 func (s Service) SignOnly() bool {
-	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign || s.Auth == AuthMinisignSign
+	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign || s.Auth == AuthMinisignSign || s.Auth == AuthSignInWithAppleSign
 }
 
 type Role struct {
@@ -1033,7 +1050,7 @@ func (s *Service) validate() error {
 	if s.Auth == AuthGcloudLogin {
 		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
 			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
-			s.AppleAds != nil || s.AppStoreConnect != nil || s.EgressProxy != nil || s.APNs != nil {
+			s.AppleAds != nil || s.AppStoreConnect != nil || s.EgressProxy != nil || s.APNs != nil || s.SignInWithApple != nil {
 			return errors.New("Google login requires only the fixed me account and no proxy settings")
 		}
 		s.base = nil
@@ -1049,8 +1066,19 @@ func (s *Service) validate() error {
 		if s.Base != "" || s.Header != "" || s.Param != "" || s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil {
 			return errors.New("sign-only service cannot have proxy or test settings")
 		}
+		if s.SignInWithApple != nil && s.Auth != AuthSignInWithAppleSign {
+			return errors.New("sign_in_with_apple settings require auth sign-in-with-apple-sign")
+		}
 		var identity []string
 		switch s.Auth {
+		case AuthSignInWithAppleSign:
+			a := s.SignInWithApple
+			if a == nil || s.AppleAds != nil || s.AppStoreConnect != nil || s.Minisign != nil {
+				return errors.New("sign-in-with-apple-sign requires only sign_in_with_apple settings")
+			}
+			if !apnsID.MatchString(a.TeamID) || !apnsID.MatchString(a.KeyID) || !appleClientID.MatchString(a.ClientID) {
+				return errors.New("sign_in_with_apple needs team_id and key_id of 10 upper-case letters or digits, and client_id a bundle or Services ID")
+			}
 		case AuthAppleAdsSign:
 			if s.AppleAds == nil || s.AppStoreConnect != nil {
 				return errors.New("apple-ads-sign requires only apple_ads identity")
@@ -1081,7 +1109,7 @@ func (s *Service) validate() error {
 		s.base = nil
 		return nil
 	}
-	if s.AppleAds != nil || s.AppStoreConnect != nil {
+	if s.AppleAds != nil || s.AppStoreConnect != nil || s.SignInWithApple != nil {
 		return errors.New("signing identity requires the corresponding sign-only auth")
 	}
 	if s.APNs != nil && s.Auth != AuthAPNs {
