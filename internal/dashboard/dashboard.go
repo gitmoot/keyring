@@ -1217,22 +1217,23 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		}
 		target = name + "." + part
 	}
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
 	if err := store.Set(b.StorePath, target, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	meta, err := b.loadMeta()
-	if err == nil {
+	keys[target] = value
+	// Live at once with the running config, as upload does: nothing can fail
+	// after the value is stored, so the store and the keyring agree (#128).
+	b.Proxy.Swap(b.Proxy.Config(), keys)
+	if meta, err := b.loadMeta(); err == nil {
 		now := b.Now().UTC()
 		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: meta[name].CreatedAt} // new value: not tested, no longer leaked
-		err = b.saveMeta(meta)
-	}
-	if err == nil {
-		err = b.apply()
-	}
-	if err != nil {
-		b.fail(w, sid, err)
-		return
+		_ = b.saveMeta(meta)
 	}
 	b.Admin.Audit("key_replaced", sid, map[string]any{"key": target})
 	http.Redirect(w, r, "/keys/"+name+"?done=replaced", http.StatusSeeOther)

@@ -57,8 +57,8 @@ func inspectKeyFile(filename string, raw []byte) (keyFile, string) {
 		if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".key") {
 			return keyFile{}, "This file has no PEM private key in it. Check you picked the right file."
 		}
-		sum := sha256.Sum256(raw)
-		return keyFile{Kind: "text value", Fingerprint: hex.EncodeToString(sum[:8])}, ""
+		// No fingerprint: a hash of a secret confirms a guess at it (#128).
+		return keyFile{Kind: "text value"}, ""
 	}
 	block, rest := pem.Decode(raw)
 	if block == nil {
@@ -186,6 +186,10 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: created, Kind: info.Kind, Fingerprint: info.Fingerprint}
 		_ = b.saveMeta(meta)
 	}
-	b.Admin.Audit("key_uploaded", sid, map[string]any{"key": name, "kind": info.Kind, "fingerprint": info.Fingerprint, "replaced": exists})
+	fields := map[string]any{"key": name, "kind": info.Kind, "replaced": exists}
+	if info.Fingerprint != "" {
+		fields["fingerprint"] = info.Fingerprint
+	}
+	b.Admin.Audit("key_uploaded", sid, fields)
 	http.Redirect(w, r, "/keys/"+name+"?done=uploaded", http.StatusSeeOther)
 }
