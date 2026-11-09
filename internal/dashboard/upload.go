@@ -48,10 +48,14 @@ func inspectKeyFile(filename string, raw []byte) (keyFile, string) {
 	if !utf8.Valid(raw) || strings.ContainsRune(string(raw), 0) {
 		return keyFile{}, "The file is not a text key file. Upload the .p8 or .pem file itself."
 	}
-	p8 := strings.HasSuffix(strings.ToLower(filename), ".p8")
+	lower := strings.ToLower(filename)
+	p8 := strings.HasSuffix(lower, ".p8")
 	if !strings.Contains(string(raw), "-----BEGIN") {
 		if p8 {
 			return keyFile{}, "This .p8 file has no key in it. Download the key again from Apple Developer > Keys."
+		}
+		if strings.HasSuffix(lower, ".pem") || strings.HasSuffix(lower, ".key") {
+			return keyFile{}, "This file has no PEM private key in it. Check you picked the right file."
 		}
 		sum := sha256.Sum256(raw)
 		return keyFile{Kind: "text value", Fingerprint: hex.EncodeToString(sum[:8])}, ""
@@ -163,11 +167,10 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		return
 	}
 	keys[name] = value
-	// A new value: services that parse keys at load (APNs, signers) pick it up.
-	if err := b.apply(); err != nil {
-		b.fail(w, sid, err)
-		return
-	}
+	// The running config with the new value: keys parsed at load (APNs,
+	// signers) pick it up. Nothing here can fail after the value is stored,
+	// so the store and the running keyring never disagree.
+	b.Proxy.Swap(b.Proxy.Config(), keys)
 	if meta, err := b.loadMeta(); err == nil {
 		now := b.Now().UTC()
 		created := meta[name].CreatedAt

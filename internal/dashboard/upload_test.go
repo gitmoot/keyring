@@ -9,8 +9,13 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
+	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/server"
+	"math/big"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -116,6 +121,8 @@ func TestUploadRefusesUnusableFiles(t *testing.T) {
 		{"two blocks", "k.pem", append(append([]byte{}, good...), good...), "more than one"},
 		{"binary", "k.p8", []byte{0x30, 0x82, 0x00, 0xff, 0x00}, "not a text key file"},
 		{"empty", "k.p8", []byte("  \n"), "empty"},
+		{"no key in .pem", "private.pem", []byte("just some text\n"), "no PEM private key"},
+		{"no key in .key", "server.key", []byte("just some text\n"), "no PEM private key"},
 	}
 	for _, c := range cases {
 		w := e.upload(map[string]string{"name": "WRONG_FILE", "password": password}, c.file, c.content, e.csrf)
@@ -193,5 +200,56 @@ func TestUploadOtherKeyKinds(t *testing.T) {
 		if keys, _ := store.Load(e.backend.StorePath); keys[name] != string(c.content) {
 			t.Errorf("%s: stored value differs from the file", name)
 		}
+	}
+}
+
+// Review of #127, F1: a replacement is live at once, even when the access file
+// cannot be read at that moment: a signer using the key signs with the new
+// one. The store and the running keyring agree.
+func TestUploadReplacementIsLiveWithoutReadingTheAccessFile(t *testing.T) {
+	e := newEnv(t)
+	first, _ := p8(t)
+	e.upload(map[string]string{"name": "SIGNER", "password": password}, "a.p8", first, e.csrf)
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	access.Services["siwa"] = policy.Service{Key: "SIGNER", Auth: policy.AuthSignInWithAppleSign,
+		SignInWithApple: &policy.SignInWithApple{ClientID: "com.example.app", TeamID: "TEAM123456", KeyID: "KEY1234567"}}
+	role := access.Roles["phobos"]
+	role.Access = map[string]policy.Access{"siwa": {Methods: []string{"POST"}, Paths: []string{"/"}}}
+	access.Roles["phobos"] = role
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(next, keys)
+	// Readable by others: the keyring refuses to load it (root ignores 0000).
+	if err := os.Chmod(next.AccessFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(next.AccessFile, 0o600)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	second := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if w := e.upload(map[string]string{"name": "SIGNER", "password": password, "replace": "yes"}, "b.p8", second, e.csrf); w.Code != http.StatusSeeOther {
+		t.Fatalf("replace: %d %s", w.Code, w.Body.String())
+	}
+	r := httptest.NewRequest("POST", "/_keyring/sign/siwa", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Set(server.TokenHeader, token)
+	w := httptest.NewRecorder()
+	e.proxy.ServeHTTP(w, r)
+	var reply struct{ Token string }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &reply) != nil {
+		t.Fatalf("sign: %d %s", w.Code, w.Body.String())
+	}
+	parts := strings.Split(reply.Token, ".")
+	sig, _ := base64.RawURLEncoding.DecodeString(parts[2])
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if len(sig) != 64 || !ecdsa.Verify(&key.PublicKey, digest[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
+		t.Fatal("the running keyring still signs with the old key")
+	}
+	if !strings.Contains(e.audit.String(), `"replaced":true`) {
+		t.Fatal("the replacement was not audited")
 	}
 }
