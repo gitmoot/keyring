@@ -41,6 +41,45 @@ type Backend struct {
 	Proxy *server.Handler
 	Admin *admin.Server
 	Now   func() time.Time
+	// Version is the running release, shown in the sidebar.
+	Version string
+}
+
+// navProject is one project in the sidebar.
+type navProject struct {
+	Name     string
+	Dot      string // "ok" running, "warn" paused or ended
+	Services int
+}
+
+// nav is what the sidebar on every page shows.
+type nav struct {
+	Keys, Agents, Projects int
+	ProjectList            []navProject
+	Version                string
+}
+
+func (b *Backend) nav() nav {
+	cfg := b.Proxy.Config()
+	n := nav{Agents: len(cfg.Roles), Version: b.Version}
+	if keys, err := store.Load(b.StorePath); err == nil {
+		n.Keys = len(keys)
+	}
+	now := b.Now()
+	for _, p := range projectNames(cfg) {
+		dot := "ok"
+		if projectState(cfg, p, now) != "running" {
+			dot = "warn"
+		}
+		n.ProjectList = append(n.ProjectList, navProject{Name: p, Dot: dot, Services: len(projectServices(cfg, p))})
+	}
+	n.Projects = len(n.ProjectList)
+	return n
+}
+
+// keyStats is the numbers strip above the keys table, over every key.
+type keyStats struct {
+	Keys, CallsToday, Failing, NoValue int
 }
 
 // KeyMeta is what the dashboard remembers about a key besides its value.
@@ -468,6 +507,17 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
+	stats := keyStats{Keys: len(rows)}
+	for _, row := range rows {
+		stats.CallsToday += row.CallsToday
+		if row.StatusClass == "bad" {
+			if row.HasValue {
+				stats.Failing++
+			} else {
+				stats.NoValue++
+			}
+		}
+	}
 	query := r.URL.Query()
 	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
 	if q != "" {
@@ -545,7 +595,7 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Name < accounts[j].Name })
 	b.render(w, http.StatusOK, "keys", sid, map[string]any{"Rows": rows, "Query": q, "Show": show, "Sort": by, "Desc": desc,
 		"GoogleAccounts": accounts, "Filters": filters, "Columns": cols, "Notice": query.Get("done"),
-		"Project": project, "ProjectFilters": projectChips})
+		"Project": project, "ProjectFilters": projectChips, "Stats": stats})
 }
 
 func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string) {
@@ -1071,6 +1121,7 @@ func (b *Backend) render(w http.ResponseWriter, status int, page, sid string, da
 	data["Page"] = page
 	pending, _ := b.pendingRequests()
 	data["PendingCount"] = len(pending)
+	data["Nav"] = b.nav()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = pages.ExecuteTemplate(w, page, data)

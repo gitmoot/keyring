@@ -353,7 +353,7 @@ func TestApprovingARequestGivesFullAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := e.request("GET", "/access", nil).Body.String()
-	if !strings.Contains(page, "New agent <b>adstudio</b>") || !strings.Contains(page, `class="badge">1<`) || !strings.Contains(page, sha) {
+	if !strings.Contains(page, "New agent <b>adstudio</b>") || !strings.Contains(page, `class="n hot">1<`) || !strings.Contains(page, sha) {
 		t.Fatalf("request not shown:\n%s", page)
 	}
 	// Without the password nothing happens and the request stays.

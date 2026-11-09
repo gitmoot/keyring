@@ -318,7 +318,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		handler.SetRequests(reqs)
 		dashboardpkg.Register(&dashboardpkg.Backend{
 			Mu: changes, StorePath: storePath, MetaPath: metaPath, Requests: reqs,
-			Proxy: handler, Admin: a,
+			Proxy: handler, Admin: a, Version: version,
 		})
 	})
 	if err != nil {

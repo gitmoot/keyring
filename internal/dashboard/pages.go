@@ -6,12 +6,18 @@ import "html/template"
 // neither (the one script is /static/app.js). No template ever receives a key
 // value. Layout is one column that works from a phone up; see admin's CSS.
 var pages = template.Must(template.New("pages").Parse(`
-{{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body>
-<header class="top"><div class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">
-<a class="brand" href="/keys">Keyring</a>
-<nav class="tabs"><a href="/keys"{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} class="on"{{end}}>Keys</a><a href="/access"{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} class="on"{{end}}>Agents{{if .PendingCount}} <span class="badge">{{.PendingCount}}</span>{{end}}</a><a href="/projects"{{if or (eq .Page "projects") (eq .Page "project")}} class="on"{{end}}>Projects</a></nav>
-<form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form>
-</div></header><main class="wrap{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">{{end}}
+{{define "top"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Keyring</title><link rel="stylesheet" href="/static/app.css"><script src="/static/app.js" defer></script></head><body class="console">
+<aside class="side"><a class="logo" href="/keys"><i></i>Keyring</a>
+<nav class="sidenav" aria-label="Sections">
+<a href="/keys" class="nav{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} on{{end}}">Keys<span class="n">{{.Nav.Keys}}</span></a>
+<a href="/access" class="nav{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} on{{end}}">Agents<span class="n">{{.Nav.Agents}}</span></a>
+<a href="/projects" class="nav{{if or (eq .Page "projects") (eq .Page "project")}} on{{end}}">Projects<span class="n">{{.Nav.Projects}}</span></a>
+<a href="/access#requests" class="nav">Requests<span class="n{{if .PendingCount}} hot{{end}}">{{.PendingCount}}</span></a>
+</nav>
+{{with .Nav.ProjectList}}<p class="sec">Projects</p><nav class="sidenav projects" aria-label="Projects">{{range .}}<a href="/projects/{{.Name}}" class="nav"><i class="dot {{.Dot}}"></i>{{.Name}}<span class="n">{{.Services}}</span></a>{{end}}</nav>{{end}}
+<div class="me">{{with .Nav.Version}}<span class="ver">{{.}}</span>{{end}}<form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link">Log out</button></form></div>
+</aside>
+<main class="body{{if or (eq .Page "keys") (eq .Page "access")}} wide{{end}}">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
 
 {{define "password"}}<label class="pw">Dashboard password<input type="password" name="password" autocomplete="current-password" required placeholder="asked on every change"></label>{{end}}
@@ -26,6 +32,12 @@ var pages = template.Must(template.New("pages").Parse(`
 <div class="bar"><h1>Keys <span class="count">{{len .Rows}}</span></h1>
 <form method="get" action="/keys" class="tsearch">{{with .Project}}<input type="hidden" name="project" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{if .Desc}}<input type="hidden" name="desc" value="1">{{end}}<input type="search" name="q" value="{{.Query}}" placeholder="Search keys or APIs" aria-label="Search"></form>
 <a class="btn" href="/new/key">Add key</a></div>
+<div class="stats">
+<div class="stat"><small>Keys</small><b>{{.Stats.Keys}}</b></div>
+<div class="stat"><small>Calls today</small><b>{{.Stats.CallsToday}}</b></div>
+<div class="stat"><small>Failing</small><b>{{.Stats.Failing}}</b>{{with .Stats.NoValue}}<span class="sub">+ {{.}} without a value</span>{{end}}</div>
+<a class="stat" href="/access#requests"><small>Waiting for you</small><b>{{.PendingCount}}</b><span class="sub">access requests</span></a>
+</div>
 {{template "projectfilters" .ProjectFilters}}
 <nav class="filters" aria-label="Show">{{$q := .Query}}{{$p := .Project}}{{range .Filters}}<a class="f{{with .Class}} {{.}}{{end}}{{if .On}} on{{end}}" href="/keys?{{if .ID}}show={{.ID}}{{end}}{{if $q}}{{if .ID}}&amp;{{end}}q={{$q}}{{end}}{{if $p}}{{if or .ID $q}}&amp;{{end}}project={{$p}}{{end}}">{{.Label}} <b>{{.Count}}</b></a>{{end}}</nav>
 <div class="tablewrap"><table class="t">
@@ -131,7 +143,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{define "access"}}{{template "top" .}}
 {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
-{{if .Requests}}<h2 class="section">Waiting for you</h2>
+{{if .Requests}}<h2 class="section" id="requests">Waiting for you</h2>
 {{range .Requests}}<form method="post" action="/requests/{{.ID}}" class="card request"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <p class="reqtitle">{{if .Fingerprint}}New agent <b>{{.Role}}</b>{{else}}More access for <b>{{.Role}}</b>{{end}}</p>
 {{if .Services}}<p>Full access to {{range $i, $s := .Services}}{{if $i}}, {{end}}<span class="chip">{{$s}}</span>{{end}}</p>{{end}}
