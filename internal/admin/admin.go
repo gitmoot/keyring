@@ -398,7 +398,7 @@ const js = `document.addEventListener("click", function (e) {
   if (el.dataset.exact !== undefined) {
     var bin = atob(el.dataset.exact), bytes = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    text = new TextDecoder().decode(bytes);
+    text = new TextDecoder("utf-8", {ignoreBOM: true}).decode(bytes); // keep a leading BOM
   }
   navigator.clipboard.writeText(text).then(function () { b.textContent = "Copied"; });
 });
