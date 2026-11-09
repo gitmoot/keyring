@@ -88,8 +88,17 @@ func minisignPublic(key ed25519.PrivateKey) minisignPublicKeyResponse {
 	return minisignPublicKeyResponse{KeyID: minisign.KeyIDHex(pub), PublicKey: minisign.PublicKey(pub), PublicKeyFile: minisign.PublicKeyFile(pub)}
 }
 
+// maxCommentService bounds the service name in the untrusted comment.
+const maxCommentService = 64
+
 func signMinisign(key ed25519.PrivateKey, service string, req minisignRequest) (minisignSignResponse, error) {
-	sig, err := minisign.Sign(key, req.Digest, req.TrustedComment, "signature from keyring service "+service)
+	// The untrusted comment is unsigned and only informative; minisign refuses
+	// a comment line of 1 KiB or more, so a long service name is cut (#106).
+	label := service
+	if len(label) > maxCommentService {
+		label = label[:maxCommentService] + "..."
+	}
+	sig, err := minisign.Sign(key, req.Digest, req.TrustedComment, "signature from keyring service "+label)
 	if err != nil {
 		return minisignSignResponse{}, err
 	}
