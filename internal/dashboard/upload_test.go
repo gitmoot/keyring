@@ -253,3 +253,36 @@ func TestUploadReplacementIsLiveWithoutReadingTheAccessFile(t *testing.T) {
 		t.Fatal("the replacement was not audited")
 	}
 }
+
+// A file goes into a key with one value; a key with several named values, or
+// a dotted name, is refused (they are managed on the key's page).
+func TestUploadRefusesMultiValueKeys(t *testing.T) {
+	e := newEnv(t)
+	file, _ := p8(t)
+	if err := store.Set(e.backend.StorePath, "MODAL.id", "wk-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	for name, fields := range map[string]map[string]string{
+		"dotted name":     {"name": "MODAL.secret", "password": password},
+		"multi-value key": {"name": "MODAL", "password": password, "replace": "yes"},
+	} {
+		if w := e.upload(fields, "k.p8", file, e.csrf); w.Code == http.StatusSeeOther {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	if keys["MODAL"] != "" || keys["MODAL.secret"] != "" {
+		t.Fatal("a refused upload was stored")
+	}
+}
+
+// Review of #125: the add-key page after an upload error keeps the named-value
+// rows, so the owner can still add a key with several values.
+func TestUploadErrorKeepsTheNamedValueRows(t *testing.T) {
+	e := newEnv(t)
+	fresh := strings.Count(e.request("GET", "/new/key", nil).Body.String(), `name="part"`)
+	w := e.upload(map[string]string{"name": "X", "password": password}, "k.p8", []byte("hello"), e.csrf)
+	if got := strings.Count(w.Body.String(), `name="part"`); w.Code != http.StatusBadRequest || fresh == 0 || got != fresh {
+		t.Fatalf("after an upload error: %d rows (fresh page %d), status %d", got, fresh, w.Code)
+	}
+}

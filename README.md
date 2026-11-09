@@ -260,10 +260,20 @@ to a distinct store key, not a credential value. For Cloudflare Access, use
 primary credential. Header names are case-insensitive; duplicates, primary
 collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
-From the dashboard: add each value as its own key, open the primary key, choose
+**A key with several values** (dashboard): on **Add key**, open "This key has several
+values", name each value and paste it, for example `MODAL` with `id` ← `wk-…` and
+`secret` ← `ws-…`. They are stored as `MODAL.id` and `MODAL.secret` and shown as one
+key with its value names, never the values. On the key's page, **Connect to a service**
+asks which value is sent as the key and, optionally, a header for each other value
+(Modal: `id` as `Modal-Key`, `secret` as `Modal-Secret`); pasted settings say the same
+with `"key_part": "id", "extra_headers": {"Modal-Secret": "secret"}`. **Replace or add a
+value** names the value; **Delete** removes all of them. Access files may name the
+values directly (`"key": "MODAL.id"`). A store holding such values cannot be read by a
+keyring older than this release, so delete them before downgrading.
+
+Separate keys work too: add each value as its own key, open the primary key, choose
 **Connect to a service** and paste the settings with `extra_headers` naming the other
-key. For a Modal web endpoint with a proxy token (`wk-…` and `ws-…`), add keys
-`MODAL_PROXY_ID` and `MODAL_PROXY_SECRET`, then on `MODAL_PROXY_ID` paste
+key, for example on `MODAL_PROXY_ID`
 `{"service":"modal-ocr","base":"https://WORKSPACE--app-web.modal.run","auth":"header","header":"Modal-Key","test_path":"/health","extra_headers":{"Modal-Secret":"MODAL_PROXY_SECRET"}}`.
 The named keys must already have stored values; otherwise the paste is refused,
 and neither the refusal message nor the re-shown form repeats what was pasted. On a service's edit page, pasted settings without

@@ -125,7 +125,7 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		again(http.StatusForbidden, "Enter your dashboard password to upload a key.")
 		return
 	}
-	if !store.ValidName(name) {
+	if base, part := store.SplitPart(name); part != "" || !store.ValidName(base) {
 		again(http.StatusBadRequest, "The name must be letters, digits and _, not starting with a digit.")
 		return
 	}
@@ -158,6 +158,12 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		return
 	}
 	_, exists := keys[name]
+	for stored := range keys {
+		if base, part := store.SplitPart(stored); base == name && part != "" {
+			again(http.StatusConflict, name+" has several values; replace them one by one on its page.")
+			return
+		}
+	}
 	if exists && r.PostFormValue("replace") != "yes" {
 		again(http.StatusConflict, "A key named "+name+" exists. Tick Replace to overwrite it, or pick another name.")
 		return
