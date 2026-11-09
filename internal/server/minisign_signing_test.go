@@ -182,3 +182,35 @@ func TestMinisignBadStoredKeyIsUnavailable(t *testing.T) {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}
 }
+
+// #106: any valid service name gives a signature minisign accepts: the
+// unsigned comment line stays well under minisign's 1 KiB limit.
+func TestMinisignLongServiceNameStaysInterop(t *testing.T) {
+	priv, stored := generatedEd25519Key(t)
+	pub := priv.Public().(ed25519.PublicKey)
+	name := strings.Repeat("a", 1000)
+	var access policy.AccessList
+	if err := json.Unmarshal([]byte(`{"services":{"`+name+`":{"key":"HERDR_KEY","auth":"minisign-sign","minisign":{"trusted_comment_prefix":"herdr-preview "}}},"roles":{}}`), &access); err != nil {
+		t.Fatal(err)
+	}
+	access.Roles["phobos"] = policy.Role{TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{name: {Methods: []string{"POST"}, Paths: []string{"/"}}}}
+	cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"}, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h := New(cfg, map[string]string{"HERDR_KEY": stored}, &bytes.Buffer{})
+	w := signCall(h, "POST", "/_keyring/minisign/"+name, minisignBody(testDigestHex, "herdr-preview x"), testToken)
+	if w.Code != 200 {
+		t.Fatalf("sign: %d %s", w.Code, w.Body.String())
+	}
+	var signed struct{ Minisig string }
+	if err := json.Unmarshal(w.Body.Bytes(), &signed); err != nil {
+		t.Fatal(err)
+	}
+	first := strings.SplitN(signed.Minisig, "\n", 2)[0]
+	if len(first) >= 1024-1 {
+		t.Fatalf("untrusted comment line is %d bytes", len(first))
+	}
+	digest, _ := hex.DecodeString(testDigestHex)
+	verifyMinisig(t, signed.Minisig, pub, digest, "herdr-preview x")
+}
