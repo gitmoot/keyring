@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/policy"
-	"github.com/gitmoot/keyring/internal/store"
 )
 
 func addModal(e *env) *http.Response {
@@ -99,7 +98,7 @@ func TestReplaceAndDeleteNamedValues(t *testing.T) {
 		t.Fatalf("delete: %s", loc)
 	}
 	for name := range mustKeys(t, e) {
-		if base, _ := store.SplitPart(name); base == "MODAL" {
+		if name == "MODAL" || strings.HasPrefix(name, "MODAL.") {
 			t.Fatalf("%s left after delete", name)
 		}
 	}
