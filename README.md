@@ -322,6 +322,32 @@ changes to an account's own refresh or client secret still respect its gate.
 
 A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
 
+### Sign in with Apple client secret
+
+Auth `sign-in-with-apple-sign` signs the short-lived `client_secret` an app sends to
+`https://appleid.apple.com/auth/token` and `/auth/revoke` (for example to revoke a
+user's Apple sign-in when they delete their account). The key (`.p8` for Sign in
+with Apple) never leaves the keyring; the service is sign-only and proxies nothing.
+
+```json
+"tandem-siwa": {"key": "TANDEM_SIWA_KEY", "auth": "sign-in-with-apple-sign",
+  "sign_in_with_apple": {"client_id": "com.example.app", "team_id": "ABCDE12345", "key_id": "KEY1234567"}}
+```
+
+- Any service name except `apple-ads` and `appstoreconnect`, whose sign paths are fixed. `team_id` and `key_id` are Apple's 10-character IDs; `client_id`
+  is the app's bundle ID or Services ID.
+- A granted role calls `POST http://127.0.0.1:7700/<role>/_keyring/sign/<service>`
+  with an empty body and gets `{"token": "<JWT>", "expires_at": "<RFC 3339>"}`:
+  ES256, header `kid` = key ID, claims `iss` = team ID, `sub` = client ID,
+  `aud` = `https://appleid.apple.com`, `iat`, and `exp` at most 20 minutes later
+  (earlier if the grant ends sooner). Grant `POST` on path `/`.
+- The caller then sends Apple the form itself, e.g. `client_id`, `client_secret` (the
+  token), `token` and `token_type_hint` to `/auth/revoke`.
+- Import the `.p8` with `keyring set --file` (multi-line), then on the key's dashboard
+  page **Connect to a service** with
+  `{"service":"tandem-siwa","auth":"sign-in-with-apple-sign","sign_in_with_apple":{"client_id":"…","team_id":"…","key_id":"…"}}`.
+- An unusable key gets 503 `Apple signing unavailable` and is not counted.
+
 ### Apple Push Notification service (APNs)
 
 Auth `apns` proxies push requests to Apple with a provider token minted from an Apple

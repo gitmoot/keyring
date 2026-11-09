@@ -149,6 +149,9 @@ func providerOf(svc policy.Service) string {
 	if svc.Auth == policy.AuthAppStoreConnectSign {
 		return "App Store Connect (sign only)"
 	}
+	if svc.Auth == policy.AuthSignInWithAppleSign {
+		return "Sign in with Apple (sign only)"
+	}
 	if svc.Auth == policy.AuthMinisignSign {
 		return "minisign (sign only)"
 	}
@@ -625,6 +628,7 @@ type connectForm struct {
 	Preset, Service, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
 	FixedHeaders, ExtraHeaders                                                    map[string]string
 	APNs                                                                          *policy.APNs
+	SignInWithApple                                                               *policy.SignInWithApple
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -645,6 +649,9 @@ type agentSettings struct {
 	ExtraHeaders *map[string]string `json:"extra_headers,omitempty"`
 	// APNs is the key and team ID of an Apple push key (auth "apns").
 	APNs *policy.APNs `json:"apns,omitempty"`
+	// SignInWithApple is the identity of a Sign in with Apple client-secret
+	// signer (auth "sign-in-with-apple-sign").
+	SignInWithApple *policy.SignInWithApple `json:"sign_in_with_apple,omitempty"`
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -717,7 +724,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
-		f.APNs = a.APNs
+		f.APNs, f.SignInWithApple = a.APNs, a.SignInWithApple
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -745,7 +752,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
