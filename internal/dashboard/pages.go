@@ -76,19 +76,25 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/keys"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Name<input name="name" value="{{.Name}}" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENROUTER_API_KEY" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
-<label>Value<input type="password" name="value" autocomplete="off" required placeholder="paste it here; it is never shown again"></label>
+<label>Value<input type="password" name="value" autocomplete="off" placeholder="paste it here; it is never shown again"></label>
+<details class="parts"><summary>This key has several values (e.g. an id and a secret)</summary>
+<p class="hint">Name each value and paste it. Leave the single Value above empty. Example for Modal: id ← wk-…, secret ← ws-….</p>
+{{range $i, $n := .PartRows}}<div class="two"><label>Value name<input name="part" value="{{$n}}" placeholder="{{if eq $i 0}}id{{else if eq $i 1}}secret{{else}}optional{{end}}" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+<label>Value<input type="password" name="part_value" autocomplete="off" placeholder="never shown again"></label></div>{{end}}
+</details>
 {{template "password" .}}
 <div class="actions"><button>Add key</button><a class="btn ghost" href="/keys">Cancel</a></div>
 </form></div>
-<p class="hint">Just the name and the value. Which API it is for can be set on the key's page, now or later.</p>
+<p class="hint">Just the name and the value or values. Which API it is for can be set on the key's page, now or later.</p>
 {{template "bottom"}}{{end}}
 
 {{define "key"}}{{template "top" .}}
 {{if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
-{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
+{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "part"}}<p class="error">Name the value to replace or add: lowercase letters, digits or _.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
 <div class="head"><a class="back" href="/keys">Keys</a><h1 class="mono">{{.Row.Name}}</h1>{{template "status" .Row}}</div>
 <div class="card"><dl>
-<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>
+{{if .Row.Parts}}<dt>Values</dt><dd>{{range .Row.Parts}}<span class="chip mono">{{.Name}}</span> {{if .HasValue}}<span class="masked">••••••••</span>{{else}}<span class="mute">none stored</span>{{end}}<br>{{end}}<span class="mute">never shown</span></dd>
+{{else}}<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>{{end}}
 <dt>Services</dt><dd>{{range .Row.Services}}<a class="chip" href="/services/{{.}}">{{.}}</a>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Row.UsedBy}}<a class="chip" href="/agents/{{.}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Last used</dt><dd>{{with .Row.LastUsed}}{{.}}{{else}}never{{end}} · {{.Row.CallsToday}} today</dd>
@@ -115,16 +121,21 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <label>Parameter (if a query)<input name="param" value="{{.Connect.Param}}" placeholder="e.g. api_key" autocapitalize="none"></label></div>
 <label>Test request (optional, a harmless GET)<input name="test_path" value="{{.Connect.TestPath}}" placeholder="e.g. /v1/models" autocapitalize="none" spellcheck="false"></label>
 <label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.Connect.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>
+{{if .Row.Parts}}<label>Value sent as the key<select name="key_part">{{range .Row.Parts}}<option{{if eq .Name $.Connect.KeyPart}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+<p class="hint">Send the other values as extra headers (optional):</p>
+<div class="two">{{range .Row.Parts}}<label>Header for {{.Name}}<input name="part_header_{{.Name}}" placeholder="e.g. Modal-Secret; leave empty if this is the key" autocapitalize="none" spellcheck="false"></label>{{end}}</div>{{end}}
 </details>
 <details><summary>Or paste settings from an agent</summary>
 <label>JSON like {"service":"x","base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
-<p class="hint">For an API that needs a second secret, add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
+{{if .Row.Parts}}<p class="hint">For this key add "key_part" (which value is the key) and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}","extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}}</p>{{end}}
+<p class="hint">For an API that needs a second secret, either give one key several values, or add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Connect</button></div>
 </form></details>
 
-<div class="card"><h2>Replace value</h2><form method="post" action="/keys/{{.Row.Name}}/replace"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<div class="card"><h2>Replace {{if .Row.Parts}}or add a value{{else}}value{{end}}</h2><form method="post" action="/keys/{{.Row.Name}}/replace"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .Row.Parts}}<label>Which value<input name="part" list="parts-{{.Row.Name}}" required placeholder="e.g. secret, or a new name" autocapitalize="none" spellcheck="false"></label><datalist id="parts-{{.Row.Name}}">{{range .Row.Parts}}<option>{{.Name}}</option>{{end}}</datalist>{{end}}
 <label>New value<input type="password" name="value" autocomplete="off" required></label>{{template "password" .}}<div class="actions"><button>Replace</button></div></form></div>
 
 <details class="card danger"><summary>Leaked or no longer needed</summary>

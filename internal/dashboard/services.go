@@ -61,7 +61,7 @@ func (b *Backend) keyChoices() ([]string, error) {
 	}
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
-		names = append(names, row.Name)
+		names = append(names, row.valueNames()...)
 	}
 	return names, nil
 }

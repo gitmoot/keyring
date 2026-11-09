@@ -12,14 +12,29 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/gitmoot/keyring/internal/fileutil"
 )
 
-var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[a-z0-9_]{1,32})?$`)
 
-// ValidName reports whether name can be a key name (an env-style identifier).
+// ValidName reports whether name can be a key name: an env-style identifier,
+// optionally with one ".part" for one of several values of the same key
+// (e.g. MODAL.id and MODAL.secret).
 func ValidName(name string) bool { return namePattern.MatchString(name) }
+
+// SplitPart returns the key and part of a name: "MODAL.id" gives "MODAL",
+// "id"; a name without a part gives the name and "".
+func SplitPart(name string) (key, part string) {
+	key, part, _ = strings.Cut(name, ".")
+	return key, part
+}
+
+// ValidPart reports whether part can name one value of a key.
+func ValidPart(part string) bool { return partPattern.MatchString(part) }
+
+var partPattern = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
 
 // Load returns every key in the store. A missing file is an empty store. A
 // file other users can read or write is refused: fix its mode first.

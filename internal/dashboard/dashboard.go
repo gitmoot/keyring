@@ -66,13 +66,12 @@ func (b *Backend) nav() nav {
 	// names that have none yet.
 	if names, err := store.Names(b.StorePath); err == nil {
 		set := map[string]bool{}
-		for _, name := range names {
-			set[name] = true
-		}
 		for _, svc := range cfg.Services {
-			for _, name := range svc.KeyNames() {
-				set[name] = true
-			}
+			names = append(names, svc.KeyNames()...)
+		}
+		for _, name := range names {
+			base, _ := store.SplitPart(name)
+			set[base] = true
 		}
 		n.Keys = len(set)
 	}
@@ -150,6 +149,28 @@ type keyRow struct {
 	HasValue   bool
 	// Projects are the projects of the key's services (#111).
 	Projects []string
+	// Parts are the named values of a key that has several (MODAL.id,
+	// MODAL.secret); empty for a key with one value.
+	Parts []keyPart
+}
+
+// keyPart is one named value of a key.
+type keyPart struct {
+	Name     string // "id"
+	Full     string // "MODAL.id", the name services use
+	HasValue bool
+}
+
+// valueNames are the stored names behind a key row: its parts, or itself.
+func (r keyRow) valueNames() []string {
+	if len(r.Parts) == 0 {
+		return []string{r.Name}
+	}
+	out := make([]string, len(r.Parts))
+	for i, p := range r.Parts {
+		out[i] = p.Full
+	}
+	return out
 }
 
 // grant is an agent's access to a key, for the chips in the keys table.
@@ -288,12 +309,31 @@ func (b *Backend) rows() ([]keyRow, error) {
 	}
 	sort.Strings(all)
 	all = compact(all)
-	rows := make([]keyRow, 0, len(all))
+	// One row per key: MODAL.id and MODAL.secret are the parts of MODAL.
+	parts := map[string][]keyPart{}
+	var bases []string
 	for _, name := range all {
-		row := keyRow{Name: name, HasValue: has[name]}
+		base, part := store.SplitPart(name)
+		if len(bases) == 0 || bases[len(bases)-1] != base {
+			bases = append(bases, base)
+		}
+		if part != "" {
+			parts[base] = append(parts[base], keyPart{Name: part, Full: name, HasValue: has[name]})
+		}
+	}
+	bases = compact(bases)
+	rows := make([]keyRow, 0, len(bases))
+	for _, name := range bases {
+		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name]}
+		if len(row.Parts) > 0 {
+			row.HasValue = true
+			for _, p := range row.Parts {
+				row.HasValue = row.HasValue && p.HasValue
+			}
+		}
 		services := map[string]bool{}
 		for sname, svc := range cfg.Services {
-			if slices.Contains(svc.KeyNames(), name) {
+			if slices.ContainsFunc(svc.KeyNames(), func(k string) bool { b, _ := store.SplitPart(k); return b == name }) {
 				services[sname] = true
 				row.Services = append(row.Services, sname)
 			}
@@ -348,8 +388,8 @@ func (b *Backend) rows() ([]keyRow, error) {
 			// A live refresh failure outranks an older test result.
 			m.Status, m.Reason = "failing", failure
 		}
-		row.Status, row.StatusClass = describe(has[name], m)
-		row.State = state(has[name], m)
+		row.Status, row.StatusClass = describe(row.HasValue, m)
+		row.State = state(row.HasValue, m)
 		rows = append(rows, row)
 	}
 	return rows, nil
@@ -621,7 +661,7 @@ func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string)
 }
 
 func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, name, msg string) {
-	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg})
+	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": []string{"", "", "", ""}})
 }
 
 // errValueControl: the value has a line break or control character inside it.
@@ -633,7 +673,11 @@ var errValueControl = errors.New("the value has a line break or control characte
 // line break from copying) is removed; a value with a line break or control
 // character inside is refused.
 func readValue(r *http.Request) (string, error) {
-	v := strings.Trim(r.PostFormValue("value"), " \t\r\n")
+	return checkValue(r.PostFormValue("value"))
+}
+
+func checkValue(raw string) (string, error) {
+	v := strings.Trim(raw, " \t\r\n")
 	if v == "" {
 		return "", errors.New("paste the key value")
 	}
@@ -643,26 +687,85 @@ func readValue(r *http.Request) (string, error) {
 	return v, nil
 }
 
-// addKey stores a new key: a name and a value, nothing else. Which API it is
-// for is set later on the key's page ("Connect to a service").
+// maxParts bounds the values of one key.
+const maxParts = 4
+
+// readParts reads the "part" / "part_value" rows of the add-key form: the
+// named values of a key with several (MODAL: id, secret). None when the form
+// has a single value.
+func readParts(r *http.Request) (map[string]string, string) {
+	names, values := r.PostForm["part"], r.PostForm["part_value"]
+	parts := map[string]string{}
+	for i, raw := range names {
+		part := strings.ToLower(strings.TrimSpace(raw))
+		value := ""
+		if i < len(values) {
+			value = values[i]
+		}
+		if part == "" && strings.TrimSpace(value) == "" {
+			continue // an empty extra row
+		}
+		if !store.ValidPart(part) {
+			return nil, "Name each value with lowercase letters, digits or _, e.g. id and secret."
+		}
+		if _, dup := parts[part]; dup {
+			return nil, "Two values have the name " + part + "."
+		}
+		v, err := checkValue(value)
+		if err != nil {
+			if errors.Is(err, errValueControl) {
+				return nil, "The value for " + part + " has a line break or control character inside it."
+			}
+			return nil, "Paste a value for " + part + "."
+		}
+		parts[part] = v
+	}
+	if len(parts) == 0 {
+		return nil, ""
+	}
+	if len(parts) == 1 {
+		return nil, "A key with named values needs at least two. For one value, leave the names empty."
+	}
+	if len(parts) > maxParts {
+		return nil, fmt.Sprintf("At most %d values per key.", maxParts)
+	}
+	return parts, ""
+}
+
+// addKey stores a new key: a name and one value, or several named values
+// (MODAL with id and secret, stored as MODAL.id and MODAL.secret). Which API
+// it is for is set later on the key's page ("Connect to a service").
 func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	name := strings.TrimSpace(r.PostFormValue("name"))
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		b.renderNewKey(w, sid, http.StatusForbidden, name, "Enter your dashboard password to add a key.")
 		return
 	}
-	if !store.ValidName(name) {
+	if base, part := store.SplitPart(name); part != "" || !store.ValidName(base) {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, "The name must be letters, digits and _, not starting with a digit.")
 		return
 	}
-	value, err := readValue(r)
-	if err != nil {
-		msg := "Paste the value, on one line."
-		if errors.Is(err, errValueControl) {
-			msg = "The value has a line break or control character inside it. Paste only the key itself."
-		}
+	parts, msg := readParts(r)
+	if msg != "" {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
 		return
+	}
+	values := map[string]string{}
+	if parts == nil {
+		value, err := readValue(r)
+		if err != nil {
+			msg := "Paste the value, on one line."
+			if errors.Is(err, errValueControl) {
+				msg = "The value has a line break or control character inside it. Paste only the key itself."
+			}
+			b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
+			return
+		}
+		values[name] = value
+	} else {
+		for part, v := range parts {
+			values[name+"."+part] = v
+		}
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -671,15 +774,21 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	if _, taken := keys[name]; taken {
-		b.renderNewKey(w, sid, http.StatusConflict, name, "A key with this name exists. Open it and use Replace.")
-		return
+	// Taken if any value of it is stored. A name a service waits for, with
+	// nothing stored yet, can be added.
+	for stored := range keys {
+		if base, _ := store.SplitPart(stored); base == name {
+			b.renderNewKey(w, sid, http.StatusConflict, name, "A key with this name exists. Open it and use Replace.")
+			return
+		}
 	}
-	if err := store.Set(b.StorePath, name, value); err != nil {
-		b.fail(w, sid, err)
-		return
+	for _, full := range sortedNames(values) {
+		if err := store.Set(b.StorePath, full, values[full]); err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		keys[full] = values[full]
 	}
-	keys[name] = value
 	b.Proxy.Swap(b.Proxy.Config(), keys)
 	// Only the date: a failure here leaves the key stored and working.
 	if meta, err := b.loadMeta(); err == nil {
@@ -687,7 +796,11 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now}
 		_ = b.saveMeta(meta)
 	}
-	b.Admin.Audit("key_added", sid, map[string]any{"key": name})
+	fields := map[string]any{"key": name}
+	if parts != nil {
+		fields["parts"] = sortedNames(parts) // names only, never values
+	}
+	b.Admin.Audit("key_added", sid, fields)
 	http.Redirect(w, r, "/keys/"+name+"?done=added", http.StatusSeeOther)
 }
 
@@ -697,6 +810,10 @@ type connectForm struct {
 	FixedHeaders, ExtraHeaders                                                    map[string]string
 	APNs                                                                          *policy.APNs
 	SignInWithApple                                                               *policy.SignInWithApple
+	// KeyPart and PartHeaders: for a key with several values, the part sent
+	// as the main credential, and header names for the others.
+	KeyPart     string
+	PartHeaders map[string]string
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -720,6 +837,10 @@ type agentSettings struct {
 	// SignInWithApple is the identity of a Sign in with Apple client-secret
 	// signer (auth "sign-in-with-apple-sign").
 	SignInWithApple *policy.SignInWithApple `json:"sign_in_with_apple,omitempty"`
+	// KeyPart picks which value of a key with several is the service's main
+	// credential (sent as auth/header/param); extra_headers may then name the
+	// key's other values by their part names.
+	KeyPart string `json:"key_part,omitempty"`
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -767,6 +888,12 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		Base: strings.TrimSpace(r.PostFormValue("base")), Auth: r.PostFormValue("auth"),
 		Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
 		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")), Pasted: strings.TrimSpace(r.PostFormValue("pasted")),
+		KeyPart: strings.TrimSpace(r.PostFormValue("key_part")), PartHeaders: map[string]string{},
+	}
+	for field, values := range r.PostForm {
+		if part, ok := strings.CutPrefix(field, "part_header_"); ok && len(values) == 1 && strings.TrimSpace(values[0]) != "" {
+			f.PartHeaders[part] = strings.TrimSpace(values[0])
+		}
 	}
 	again := func(status int, msg string) { b.renderKey(w, r, sid, status, name, f, msg) }
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
@@ -792,12 +919,46 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
-		f.APNs, f.SignInWithApple = a.APNs, a.SignInWithApple
+		f.APNs, f.SignInWithApple, f.KeyPart = a.APNs, a.SignInWithApple, a.KeyPart
+		f.PartHeaders = nil
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	if ok, err := b.known(name); err != nil || !ok {
+	row, ok, err := b.row(name)
+	if err != nil || !ok {
 		b.unknownKey(w, r, sid, err)
+		return
+	}
+	keyName := name
+	if len(row.Parts) > 0 {
+		has := map[string]bool{}
+		for _, p := range row.Parts {
+			has[p.Name] = true
+		}
+		if !has[f.KeyPart] {
+			again(http.StatusBadRequest, "Pick which value of "+name+" is sent as the key.")
+			return
+		}
+		keyName = name + "." + f.KeyPart
+		// The other values go in headers: from the form's per-value header
+		// names, or pasted extra_headers naming a part ("secret").
+		if f.ExtraHeaders == nil {
+			f.ExtraHeaders = map[string]string{}
+		}
+		for part, header := range f.PartHeaders {
+			if !has[part] || part == f.KeyPart {
+				again(http.StatusBadRequest, "Only the other values of "+name+" can be sent as extra headers.")
+				return
+			}
+			f.ExtraHeaders[header] = part
+		}
+		for header, ref := range f.ExtraHeaders {
+			if has[ref] {
+				f.ExtraHeaders[header] = name + "." + ref
+			}
+		}
+	} else if f.KeyPart != "" {
+		again(http.StatusBadRequest, name+" has one value; leave key_part out.")
 		return
 	}
 	next, err := policy.LoadAccess(b.rules().AccessFile)
@@ -820,7 +981,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: name, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
@@ -829,7 +990,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.fail(w, sid, err)
 		return
 	}
-	fields := map[string]any{"key": name, "service": f.Service, "base": f.Base}
+	fields := map[string]any{"key": keyName, "service": f.Service, "base": f.Base}
 	if len(extra) > 0 {
 		fields["extra_headers"] = extra // header and key names only, never values
 	}
@@ -890,16 +1051,22 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 // access-file service names it. Changes to any other name are refused, so
 // they cannot leave entries for keys that exist nowhere.
 func (b *Backend) known(name string) (bool, error) {
+	_, ok, err := b.row(name)
+	return ok, err
+}
+
+// row is the keys page row of name.
+func (b *Backend) row(name string) (keyRow, bool, error) {
 	rows, err := b.rows()
 	if err != nil {
-		return false, err
+		return keyRow{}, false, err
 	}
 	for _, row := range rows {
 		if row.Name == name {
-			return true, nil
+			return row, true, nil
 		}
 	}
-	return false, nil
+	return keyRow{}, false, nil
 }
 
 // testService is the first service (by name) that uses the key and has a
@@ -908,7 +1075,7 @@ func (b *Backend) testService(name string) string {
 	cfg := b.Proxy.Config()
 	var names []string
 	for sname, svc := range cfg.Services {
-		if svc.Key == name && !svc.SignOnly() && svc.TestPath != "" {
+		if base, _ := store.SplitPart(svc.Key); base == name && !svc.SignOnly() && svc.TestPath != "" {
 			names = append(names, sname)
 		}
 	}
@@ -931,14 +1098,19 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	value, ok := keys[name]
-	if !ok {
-		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
-		return
+	svc := b.Proxy.Config().Services[sname]
+	sent := map[string]string{}
+	for _, kn := range svc.KeyNames() {
+		v, ok := keys[kn]
+		if !ok {
+			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+			return
+		}
+		sent[kn] = v
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	status, testErr := b.Proxy.TestKey(ctx, b.Proxy.Config().Services[sname], value)
+	status, testErr := b.Proxy.TestKey(ctx, svc, sent[svc.Key])
 	m := KeyMeta{CheckedAt: b.Now().UTC()}
 	switch {
 	case testErr != nil:
@@ -957,9 +1129,11 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	if cur, ok := now[name]; !ok || cur != value {
-		http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
-		return
+	for kn, v := range sent {
+		if cur, ok := now[kn]; !ok || cur != v {
+			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+			return
+		}
 	}
 	meta, err := b.loadMeta()
 	if err == nil {
@@ -996,11 +1170,21 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	if ok, err := b.known(name); err != nil || !ok {
+	row, ok, err := b.row(name)
+	if err != nil || !ok {
 		b.unknownKey(w, r, sid, err)
 		return
 	}
-	if err := store.Set(b.StorePath, name, value); err != nil {
+	// A key with several values replaces or adds one named part.
+	target := name
+	if part := strings.TrimSpace(r.PostFormValue("part")); part != "" || len(row.Parts) > 0 {
+		if len(row.Parts) == 0 || !store.ValidPart(part) {
+			http.Redirect(w, r, "/keys/"+name+"?error=part", http.StatusSeeOther)
+			return
+		}
+		target = name + "." + part
+	}
+	if err := store.Set(b.StorePath, target, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
@@ -1017,7 +1201,7 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.fail(w, sid, err)
 		return
 	}
-	b.Admin.Audit("key_replaced", sid, map[string]any{"key": name})
+	b.Admin.Audit("key_replaced", sid, map[string]any{"key": target})
 	http.Redirect(w, r, "/keys/"+name+"?done=replaced", http.StatusSeeOther)
 }
 
@@ -1075,10 +1259,22 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		b.fail(w, sid, err)
 		return
 	}
-	if _, ok := keys[name]; !ok && !complete {
+	row, _, err := b.row(name)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	stored := []string{}
+	for _, kn := range row.valueNames() {
+		if _, ok := keys[kn]; ok {
+			stored = append(stored, kn)
+		}
+	}
+	if len(stored) == 0 && !complete {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
 		return
 	}
+	ofKey := func(k string) bool { b, _ := store.SplitPart(k); return b == name }
 	var removed []string
 	if complete {
 		next, err := policy.LoadAccess(b.rules().AccessFile)
@@ -1087,7 +1283,7 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 			return
 		}
 		for service, svc := range next.Services {
-			if slices.Contains(svc.KeyNames(), name) {
+			if slices.ContainsFunc(svc.KeyNames(), ofKey) {
 				removed = append(removed, service)
 				delete(next.Services, service)
 				for _, role := range next.Roles {
@@ -1096,7 +1292,7 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 			}
 		}
 		sort.Strings(removed)
-		if _, exists := keys[name]; !exists && len(removed) == 0 {
+		if len(stored) == 0 && len(removed) == 0 {
 			b.notFound(w, sid)
 			return
 		}
@@ -1108,18 +1304,21 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		}
 		b.Admin.Audit("services_removed", sid, map[string]any{"key": name, "services": removed})
 	}
-	if _, exists := keys[name]; exists {
-		if err := store.Delete(b.StorePath, name); err != nil {
+	for _, kn := range stored {
+		if err := store.Delete(b.StorePath, kn); err != nil {
 			b.fail(w, sid, err)
 			return
 		}
+		delete(keys, kn)
 	}
-	delete(keys, name)
 	// Dropping metadata must not keep the deleted value live in the proxy.
 	b.Proxy.Swap(b.Proxy.Config(), keys)
 	meta, err := b.loadMeta()
 	if err == nil {
 		delete(meta, name)
+		for _, kn := range stored {
+			delete(meta, kn)
+		}
 		err = b.saveMeta(meta)
 	}
 	if err != nil {
