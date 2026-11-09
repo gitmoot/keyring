@@ -128,6 +128,7 @@ func Register(b *Backend) {
 	a.Handle("POST /new/key/upload", b.uploadKey)
 	a.Handle("GET /keys/{name}", b.keyPage)
 	a.Handle("POST /keys/{name}/test", b.testKey)
+	a.Handle("POST /keys/{name}/reveal", b.revealKey)
 	a.Handle("POST /keys/{name}/replace", b.replaceKey)
 	a.Handle("POST /keys/{name}/leaked", b.markLeaked)
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)

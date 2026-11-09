@@ -826,14 +826,19 @@ Safety:
 
 The Keys and Agents pages are sortable tables (click a column); forms are one column. Everything works on a phone (the tables scroll sideways with the name column pinned) and follows the system's light or dark mode.
 
-The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (green: full access, amber: limited), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. A value is never shown, not even in part.
+The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (with a dot: full or limited access), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. Values are not shown in the table; a key's page can show its value on request (below).
+- **Show value** (a key's page) shows the stored value, or each named value, after
+  the dashboard password, with a Copy button. It is the answer to that one request:
+  never in a URL, a log or a cached page, and the audit log records `key_revealed`
+  with the key name, never the value. It works for every key, including .p8 and other
+  private keys, from anywhere the dashboard is reachable.
 - **Upload key file** (Keys page) stores a key that comes as a file, such as an Apple
   `.p8` or a `.pem` private key, from the browser: name, file, and the dashboard
   password, with Replace ticked to overwrite an existing name. It is stored exactly
   like `keyring set --file`. A PEM file must hold one usable, unencrypted private key; a
   `.p8` must be the EC P-256 key Apple issues; public keys, certificates and broken
   files are refused before anything is stored. Other text files are stored as they are.
-  The file is read in memory (the request is capped at 64 KiB) and never shown again;
+  The file is read in memory (the request is capped at 64 KiB) and not shown back;
   the key's page shows its kind and a short public-key fingerprint, the audit log
   records name, kind and fingerprint, and for an Apple key the Connect form offers the
   APNs and Sign in with Apple settings to paste.
