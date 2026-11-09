@@ -38,6 +38,11 @@ var (
 	downloadBase  = "https://github.com/gitmoot/keyring/releases/download/"
 	releaseAuthor = "github-actions[bot]"
 	upgradeClient = &http.Client{Timeout: 5 * time.Minute}
+	// GitHub's download host sometimes answers 5xx for minutes (#130): each
+	// request is retried after these pauses (about two minutes in all),
+	// alternating with the release asset API for assets.
+	retryPauses  = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+	upgradeSleep = time.Sleep
 	// upgradeWorkRoot must be a directory that only root can write, all the
 	// way up to /: install.sh refuses to run from anywhere else.
 	upgradeWorkRoot = "/var/root"
@@ -71,8 +76,16 @@ type githubRelease struct {
 	Assets []struct {
 		Name string `json:"name"`
 		URL  string `json:"browser_download_url"`
+		// APIURL is the same file through the API host
+		// (<releasesAPI>/assets/<id>, Accept: application/octet-stream).
+		APIURL string `json:"url"`
 	} `json:"assets"`
 }
+
+// releaseAsset is one file of the release, at both of its GitHub addresses.
+type releaseAsset struct{ url, apiURL string }
+
+var assetAPIPath = regexp.MustCompile(`^/assets/[0-9]+$`)
 
 // upgrade installs the latest release (or want, e.g. "v0.6.0" to go back) on
 // this Mac. It must run as root.
@@ -91,7 +104,7 @@ func upgrade(want string, stdin io.Reader, stdout, stderr io.Writer) error {
 		url = releasesAPI + "/tags/" + want
 	}
 	var rel githubRelease
-	if err := getJSON(url, &rel); err != nil {
+	if err := getJSON(url, &rel, stderr); err != nil {
 		return err
 	}
 	if err := checkRelease(rel, want); err != nil {
@@ -109,11 +122,11 @@ func upgrade(want string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 	archiveName := "keyring-" + rel.TagName + "-darwin-arm64.tar.gz"
-	sumsURL, archiveURL, err := releaseAssets(rel, archiveName)
+	sumsAsset, archiveAsset, err := releaseAssets(rel, archiveName)
 	if err != nil {
 		return err
 	}
-	sums, err := download(sumsURL, 64<<10)
+	sums, err := fetchAsset(sumsAsset, 64<<10, stderr)
 	if err != nil {
 		return err
 	}
@@ -121,7 +134,7 @@ func upgrade(want string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	archive, err := download(archiveURL, 400<<20)
+	archive, err := fetchAsset(archiveAsset, 400<<20, stderr)
 	if err != nil {
 		return err
 	}
@@ -160,26 +173,35 @@ func checkRelease(rel githubRelease, want string) error {
 	return nil
 }
 
-// releaseAssets returns the download URLs of SHA256SUMS and the archive. Each
-// must be exactly <downloadBase><tag>/<name>, the address GitHub gives this
-// release's assets; anything else (another host, another release, a ../) is
-// refused.
-func releaseAssets(rel githubRelease, archiveName string) (sums, archive string, err error) {
+// releaseAssets returns SHA256SUMS and the archive. Each download URL must be
+// exactly <downloadBase><tag>/<name>, the address GitHub gives this release's
+// assets, and each API URL <releasesAPI>/assets/<id>; anything else (another
+// host, another release, a ../) is refused. Either address serves the same
+// bytes, and the archive is checked against SHA256SUMS whichever answered.
+func releaseAssets(rel githubRelease, archiveName string) (sums, archive releaseAsset, err error) {
 	base := downloadBase + rel.TagName + "/"
-	found := map[string]bool{}
+	found := map[string]releaseAsset{}
 	for _, a := range rel.Assets {
 		if a.Name != "SHA256SUMS" && a.Name != archiveName {
 			continue
 		}
 		if a.URL != base+a.Name {
-			return "", "", fmt.Errorf("asset %s is at %s, not %s", a.Name, a.URL, base+a.Name)
+			return sums, archive, fmt.Errorf("asset %s is at %s, not %s", a.Name, a.URL, base+a.Name)
 		}
-		found[a.Name] = true
+		api := ""
+		if rest, ok := strings.CutPrefix(a.APIURL, releasesAPI); ok && assetAPIPath.MatchString(rest) {
+			api = a.APIURL
+		} else if a.APIURL != "" {
+			return sums, archive, fmt.Errorf("asset %s API address %s is not under %s/assets/", a.Name, a.APIURL, releasesAPI)
+		}
+		found[a.Name] = releaseAsset{url: a.URL, apiURL: api}
 	}
-	if !found["SHA256SUMS"] || !found[archiveName] {
-		return "", "", fmt.Errorf("release %s lacks SHA256SUMS or %s", rel.TagName, archiveName)
+	sums, okSums := found["SHA256SUMS"]
+	archive, okArchive := found[archiveName]
+	if !okSums || !okArchive {
+		return sums, archive, fmt.Errorf("release %s lacks SHA256SUMS or %s", rel.TagName, archiveName)
 	}
-	return base + "SHA256SUMS", base + archiveName, nil
+	return sums, archive, nil
 }
 
 // compareTags compares two vX.Y.Z tags numerically: -1, 0 or 1.
@@ -266,8 +288,8 @@ func unpackRelease(archive []byte, dir string) error {
 	return nil
 }
 
-func getJSON(url string, v any) error {
-	body, err := download(url, 1<<20)
+func getJSON(url string, v any, log io.Writer) error {
+	body, err := withRetries(log, func(int) (string, string) { return url, "" }, 1<<20)
 	if err != nil {
 		return err
 	}
@@ -277,21 +299,62 @@ func getJSON(url string, v any) error {
 	return nil
 }
 
-func download(url string, limit int64) ([]byte, error) {
-	resp, err := upgradeClient.Get(url)
+// fetchAsset downloads an asset, alternating between its download URL and
+// the release asset API while GitHub answers 5xx.
+func fetchAsset(a releaseAsset, limit int64, log io.Writer) ([]byte, error) {
+	return withRetries(log, func(attempt int) (string, string) {
+		if attempt%2 == 1 && a.apiURL != "" {
+			return a.apiURL, "application/octet-stream"
+		}
+		return a.url, ""
+	}, limit)
+}
+
+// withRetries GETs the address at(attempt) gives until one answers 200,
+// pausing per retryPauses after a network error, 429 or 5xx. Any other answer
+// is final.
+func withRetries(log io.Writer, at func(attempt int) (url, accept string), limit int64) ([]byte, error) {
+	var last error
+	for attempt := 0; ; attempt++ {
+		url, accept := at(attempt)
+		body, retry, err := download(url, accept, limit)
+		if err == nil {
+			return body, nil
+		}
+		last = err
+		if !retry || attempt >= len(retryPauses) {
+			break
+		}
+		fmt.Fprintf(log, "%v; trying again in %s\n", err, retryPauses[attempt])
+		upgradeSleep(retryPauses[attempt])
+	}
+	return nil, last
+}
+
+// download GETs url; retry reports a failure worth trying again (network
+// error, 429 or 5xx).
+func download(url, accept string, limit int64) (body []byte, retry bool, err error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	resp, err := upgradeClient.Do(req)
+	if err != nil {
+		return nil, true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+		return nil, resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("GET %s: larger than %d bytes", url, limit)
+		return nil, false, fmt.Errorf("GET %s: larger than %d bytes", url, limit)
 	}
-	return body, nil
+	return body, false, nil
 }
