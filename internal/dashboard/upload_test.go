@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -284,5 +285,41 @@ func TestUploadErrorKeepsTheNamedValueRows(t *testing.T) {
 	w := e.upload(map[string]string{"name": "X", "password": password}, "k.p8", []byte("hello"), e.csrf)
 	if got := strings.Count(w.Body.String(), `name="part"`); w.Code != http.StatusBadRequest || fresh == 0 || got != fresh {
 		t.Fatalf("after an upload error: %d rows (fresh page %d), status %d", got, fresh, w.Code)
+	}
+}
+
+// #128: a plain text value gets no fingerprint anywhere: a hash of a secret
+// would confirm a guess at it.
+func TestTextValueHasNoFingerprint(t *testing.T) {
+	e := newEnv(t)
+	value := []byte("hunter2-shared-secret\n")
+	if w := e.upload(map[string]string{"name": "TEXT_KEY", "password": password}, "token.txt", value, e.csrf); w.Code != http.StatusSeeOther {
+		t.Fatalf("upload: %d", w.Code)
+	}
+	sum := sha256.Sum256(value)
+	fp := hex.EncodeToString(sum[:8])
+	if all := e.request("GET", "/keys/TEXT_KEY?done=uploaded", nil).Body.String() + e.audit.String(); strings.Contains(all, fp) || strings.Contains(all, `"fingerprint":"`) {
+		t.Fatal("a fingerprint of a text value is shown or audited")
+	}
+}
+
+// #128: Replace by hand is live at once, even when the access file cannot be
+// read at that moment: the next call sends the new value.
+func TestHandReplaceIsLiveWithoutReadingTheAccessFile(t *testing.T) {
+	e := newEnv(t)
+	// Readable by others: the keyring refuses to load it (root ignores 0000).
+	access := e.proxy.Config().AccessFile
+	if err := os.Chmod(access, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(access, 0o600)
+	if loc := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {newValue}, "password": {password}}).Header().Get("Location"); loc != "/keys/API_KEY?done=replaced" {
+		t.Fatalf("replace: %s", loc)
+	}
+	if code := e.proxyCall(); code != 200 {
+		t.Fatalf("call after replace: %d", code)
+	}
+	if got, _ := e.seenAuth.Load().(string); got != "Bearer "+newValue {
+		t.Fatalf("the running keyring still sends the old value: %q", got)
 	}
 }
