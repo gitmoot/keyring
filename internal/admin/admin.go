@@ -392,7 +392,15 @@ const js = `document.addEventListener("click", function (e) {
   if (!b) return;
   var el = document.getElementById(b.dataset.copy);
   el.select();
-  navigator.clipboard.writeText(el.value).then(function () { b.textContent = "Copied"; });
+  // data-exact: the value in base64, byte for byte (a text box normalizes
+  // line endings and drops a leading newline).
+  var text = el.value;
+  if (el.dataset.exact !== undefined) {
+    var bin = atob(el.dataset.exact), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    text = new TextDecoder("utf-8", {ignoreBOM: true}).decode(bytes); // keep a leading BOM
+  }
+  navigator.clipboard.writeText(text).then(function () { b.textContent = "Copied"; });
 });
 document.addEventListener("change", function (e) {
   var t = e.target;
