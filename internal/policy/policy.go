@@ -843,6 +843,10 @@ func (c *Config) Validate() error {
 		if svc.Auth == AuthAppStoreConnectSign && name != "appstoreconnect" {
 			return errors.New("app-store-connect-sign requires service name appstoreconnect")
 		}
+		if svc.Auth == AuthSignInWithAppleSign && (name == "apple-ads" || name == "appstoreconnect") {
+			// Those names have their own fixed signing paths.
+			return fmt.Errorf("sign-in-with-apple-sign cannot use the reserved service name %s", name)
+		}
 		if svc.Auth == AuthGcloudLogin && (!c.ContainerMode || name != "drive") {
 			return errors.New("Google login is only the container drive consent service")
 		}

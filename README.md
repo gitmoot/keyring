@@ -334,7 +334,7 @@ with Apple) never leaves the keyring; the service is sign-only and proxies nothi
   "sign_in_with_apple": {"client_id": "com.example.app", "team_id": "ABCDE12345", "key_id": "KEY1234567"}}
 ```
 
-- Any service name. `team_id` and `key_id` are Apple's 10-character IDs; `client_id`
+- Any service name except `apple-ads` and `appstoreconnect`, whose sign paths are fixed. `team_id` and `key_id` are Apple's 10-character IDs; `client_id`
   is the app's bundle ID or Services ID.
 - A granted role calls `POST http://127.0.0.1:7700/<role>/_keyring/sign/<service>`
   with an empty body and gets `{"token": "<JWT>", "expires_at": "<RFC 3339>"}`:

@@ -11,6 +11,15 @@ func TestValidateSignInWithApple(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("valid service refused: %v", err)
 	}
+	// apple-ads and appstoreconnect have fixed signing paths of their own, so
+	// a Sign in with Apple service there could never sign (review of #119).
+	for _, reserved := range []string{"apple-ads", "appstoreconnect"} {
+		c := validConfig()
+		c.Services[reserved] = good()
+		if err := c.Validate(); err == nil {
+			t.Errorf("reserved name %s accepted", reserved)
+		}
+	}
 	for name, mutate := range map[string]func(*Service){
 		"no settings":         func(s *Service) { s.SignInWithApple = nil },
 		"lower-case team":     func(s *Service) { s.SignInWithApple.TeamID = "fxq5z9hhy6" },
