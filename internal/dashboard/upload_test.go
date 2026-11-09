@@ -275,3 +275,14 @@ func TestUploadRefusesMultiValueKeys(t *testing.T) {
 		t.Fatal("a refused upload was stored")
 	}
 }
+
+// Review of #125: the add-key page after an upload error keeps the named-value
+// rows, so the owner can still add a key with several values.
+func TestUploadErrorKeepsTheNamedValueRows(t *testing.T) {
+	e := newEnv(t)
+	fresh := strings.Count(e.request("GET", "/new/key", nil).Body.String(), `name="part"`)
+	w := e.upload(map[string]string{"name": "X", "password": password}, "k.p8", []byte("hello"), e.csrf)
+	if got := strings.Count(w.Body.String(), `name="part"`); w.Code != http.StatusBadRequest || fresh == 0 || got != fresh {
+		t.Fatalf("after an upload error: %d rows (fresh page %d), status %d", got, fresh, w.Code)
+	}
+}

@@ -672,13 +672,16 @@ func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string)
 	b.renderNewKey(w, sid, http.StatusOK, "", "")
 }
 
+// newKeyPartRows are the empty named-value rows of the add-key form.
+var newKeyPartRows = make([]string, maxParts)
+
 // renderNewKeyUpload shows the add-key page with an upload error.
 func (b *Backend) renderNewKeyUpload(w http.ResponseWriter, sid string, status int, name, msg string) {
-	b.render(w, status, "newkey", sid, map[string]any{"UploadName": name, "UploadError": msg})
+	b.render(w, status, "newkey", sid, map[string]any{"UploadName": name, "UploadError": msg, "PartRows": newKeyPartRows})
 }
 
 func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, name, msg string) {
-	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": []string{"", "", "", ""}})
+	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": newKeyPartRows})
 }
 
 // errValueControl: the value has a line break or control character inside it.
