@@ -159,6 +159,9 @@ type keyRow struct {
 	// Parts are the named values of a key that has several (MODAL.id,
 	// MODAL.secret); empty for a key with one value.
 	Parts []keyPart
+	// AnyValue: at least one of the key's values is stored (HasValue needs
+	// all of them).
+	AnyValue bool
 	// baseStored: the plain name has a stored value too (the CLI can store
 	// API_KEY next to API_KEY.id); it is one of the row's values.
 	baseStored bool
@@ -338,6 +341,10 @@ func (b *Backend) rows() ([]keyRow, error) {
 	rows := make([]keyRow, 0, len(bases))
 	for _, name := range bases {
 		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name], baseStored: has[name]}
+		row.AnyValue = row.HasValue
+		for _, p := range row.Parts {
+			row.AnyValue = row.AnyValue || p.HasValue
+		}
 		if len(row.Parts) > 0 {
 			row.HasValue = true
 			for _, p := range row.Parts {

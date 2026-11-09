@@ -1,6 +1,9 @@
 package dashboard
 
 import (
+	"encoding/base64"
+	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/store"
 	"html"
 	"net/http"
 	"net/url"
@@ -63,5 +66,37 @@ func TestShowNamedValuesAndFileKeys(t *testing.T) {
 	body = e.request("POST", "/keys/APNS_KEY/reveal", url.Values{"password": {password}}).Body.String()
 	if !strings.Contains(body, "<textarea") || !strings.Contains(html.UnescapeString(body), string(file)) {
 		t.Fatal("the .p8 is not shown whole")
+	}
+}
+
+// Review of #133: Show is offered when any value of a key is stored, and Copy
+// carries the exact stored bytes (leading newline, CR, CRLF).
+func TestShowPartialKeyAndExactCopy(t *testing.T) {
+	e := newEnv(t)
+	if err := store.Set(e.backend.StorePath, "PARTIAL.id", "id-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	access.Services["partial"] = policy.Service{Base: "https://api.example.com", Key: "PARTIAL.id", Auth: policy.AuthHeader, Header: "X-Id",
+		ExtraHeaders: map[string]string{"X-Secret": "PARTIAL.secret"}}
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(next, keys)
+	if page := e.request("GET", "/keys/PARTIAL", nil).Body.String(); !strings.Contains(page, `action="/keys/PARTIAL/reveal"`) {
+		t.Fatal("Show is not offered for a key with some values stored")
+	}
+	raw := "\nline one\r\nline two\rend\n"
+	if err := store.Set(e.backend.StorePath, "FILE_KEY", raw); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ = store.Load(e.backend.StorePath)
+	e.proxy.Swap(e.proxy.Config(), keys)
+	body := e.request("POST", "/keys/FILE_KEY/reveal", url.Values{"password": {password}}).Body.String()
+	if !strings.Contains(body, `data-exact="`+base64.StdEncoding.EncodeToString([]byte(raw))+`"`) {
+		t.Fatal("Copy does not carry the exact value")
 	}
 }

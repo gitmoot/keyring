@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/base64"
 	"net/http"
 
 	"github.com/gitmoot/keyring/internal/store"
@@ -14,7 +15,10 @@ import (
 // revealedValue is one value on the reveal page.
 type revealedValue struct {
 	ID, Label, Value string
-	Multiline        bool
+	// Exact is the value in base64: Copy uses it, because a text box
+	// normalizes line endings and drops a leading newline.
+	Exact     string
+	Multiline bool
 }
 
 func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) {
@@ -44,7 +48,7 @@ func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) 
 		if _, part := store.SplitPart(full); part != "" {
 			label = part
 		}
-		values = append(values, revealedValue{ID: "value-" + string(rune('a'+i)), Label: label, Value: v,
+		values = append(values, revealedValue{ID: "value-" + string(rune('a'+i)), Label: label, Value: v, Exact: base64.StdEncoding.EncodeToString([]byte(v)),
 			Multiline: len(v) > 120 || containsNewline(v)})
 		shown = append(shown, full)
 	}

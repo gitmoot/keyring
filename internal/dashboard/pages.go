@@ -111,7 +111,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <dt>Last used</dt><dd>{{with .Row.LastUsed}}{{.}}{{else}}never{{end}} · {{.Row.CallsToday}} today</dd>
 {{if not .Meta.CheckedAt.IsZero}}<dt>Tested</dt><dd>{{.Meta.CheckedAt.Format "2006-01-02 15:04"}} UTC</dd>{{end}}
 </dl>
-{{if .Row.HasValue}}<details class="inline"><summary>Show {{if .Row.Parts}}values{{else}}value{{end}}</summary><form method="post" action="/keys/{{.Row.Name}}/reveal"><input type="hidden" name="csrf" value="{{.CSRF}}">{{template "password" .}}<div class="actions"><button class="ghost">Show</button></div></form></details>{{end}}
+{{if .Row.AnyValue}}<details class="inline"><summary>Show {{if .Row.Parts}}values{{else}}value{{end}}</summary><form method="post" action="/keys/{{.Row.Name}}/reveal"><input type="hidden" name="csrf" value="{{.CSRF}}">{{template "password" .}}<div class="actions"><button class="ghost">Show</button></div></form></details>{{end}}
 {{if .Testable}}<form method="post" action="/keys/{{.Row.Name}}/test" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Test now</button></form>{{end}}
 </div>
 
@@ -237,7 +237,8 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="head"><a class="back" href="/keys/{{.Name}}">{{.Name}}</a><h1 class="mono">{{.Name}}</h1></div>
 <div class="card">
 <p class="warnbox">Shown because you asked. Copy what you need and leave this page; it is not kept, and the audit log records that it was shown.</p>
-{{range .Values}}<label>{{.Label}}{{if .Multiline}}<textarea id="{{.ID}}" readonly autocomplete="off" spellcheck="false" rows="8">{{.Value}}</textarea>{{else}}<input id="{{.ID}}" readonly autocomplete="off" spellcheck="false" value="{{.Value}}">{{end}}</label><div class="actions"><button type="button" data-copy="{{.ID}}">Copy {{.Label}}</button></div>{{end}}
+{{range .Values}}<label>{{.Label}}{{if .Multiline}}<textarea id="{{.ID}}" data-exact="{{.Exact}}" readonly autocomplete="off" spellcheck="false" rows="8">
+{{.Value}}</textarea>{{else}}<input id="{{.ID}}" data-exact="{{.Exact}}" readonly autocomplete="off" spellcheck="false" value="{{.Value}}">{{end}}</label><div class="actions"><button type="button" data-copy="{{.ID}}">Copy {{.Label}}</button></div>{{end}}
 <div class="actions"><a class="btn ghost" href="/keys/{{.Name}}">Done</a></div></div>
 {{template "bottom"}}{{end}}
 
