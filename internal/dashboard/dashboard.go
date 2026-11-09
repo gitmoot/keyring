@@ -104,6 +104,11 @@ type KeyMeta struct {
 	// CreatedAt is when the key was added in the dashboard (nil for keys
 	// added before it kept this, or with keyring set). It survives a replace.
 	CreatedAt *time.Time `json:"created_at,omitempty"`
+	// Kind and Fingerprint describe a value uploaded as a key file (#126):
+	// e.g. "EC P-256 private key" and the first 16 hex of the SHA-256 of its
+	// public key. Never the value. Cleared when the value is replaced by hand.
+	Kind        string `json:"kind,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // rules are the running rules: a SIGHUP may have changed allow_sources since
@@ -120,6 +125,7 @@ func Register(b *Backend) {
 	a.Handle("GET /keys", b.keysPage)
 	a.Handle("GET /new/key", b.newKeyPage) // not under /keys/: a key may be named "new"
 	a.Handle("POST /keys", b.addKey)
+	a.Handle("POST /new/key/upload", b.uploadKey)
 	a.Handle("GET /keys/{name}", b.keyPage)
 	a.Handle("POST /keys/{name}/test", b.testKey)
 	a.Handle("POST /keys/{name}/replace", b.replaceKey)
@@ -666,6 +672,11 @@ func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string)
 	b.renderNewKey(w, sid, http.StatusOK, "", "")
 }
 
+// renderNewKeyUpload shows the add-key page with an upload error.
+func (b *Backend) renderNewKeyUpload(w http.ResponseWriter, sid string, status int, name, msg string) {
+	b.render(w, status, "newkey", sid, map[string]any{"UploadName": name, "UploadError": msg})
+}
+
 func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, name, msg string) {
 	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": []string{"", "", "", ""}})
 }
@@ -1156,6 +1167,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	meta, err := b.loadMeta()
 	if err == nil {
 		m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
+		m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
 		meta[name] = m
 		err = b.saveMeta(meta)
 	}

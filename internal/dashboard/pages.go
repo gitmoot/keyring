@@ -31,7 +31,7 @@ var pages = template.Must(template.New("pages").Parse(`
 {{if eq .Notice "deleted"}}<p class="notice">Key deleted.</p>{{end}}
 <div class="bar"><h1>Keys <span class="count">{{len .Rows}}</span></h1>
 <form method="get" action="/keys" class="tsearch">{{with .Project}}<input type="hidden" name="project" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .Sort}}<input type="hidden" name="sort" value="{{.}}">{{end}}{{if .Desc}}<input type="hidden" name="desc" value="1">{{end}}<input type="search" name="q" value="{{.Query}}" placeholder="Search keys or APIs" aria-label="Search"></form>
-<a class="btn" href="/new/key">Add key</a></div>
+<a class="btn ghost" href="/new/key#upload">Upload key file</a><a class="btn" href="/new/key">Add key</a></div>
 <div class="stats">
 <div class="stat"><small>Keys</small><b>{{.Stats.Keys}}</b></div>
 <div class="stat"><small>Calls today</small><b>{{.Stats.CallsToday}}</b></div>
@@ -86,15 +86,26 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <div class="actions"><button>Add key</button><a class="btn ghost" href="/keys">Cancel</a></div>
 </form></div>
 <p class="hint">Just the name and the value or values. Which API it is for can be set on the key's page, now or later.</p>
+<div class="card" id="upload"><h2>Upload a key file</h2>
+<p class="hint">For a key that comes as a file, such as an Apple .p8 or a .pem private key. The file is checked before it is stored: a file without a usable private key is refused. It is stored like <code>keyring set --file</code> and never shown again.</p>
+{{with .UploadError}}<p class="error">{{.}}</p>{{end}}
+<form method="post" action="/new/key/upload" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Name<input name="name" value="{{.UploadName}}" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="TANDEM_APNS_KEY" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
+<label>Key file<input type="file" name="file" required accept=".p8,.pem,.key,.txt"></label>
+<label class="check"><input type="checkbox" name="replace" value="yes"> Replace the key if this name exists</label>
+{{template "password" .}}
+<div class="actions"><button>Upload</button></div>
+</form></div>
 {{template "bottom"}}{{end}}
 
 {{define "key"}}{{template "top" .}}
-{{if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
+{{if eq .Notice "uploaded"}}<p class="notice">Key file stored{{with .Meta.Kind}}: {{.}}{{end}}{{with .Meta.Fingerprint}}, fingerprint {{.}}{{end}}. Connect it to a service below.</p>{{else if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
 {{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "part"}}<p class="error">Name the value to replace or add: lowercase letters, digits or _.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
 <div class="head"><a class="back" href="/keys">Keys</a><h1 class="mono">{{.Row.Name}}</h1>{{template "status" .Row}}</div>
 <div class="card"><dl>
 {{if .Row.Parts}}<dt>Values</dt><dd>{{range .Row.Parts}}<span class="chip mono">{{.Name}}</span> {{if .HasValue}}<span class="masked">••••••••</span>{{else}}<span class="mute">none stored</span>{{end}}<br>{{end}}<span class="mute">never shown</span></dd>
 {{else}}<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>{{end}}
+{{with .Meta.Kind}}<dt>File</dt><dd>{{.}}{{with $.Meta.Fingerprint}} · <code>{{.}}</code>{{end}}</dd>{{end}}
 <dt>Services</dt><dd>{{range .Row.Services}}<a class="chip" href="/services/{{.}}">{{.}}</a>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Row.UsedBy}}<a class="chip" href="/agents/{{.}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Last used</dt><dd>{{with .Row.LastUsed}}{{.}}{{else}}never{{end}} · {{.Row.CallsToday}} today</dd>
@@ -125,7 +136,10 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <p class="hint">Send the other values as extra headers (optional):</p>
 <div class="two">{{range .Row.Parts}}<label>Header for {{.Name}}<input name="part_header_{{.Name}}" placeholder="e.g. Modal-Secret; leave empty if this is the key" autocapitalize="none" spellcheck="false"></label>{{end}}</div>{{end}}
 </details>
-<details><summary>Or paste settings from an agent</summary>
+{{if eq .Meta.Kind "EC P-256 private key"}}<details open><summary>Or paste settings{{if .Row.Services}}{{else}}: Apple keys{{end}}</summary>
+<p class="hint">For an Apple key, paste one of these with your IDs from Apple Developer (Key ID from the .p8 file name, Team ID from Membership):<br>
+Push notifications: <code>{"service":"apns","base":"https://api.push.apple.com","auth":"apns","apns":{"key_id":"KEY_ID","team_id":"TEAM_ID"}}</code><br>
+Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","sign_in_with_apple":{"client_id":"BUNDLE_ID","team_id":"TEAM_ID","key_id":"KEY_ID"}}</code></p>{{else}}<details><summary>Or paste settings from an agent</summary>{{end}}
 <label>JSON like {"service":"x","base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
 {{if gt (len .Row.Parts) 1}}<p class="hint">For this key add "key_part" (which value is the key) and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}","extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}}</p>{{end}}
 <p class="hint">For an API that needs a second secret, either give one key several values, or add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
