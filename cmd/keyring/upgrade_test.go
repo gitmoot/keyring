@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type tarEntry struct {
@@ -72,6 +73,14 @@ type fakeGitHub struct {
 	downloads    int
 	installedDir string
 	installed    map[string]string
+	// downloadFails: the download host answers this status (e.g. 504) to
+	// this many requests before serving; apiFails the same for the API's
+	// asset path. apiAsset counts files served through the API.
+	failStatus              int
+	downloadFails, apiFails int
+	apiAsset                int
+	pauses                  []time.Duration
+	archiveOnlyThroughAPI   bool
 }
 
 func (f *fakeGitHub) start(t *testing.T) {
@@ -88,12 +97,38 @@ func (f *fakeGitHub) start(t *testing.T) {
 			rel := map[string]any{
 				"tag_name": f.tag, "author": map[string]string{"login": f.author},
 				"assets": []map[string]string{
-					{"name": "SHA256SUMS", "browser_download_url": assetBase + "SHA256SUMS"},
-					{"name": archiveName, "browser_download_url": assetBase + archiveName},
+					{"name": "SHA256SUMS", "browser_download_url": assetBase + "SHA256SUMS", "url": base + "/api/releases/assets/1"},
+					{"name": archiveName, "browser_download_url": assetBase + archiveName, "url": base + "/api/releases/assets/2"},
 				},
 			}
 			json.NewEncoder(w).Encode(rel)
+		case "/api/releases/assets/1", "/api/releases/assets/2":
+			if f.apiFails > 0 {
+				f.apiFails--
+				w.WriteHeader(f.failStatus)
+				return
+			}
+			if r.Header.Get("Accept") != "application/octet-stream" {
+				// Without it the API answers the asset's JSON, not the file.
+				io.WriteString(w, `{"name":"not the file"}`)
+				return
+			}
+			f.apiAsset++
+			if strings.HasSuffix(r.URL.Path, "/1") {
+				sums := f.sums
+				if sums == "" {
+					sums = fmt.Sprintf("%x  %s\n", sha256.Sum256(f.archive), archiveName)
+				}
+				io.WriteString(w, sums)
+			} else {
+				w.Write(f.archive)
+			}
 		case "/download/" + f.tag + "/SHA256SUMS":
+			if f.downloadFails > 0 {
+				f.downloadFails--
+				w.WriteHeader(f.failStatus)
+				return
+			}
 			f.downloads++
 			sums := f.sums
 			if sums == "" {
@@ -101,6 +136,15 @@ func (f *fakeGitHub) start(t *testing.T) {
 			}
 			io.WriteString(w, sums)
 		case "/download/" + f.tag + "/" + archiveName:
+			if f.archiveOnlyThroughAPI {
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
+			if f.downloadFails > 0 {
+				f.downloadFails--
+				w.WriteHeader(f.failStatus)
+				return
+			}
 			f.downloads++
 			w.Write(f.archive)
 		default:
@@ -115,8 +159,9 @@ func (f *fakeGitHub) start(t *testing.T) {
 	set(&upgradeGOOS, "darwin")
 	set(&upgradeWorkRoot, t.TempDir())
 	set(&version, "v0.6.0")
-	oldEUID, oldInstall := upgradeEUID, runInstall
+	oldEUID, oldInstall, oldSleep := upgradeEUID, runInstall, upgradeSleep
 	upgradeEUID = func() int { return 0 }
+	upgradeSleep = func(d time.Duration) { f.pauses = append(f.pauses, d) }
 	runInstall = func(dir string, _ io.Reader, _, _ io.Writer) error {
 		f.installedDir = dir
 		f.installed = map[string]string{}
@@ -137,7 +182,7 @@ func (f *fakeGitHub) start(t *testing.T) {
 		for _, r := range restore {
 			r()
 		}
-		upgradeEUID, runInstall = oldEUID, oldInstall
+		upgradeEUID, runInstall, upgradeSleep = oldEUID, oldInstall, oldSleep
 	})
 }
 
@@ -280,5 +325,81 @@ func TestUpgradeFromADevBuildInstallsTheLatest(t *testing.T) {
 	version = "dev"
 	if code, out := runUpgrade(t); code != 0 || f.installed == nil {
 		t.Fatalf("dev build: exit %d: %s", code, out)
+	}
+}
+
+// #130: GitHub's download host answering 504 for a while does not stop an
+// upgrade: it is retried with pauses, alternating with the API asset address,
+// and the archive is still checked against SHA256SUMS.
+func TestUpgradeRidesOutGitHubDownload504s(t *testing.T) {
+	f := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries()),
+		failStatus: http.StatusGatewayTimeout, downloadFails: 1000}
+	f.start(t)
+	code, out := runUpgrade(t)
+	if code != 0 || !strings.Contains(out, "upgraded to v0.7.0") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if f.apiAsset != 2 || f.installed["keyring"] != "new keyring binary" {
+		t.Fatalf("served through the API: %d, installed %v", f.apiAsset, f.installed)
+	}
+	if len(f.pauses) == 0 || !strings.Contains(out, "504 Gateway Timeout; trying again in") {
+		t.Fatalf("no retry reported: %s", out)
+	}
+}
+
+// Both addresses failing for about two minutes ends with the last error and
+// nothing installed; a 404 is not retried.
+func TestUpgradeGivesUpAfterTheRetriesAndNeverRetriesA404(t *testing.T) {
+	f := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries()),
+		failStatus: http.StatusBadGateway, downloadFails: 1000, apiFails: 1000}
+	f.start(t)
+	code, out := runUpgrade(t)
+	if code == 0 || f.installed != nil || !strings.Contains(out, "502 Bad Gateway") {
+		t.Fatalf("exit %d installed %v: %s", code, f.installed, out)
+	}
+	var total time.Duration
+	for _, p := range f.pauses {
+		total += p
+	}
+	if len(f.pauses) != len(retryPauses) || total < time.Minute || total > 3*time.Minute {
+		t.Fatalf("pauses %v (total %s), want about two minutes", f.pauses, total)
+	}
+	g := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]", archive: releaseArchive(t, goodEntries()),
+		failStatus: http.StatusNotFound, downloadFails: 1000, apiFails: 1000}
+	g.start(t)
+	if code, _ := runUpgrade(t); code == 0 || len(g.pauses) != 0 {
+		t.Fatalf("404: exit %d after %d pauses, want an immediate failure", code, len(g.pauses))
+	}
+}
+
+// The archive fetched through the API is checked like any other: a mismatch
+// with SHA256SUMS installs nothing.
+func TestUpgradeChecksAnArchiveFetchedThroughTheAPI(t *testing.T) {
+	good := releaseArchive(t, goodEntries())
+	f := &fakeGitHub{tag: "v0.7.0", author: "github-actions[bot]",
+		archive:    releaseArchive(t, []tarEntry{{name: "keyring", body: "evil"}, {name: "keyring-caddy", body: "x"}, {name: "install.sh", body: "x"}}),
+		sums:       fmt.Sprintf("%x  keyring-v0.7.0-darwin-arm64.tar.gz\n", sha256.Sum256(good)),
+		failStatus: http.StatusGatewayTimeout}
+	f.start(t)
+	f.downloadFails = 0
+	// SHA256SUMS from the download host (the real one), the archive only
+	// through the API.
+	f.archiveOnlyThroughAPI = true
+	code, out := runUpgrade(t)
+	if code == 0 || f.installed != nil || !strings.Contains(out, "does not match") {
+		t.Fatalf("exit %d installed %v: %s", code, f.installed, out)
+	}
+}
+
+// An API address outside this repository's releases is refused.
+func TestUpgradeRefusesAnAPIAddressOutsideTheReleases(t *testing.T) {
+	rel := githubRelease{TagName: "v0.7.0"}
+	rel.Assets = append(rel.Assets, struct {
+		Name   string `json:"name"`
+		URL    string `json:"browser_download_url"`
+		APIURL string `json:"url"`
+	}{"SHA256SUMS", downloadBase + "v0.7.0/SHA256SUMS", "https://evil.example/assets/1"})
+	if _, _, err := releaseAssets(rel, "x.tar.gz"); err == nil || !strings.Contains(err.Error(), "API address") {
+		t.Fatalf("err = %v", err)
 	}
 }
