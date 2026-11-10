@@ -842,6 +842,7 @@ type connectForm struct {
 	// as the main credential, and header names for the others.
 	KeyPart     string
 	PartHeaders map[string]string
+	OAuth2      *policy.OAuth2
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -869,6 +870,9 @@ type agentSettings struct {
 	// credential (sent as auth/header/param); extra_headers may then name the
 	// key's other values by their part names.
 	KeyPart string `json:"key_part,omitempty"`
+	// OAuth2 makes an "oauth2" service: the key is the refresh token, and
+	// client_secret_key names another stored key (never a value).
+	OAuth2 *policy.OAuth2 `json:"oauth2,omitempty"`
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -882,18 +886,24 @@ func (b *Backend) extraHeaderKeys(extra map[string]string) (string, error) {
 		return "", err
 	}
 	for _, header := range sortedNames(extra) {
-		key := extra[header]
-		if !store.ValidName(key) {
-			// Never repeat it: it may be a secret pasted by mistake.
-			return "extra_headers: " + header + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here.", nil
-		}
-		if !stored[key] {
-			// The name is not repeated either: an identifier-shaped secret
-			// can pass as a name.
-			return "extra_headers: " + header + " must name a key with a stored value. Add the value under Keys first, then name that key here.", nil
+		if msg := storedKeyRef(stored, "extra_headers: "+header, extra[header]); msg != "" {
+			return msg, nil
 		}
 	}
 	return "", nil
+}
+
+// storedKeyRef checks that key names a stored key and returns the message to
+// show if not, naming field and never key: a secret pasted by mistake must
+// not be repeated, and an identifier-shaped secret can pass as a name.
+func storedKeyRef(stored map[string]bool, field, key string) string {
+	if !store.ValidName(key) {
+		return field + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here."
+	}
+	if !stored[key] {
+		return field + " must name a key with a stored value. Add the value under Keys first, then name that key here."
+	}
+	return ""
 }
 
 // connectFormFor fills the form from a preset for key name.
@@ -947,7 +957,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
-		f.APNs, f.SignInWithApple, f.KeyPart = a.APNs, a.SignInWithApple, a.KeyPart
+		f.APNs, f.SignInWithApple, f.KeyPart, f.OAuth2 = a.APNs, a.SignInWithApple, a.KeyPart, a.OAuth2
 		f.PartHeaders = nil
 	}
 	b.Mu.Lock()
@@ -1005,11 +1015,24 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusBadRequest, msg)
 		return
 	}
+	if f.OAuth2 != nil && f.OAuth2.ClientSecretKey != "" {
+		// Same rule as extra headers: a stored key's name, never a value,
+		// and never repeated in the message.
+		stored, err := b.storedNames()
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		if msg := storedKeyRef(stored, "oauth2.client_secret_key", f.OAuth2.ClientSecretKey); msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
+		}
+	}
 	var extra map[string]string
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return

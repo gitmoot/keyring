@@ -447,6 +447,17 @@ Google (Gmail, Drive, Sheets, Calendar) and similar APIs give a long-lived refre
 
 To get the refresh token, store it with `keyring set` or the dashboard, or let the account's owner sign in through a consent link (next section).
 
+From the dashboard: add the refresh token and the client secret as two keys, open the
+refresh token's key, choose **Connect to a service** and paste the settings with an
+`oauth2` block naming the secret's key (never its value), for example
+`{"service":"google-lenscale-gmail-send","base":"https://gmail.googleapis.com","auth":"oauth2","oauth2":{"token_url":"https://oauth2.googleapis.com/token","client_id":"<id>.apps.googleusercontent.com","client_secret_key":"GMAIL_LENSCALE_SECRET"}}`.
+A Gmail refresh token for one scope (for example `https://www.googleapis.com/auth/gmail.send`)
+can be made with Google's OAuth 2.0 Playground using your own OAuth client: add
+`https://developers.google.com/oauthplayground` as an authorized redirect URI of a
+*Web application* client, tick "Use your own OAuth credentials", authorize only that
+scope, and exchange the code. `gmail.send` cannot read the profile, so such a service
+has no test request; a first real send is the test.
+
 ### Personal and business Google accounts through gcloud (host only)
 
 `auth: "gcloud"` uses the Google CLI's own login and token minting. It needs
