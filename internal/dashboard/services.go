@@ -224,6 +224,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		case !pasted:
 			next.ClientID, next.TokenURL, next.ClientSecretKey = f.ClientID, f.TokenURL, f.ClientSecretKey
 		}
+		if msg := clientIDProblem(&next); msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
+		}
 		if next.ClientSecretKey != "" {
 			stored, err := b.storedNames()
 			if err != nil {

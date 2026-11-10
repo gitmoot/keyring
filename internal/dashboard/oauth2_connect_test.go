@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -144,7 +145,7 @@ func TestEditOAuthServiceFixesAWrongClientID(t *testing.T) {
 	e := newEnv(t)
 	g, sends := fakeGoogle(t)
 	e.request("POST", "/keys", url.Values{"name": {"GMAIL_SECRET"}, "value": {gmailSecret}, "password": {password}})
-	pasted := `{"service":"gm","base":"` + g.URL + `","auth":"oauth2","oauth2":{"token_url":"` + g.URL + `/token","client_id":"CLIENT_ID","client_secret_key":"GMAIL_SECRET"}}`
+	pasted := `{"service":"gm","base":"` + g.URL + `","auth":"oauth2","oauth2":{"token_url":"` + g.URL + `/token","client_id":"wrong.apps.googleusercontent.com","client_secret_key":"GMAIL_SECRET"}}`
 	e.addAndConnect("GMAIL_REFRESH", gmailRefresh, url.Values{"pasted": {pasted}})
 	cfg := e.proxy.Config()
 	access := cfg.AccessList
@@ -165,7 +166,7 @@ func TestEditOAuthServiceFixesAWrongClientID(t *testing.T) {
 		t.Fatalf("send with a wrong client ID: %d, want 503", code)
 	}
 	page := e.request("GET", "/services/gm", nil).Body.String()
-	if !strings.Contains(page, `name="client_id" value="CLIENT_ID"`) {
+	if !strings.Contains(page, `name="client_id" value="wrong.apps.googleusercontent.com"`) {
 		t.Fatal("the edit form does not show the client ID")
 	}
 	w := e.edit("gm", url.Values{"base": {g.URL}, "auth": {"oauth2"}, "client_id": {"fixture.apps.googleusercontent.com"}, "token_url": {g.URL + "/token"}, "client_secret_key": {"GMAIL_SECRET"}})
@@ -192,5 +193,37 @@ func TestEditOAuthServiceFixesAWrongClientID(t *testing.T) {
 	}
 	if all := e.request("GET", "/services/gm", nil).Body.String() + e.audit.String(); strings.Contains(all, gmailSecret) || strings.Contains(all, gmailRefresh) {
 		t.Fatal("a secret is shown or logged")
+	}
+}
+
+// Jarvis 447635: a template placeholder saved as the client ID made Google
+// answer invalid_client. Connect and edit refuse a placeholder, and a
+// non-Google client ID for Google's token endpoint; a real one is accepted.
+func TestOAuthPlaceholderClientIDRefused(t *testing.T) {
+	e := newEnv(t)
+	e.request("POST", "/keys", url.Values{"name": {"GM_SECRET"}, "value": {gmailSecret}, "password": {password}})
+	e.request("POST", "/keys", url.Values{"name": {"GM_REFRESH"}, "value": {gmailRefresh}, "password": {password}})
+	connect := func(service, clientID string) *httptest.ResponseRecorder {
+		pasted := `{"service":"` + service + `","base":"https://gmail.googleapis.com","auth":"oauth2","oauth2":{"token_url":"https://oauth2.googleapis.com/token","client_id":"` + clientID + `","client_secret_key":"GM_SECRET"}}`
+		return e.request("POST", "/keys/GM_REFRESH/connect", url.Values{"pasted": {pasted}, "password": {password}})
+	}
+	for id, want := range map[string]string{
+		"PASTE_YOUR_CLIENT_ID_HERE":           "placeholder",
+		"123-abc.apps.example.com":            "ends in .apps.googleusercontent.com",
+		"<client>.apps.googleusercontent.com": "placeholder",
+	} {
+		if w := connect("gm", id); w.Code != http.StatusBadRequest || !strings.Contains(html.UnescapeString(w.Body.String()), want) {
+			t.Errorf("connect %s: %d, want 400 with %q", id, w.Code, want)
+		}
+	}
+	if _, ok := e.proxy.Config().Services["gm"]; ok {
+		t.Fatal("a placeholder client ID was saved")
+	}
+	if w := connect("gm", "123-abc.apps.googleusercontent.com"); w.Code != http.StatusSeeOther {
+		t.Fatalf("real client ID: %d %s", w.Code, w.Body.String())
+	}
+	w := e.edit("gm", url.Values{"base": {"https://gmail.googleapis.com"}, "auth": {"oauth2"}, "client_id": {"PASTE_YOUR_CLIENT_ID_HERE"}, "token_url": {"https://oauth2.googleapis.com/token"}, "client_secret_key": {"GM_SECRET"}})
+	if w.Code != http.StatusBadRequest || e.proxy.Config().Services["gm"].OAuth2.ClientID != "123-abc.apps.googleusercontent.com" {
+		t.Fatalf("edit to a placeholder: %d, client ID now %q", w.Code, e.proxy.Config().Services["gm"].OAuth2.ClientID)
 	}
 }

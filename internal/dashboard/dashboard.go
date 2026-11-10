@@ -911,6 +911,26 @@ func storedKeyRef(stored map[string]bool, field, key string) string {
 	return ""
 }
 
+// clientIDProblem returns the message to show if an OAuth client ID is a
+// template placeholder left in (Jarvis 447635: a saved "PASTE_YOUR_CLIENT_ID_HERE"
+// made Google answer invalid_client), or, for Google's token endpoint, not a
+// Google client ID. Uppercase only: real IDs (Google's are lowercase) never
+// match. Checked on connect and edit, not on load, so a running config still
+// starts.
+func clientIDProblem(o *policy.OAuth2) string {
+	id := o.ClientID
+	for _, p := range []string{"PASTE", "YOUR", "CLIENT_ID", "<", ">"} {
+		if strings.Contains(id, p) {
+			return "The OAuth client ID looks like a placeholder. Copy the real one from the provider (Google: Clients > your client > Client ID)."
+		}
+	}
+	if u, err := url.Parse(o.TokenURL); err == nil && (u.Hostname() == "oauth2.googleapis.com" || u.Hostname() == "accounts.google.com") &&
+		!strings.HasSuffix(id, ".apps.googleusercontent.com") {
+		return "A Google OAuth client ID ends in .apps.googleusercontent.com. Copy it from Google Cloud: Clients > your client > Client ID."
+	}
+	return ""
+}
+
 // connectFormFor fills the form from a preset for key name.
 func (b *Backend) connectFormFor(name, id string) connectForm {
 	f := connectForm{Preset: id, Auth: policy.AuthBearer}
@@ -1019,6 +1039,12 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	} else if msg != "" {
 		again(http.StatusBadRequest, msg)
 		return
+	}
+	if f.OAuth2 != nil {
+		if msg := clientIDProblem(f.OAuth2); msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
+		}
 	}
 	if f.OAuth2 != nil && f.OAuth2.ClientSecretKey != "" {
 		// Same rule as extra headers: a stored key's name, never a value,
