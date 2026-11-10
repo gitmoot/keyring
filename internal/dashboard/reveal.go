@@ -2,7 +2,9 @@ package dashboard
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gitmoot/keyring/internal/store"
 )
@@ -19,6 +21,28 @@ type revealedValue struct {
 	// normalizes line endings and drops a leading newline.
 	Exact     string
 	Multiline bool
+	// Warning names what a copy-paste may have added: characters that do
+	// not show, or quotes around the value. Never the characters' values.
+	Warning string
+}
+
+// valueWarning describes invisible or wrapping characters in a single-line
+// value (file values such as PEM keys are expected to be multi-line).
+func valueWarning(v string) string {
+	if strings.ContainsAny(v, "\n\r") {
+		return ""
+	}
+	n := 0
+	for _, r := range v {
+		n++
+		if r > 0x7e || (r < 0x20 && r != '\t') {
+			return fmt.Sprintf("contains a character that is not plain ASCII (U+%04X at character %d), often an invisible one from copying; paste the value again", r, n)
+		}
+	}
+	if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+		return "starts and ends with quotes; if the provider's value has none, replace it without them"
+	}
+	return ""
 }
 
 func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) {
@@ -49,7 +73,7 @@ func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) 
 			label = part
 		}
 		values = append(values, revealedValue{ID: "value-" + string(rune('a'+i)), Label: label, Value: v, Exact: base64.StdEncoding.EncodeToString([]byte(v)),
-			Multiline: len(v) > 120 || containsNewline(v)})
+			Multiline: len(v) > 120 || containsNewline(v), Warning: valueWarning(v)})
 		shown = append(shown, full)
 	}
 	if len(values) == 0 {

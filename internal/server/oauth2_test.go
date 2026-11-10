@@ -309,3 +309,31 @@ func TestOAuthTestKeyMintsWithGivenRefreshToken(t *testing.T) {
 		t.Fatalf("test request %s with %q", r.URL.Path, authOf(r))
 	}
 }
+
+// #144: the owner's failure status carries the provider's description so
+// cases sharing one code can be told apart (Google's invalid_client: client
+// not found vs. wrong secret); agents' 503 bodies still do not.
+func TestOAuthFailureDescriptionForTheOwnerOnly(t *testing.T) {
+	up, _ := upstream(t)
+	te := newTokenEndpoint(t, 3600)
+	te.reply = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":"invalid_client","error_description":"Unauthorized"}`)
+	}
+	h, _, _ := newOAuthHandler(t, up.URL, te.srv.URL, policy.Access{Paths: []string{"/"}})
+	w := call(h, "GET", "/api/v1/x", testToken, nil)
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "Unauthorized") {
+		t.Fatalf("agent body: %d %q", w.Code, w.Body)
+	}
+	msg, rejected := h.OAuthFailure("API_KEY")
+	if !rejected || !strings.Contains(msg, `invalid_client`) || !strings.Contains(msg, `provider said: "Unauthorized"`) {
+		t.Fatalf("owner status = %q", msg)
+	}
+	// A description that echoes a secret, or is not plain text, is dropped.
+	for _, d := range []string{"bad " + testRefresh, "line\nbreak", strings.Repeat("é", 3)} {
+		if got := oauthDescription(d, testRefresh, "s", "c"); got != "" {
+			t.Errorf("%q kept as %q", d, got)
+		}
+	}
+}

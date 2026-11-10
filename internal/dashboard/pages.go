@@ -238,7 +238,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="card">
 <p class="warnbox">Shown because you asked. Copy what you need and leave this page; it is not kept, and the audit log records that it was shown.</p>
 {{range .Values}}<label>{{.Label}}{{if .Multiline}}<textarea id="{{.ID}}" data-exact="{{.Exact}}" readonly autocomplete="off" spellcheck="false" rows="8">
-{{.Value}}</textarea>{{else}}<input id="{{.ID}}" data-exact="{{.Exact}}" readonly autocomplete="off" spellcheck="false" value="{{.Value}}">{{end}}</label><div class="actions"><button type="button" data-copy="{{.ID}}">Copy {{.Label}}</button></div>{{end}}
+{{.Value}}</textarea>{{else}}<input id="{{.ID}}" data-exact="{{.Exact}}" readonly autocomplete="off" spellcheck="false" value="{{.Value}}">{{end}}</label>{{with .Warning}}<p class="warnbox">This value {{.}}.</p>{{end}}<div class="actions"><button type="button" data-copy="{{.ID}}">Copy {{.Label}}</button></div>{{end}}
 <div class="actions"><a class="btn ghost" href="/keys/{{.Name}}">Done</a></div></div>
 {{template "bottom"}}{{end}}
 
