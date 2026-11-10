@@ -136,3 +136,61 @@ func TestServicePageShowsOAuthSettings(t *testing.T) {
 		t.Fatal("a missing client secret is not flagged")
 	}
 }
+
+// #142: an OAuth service with a wrong client ID (Google: invalid_client) is
+// fixed in the service's edit form; the next call works, the grant and the
+// refresh token are unchanged, and the kind cannot be switched.
+func TestEditOAuthServiceFixesAWrongClientID(t *testing.T) {
+	e := newEnv(t)
+	g, sends := fakeGoogle(t)
+	e.request("POST", "/keys", url.Values{"name": {"GMAIL_SECRET"}, "value": {gmailSecret}, "password": {password}})
+	pasted := `{"service":"gm","base":"` + g.URL + `","auth":"oauth2","oauth2":{"token_url":"` + g.URL + `/token","client_id":"CLIENT_ID","client_secret_key":"GMAIL_SECRET"}}`
+	e.addAndConnect("GMAIL_REFRESH", gmailRefresh, url.Values{"pasted": {pasted}})
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	role := access.Roles["phobos"]
+	role.Access = map[string]policy.Access{"gm": {Methods: []string{"POST"}, Paths: []string{"/gmail/v1/users/me/messages/send"}, DailyRequests: 50}}
+	access.Roles["phobos"] = role
+	next, _ := policy.SaveAccess(cfg.Rules, access)
+	e.proxy.Swap(next, mustKeys(t, e))
+	send := func() int {
+		r := httptest.NewRequest("POST", "/gm/gmail/v1/users/me/messages/send", strings.NewReader(`{"raw":"x"}`))
+		r.RemoteAddr = "127.0.0.1:5000"
+		r.Header.Set("X-Keyring-Token", token)
+		w := httptest.NewRecorder()
+		e.proxy.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := send(); code != http.StatusServiceUnavailable {
+		t.Fatalf("send with a wrong client ID: %d, want 503", code)
+	}
+	page := e.request("GET", "/services/gm", nil).Body.String()
+	if !strings.Contains(page, `name="client_id" value="CLIENT_ID"`) {
+		t.Fatal("the edit form does not show the client ID")
+	}
+	w := e.edit("gm", url.Values{"base": {g.URL}, "auth": {"oauth2"}, "client_id": {"fixture.apps.googleusercontent.com"}, "token_url": {g.URL + "/token"}, "client_secret_key": {"GMAIL_SECRET"}})
+	if w.Header().Get("Location") != "/services/gm?done=saved" {
+		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
+	}
+	if code := send(); code != 200 || len(sends()) != 1 {
+		t.Fatalf("send after the fix: %d, sends %d", code, len(sends()))
+	}
+	svc := e.proxy.Config().Services["gm"]
+	if svc.Key != "GMAIL_REFRESH" || e.proxy.Config().Roles["phobos"].Access["gm"].DailyRequests != 50 {
+		t.Fatal("the edit changed the key or the grant")
+	}
+	if !strings.Contains(e.audit.String(), `"changed":["oauth2"]`) {
+		t.Fatalf("audit: %s", e.audit.String())
+	}
+	for name, form := range map[string]url.Values{
+		"switch to bearer":  {"base": {g.URL}, "auth": {"bearer"}},
+		"secret not stored": {"base": {g.URL}, "auth": {"oauth2"}, "client_id": {"x"}, "token_url": {g.URL + "/token"}, "client_secret_key": {"NOPE"}},
+	} {
+		if w := e.edit("gm", form); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", name, w.Code)
+		}
+	}
+	if all := e.request("GET", "/services/gm", nil).Body.String() + e.audit.String(); strings.Contains(all, gmailSecret) || strings.Contains(all, gmailRefresh) {
+		t.Fatal("a secret is shown or logged")
+	}
+}
