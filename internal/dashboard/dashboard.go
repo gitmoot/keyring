@@ -404,9 +404,14 @@ func (b *Backend) rows() ([]keyRow, error) {
 			row.Updated = at.UTC().Format("2 Jan 2006")
 		}
 		m := meta[name]
-		if failure, _ := b.Proxy.OAuthFailure(name); failure != "" {
-			// A live refresh failure outranks an older test result.
-			m.Status, m.Reason = "failing", failure
+		// A live refresh failure outranks an older test result. Each value is
+		// checked: an oauth2 service may use one value of a key with several
+		// (GMAIL_LENSCALE.refresh).
+		for _, value := range row.valueNames() {
+			if failure, _ := b.Proxy.OAuthFailure(value); failure != "" {
+				m.Status, m.Reason = "failing", failure
+				break
+			}
 		}
 		row.Status, row.StatusClass = describe(row.HasValue, m)
 		row.State = state(row.HasValue, m)
