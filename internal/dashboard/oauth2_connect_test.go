@@ -219,11 +219,40 @@ func TestOAuthPlaceholderClientIDRefused(t *testing.T) {
 	if _, ok := e.proxy.Config().Services["gm"]; ok {
 		t.Fatal("a placeholder client ID was saved")
 	}
+	// Opaque IDs of other providers that merely contain such words are fine.
+	for _, id := range []string{"REPORTING_CLIENT_ID", "WORKYOURWAY", "your.app.client"} {
+		if got := clientIDProblem(&policy.OAuth2{ClientID: id, TokenURL: "https://auth.example.com/token"}); got != "" {
+			t.Errorf("%s refused: %s", id, got)
+		}
+	}
+	for _, id := range []string{"YOUR_CLIENT_ID", "client_id", "PASTE-ID-HERE", "${CLIENT}", "{{client_id}}"} {
+		if clientIDProblem(&policy.OAuth2{ClientID: id, TokenURL: "https://auth.example.com/token"}) == "" {
+			t.Errorf("%s accepted", id)
+		}
+	}
 	if w := connect("gm", "123-abc.apps.googleusercontent.com"); w.Code != http.StatusSeeOther {
 		t.Fatalf("real client ID: %d %s", w.Code, w.Body.String())
 	}
 	w := e.edit("gm", url.Values{"base": {"https://gmail.googleapis.com"}, "auth": {"oauth2"}, "client_id": {"PASTE_YOUR_CLIENT_ID_HERE"}, "token_url": {"https://oauth2.googleapis.com/token"}, "client_secret_key": {"GM_SECRET"}})
 	if w.Code != http.StatusBadRequest || e.proxy.Config().Services["gm"].OAuth2.ClientID != "123-abc.apps.googleusercontent.com" {
 		t.Fatalf("edit to a placeholder: %d, client ID now %q", w.Code, e.proxy.Config().Services["gm"].OAuth2.ClientID)
+	}
+	// A config that already holds one (saved before this check) still edits
+	// its other fields; only a changed client ID is checked.
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	svc := access.Services["gm"]
+	o := *svc.OAuth2
+	o.ClientID = "PASTE_YOUR_CLIENT_ID_HERE"
+	svc.OAuth2 = &o
+	access.Services["gm"] = svc
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.proxy.Swap(next, mustKeys(t, e))
+	w = e.edit("gm", url.Values{"base": {"https://gmail.googleapis.com"}, "auth": {"oauth2"}, "test_path": {"/gmail/v1/users/me/profile"}, "client_id": {"PASTE_YOUR_CLIENT_ID_HERE"}, "token_url": {"https://oauth2.googleapis.com/token"}, "client_secret_key": {"GM_SECRET"}})
+	if w.Header().Get("Location") != "/services/gm?done=saved" {
+		t.Fatalf("unrelated edit of an existing placeholder: %d %s", w.Code, w.Body.String())
 	}
 }

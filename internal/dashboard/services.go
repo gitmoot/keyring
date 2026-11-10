@@ -224,7 +224,9 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		case !pasted:
 			next.ClientID, next.TokenURL, next.ClientSecretKey = f.ClientID, f.TokenURL, f.ClientSecretKey
 		}
-		if msg := clientIDProblem(&next); msg != "" {
+		if next.ClientID == cur.OAuth2.ClientID && next.TokenURL == cur.OAuth2.TokenURL {
+			// Unchanged: an edit of another field is not refused for it.
+		} else if msg := clientIDProblem(&next); msg != "" {
 			again(http.StatusBadRequest, msg)
 			return
 		}
