@@ -749,3 +749,39 @@ func TestKeyValuesAreTrimmedAndControlCharactersRefused(t *testing.T) {
 		t.Fatalf("whitespace-only value: %q, stored %q", w.Header().Get("Location"), stored())
 	}
 }
+
+// A refresh token stored as one value of a key (GMAIL_LENSCALE.refresh) shows
+// Google's refusal on that key's page too.
+func TestOAuthRefreshFailureShowsOnAKeyWithNamedValues(t *testing.T) {
+	e := newEnv(t)
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_grant"}`)
+	}))
+	t.Cleanup(tokens.Close)
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	svc := access.Services["api"]
+	svc.Key, svc.Auth = "GMAIL_LENSCALE.refresh", policy.AuthOAuth2
+	svc.OAuth2 = &policy.OAuth2{TokenURL: tokens.URL, ClientID: "client-id", ClientSecretKey: "GMAIL_LENSCALE.secret"}
+	access.Services = map[string]policy.Service{"api": svc}
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, v := range map[string]string{"GMAIL_LENSCALE.refresh": oldValue, "GMAIL_LENSCALE.secret": newValue} {
+		if err := store.Set(e.backend.StorePath, name, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(next, keys)
+	if code := e.proxyCall(); code != http.StatusServiceUnavailable {
+		t.Fatalf("proxy call with a revoked refresh token: %d", code)
+	}
+	page := e.request("GET", "/keys/GMAIL_LENSCALE", nil).Body.String()
+	if !strings.Contains(page, "Failing: oauth2 refresh failed: the provider rejected the refresh token or client (invalid_grant)") {
+		t.Fatalf("refresh failure not shown on the key with named values:\n%s", page)
+	}
+}
