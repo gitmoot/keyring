@@ -318,18 +318,16 @@ func (h *Handler) fetchAccessToken(ctx context.Context, cfg policy.OAuth2, refre
 		if decodeErr == nil && oauthErrorCode.MatchString(body.Error) {
 			code = body.Error
 		}
-		described := func(rejected bool, format string, args ...any) (string, time.Duration, error) {
-			t, l, err := fail(rejected, format, args...)
-			if decodeErr == nil {
-				err.(*oauthError).description = oauthDescription(body.Description, refresh, secret, cfg.ClientID)
-			}
-			return t, l, err
-		}
+		e := &oauthError{msg: fmt.Sprintf("oauth2 refresh failed: token endpoint answered %d (%s)", resp.StatusCode, code)}
 		switch body.Error {
 		case "invalid_grant", "invalid_client", "unauthorized_client":
-			return described(true, "the provider rejected the refresh token or client (%s); connect the account again", code)
+			e.rejected = true
+			e.msg = "oauth2 refresh failed: the provider rejected the refresh token or client (" + code + "); connect the account again"
 		}
-		return described(false, "token endpoint answered %d (%s)", resp.StatusCode, code)
+		if decodeErr == nil {
+			e.description = oauthDescription(body.Description, refresh, secret, cfg.ClientID)
+		}
+		return "", 0, e
 	}
 	if decodeErr != nil {
 		return fail(false, "token endpoint sent invalid JSON")
