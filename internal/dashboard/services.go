@@ -6,7 +6,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -306,7 +305,7 @@ func changedFields(old, now policy.Service) []string {
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
 		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
 		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},
-		{"oauth2", !reflect.DeepEqual(old.OAuth2, now.OAuth2)},
+		{"oauth2", !old.OAuth2.Equal(now.OAuth2)},
 	} {
 		if c.diff {
 			changed = append(changed, c.name)
