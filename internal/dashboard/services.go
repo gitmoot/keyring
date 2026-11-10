@@ -91,11 +91,24 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 		}
 	}
 	slices.Sort(agents)
+	// OAuth settings are shown so the owner can compare them with Google's
+	// console (an "invalid_client" means the ID or secret does not match).
+	// The secret is named, never shown.
+	secretStored := false
+	if svc.OAuth2 != nil && svc.OAuth2.ClientSecretKey != "" {
+		stored, err := b.storedNames()
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		secretStored = stored[svc.OAuth2.ClientSecretKey]
+	}
 	method := svc.TestMethod
 	if method == "" {
 		method = http.MethodGet
 	}
 	b.render(w, status, "service", sid, map[string]any{
+		"OAuth2": svc.OAuth2, "SecretStored": secretStored,
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
 		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
 	})

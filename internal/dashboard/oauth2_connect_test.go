@@ -114,3 +114,25 @@ func TestConnectOAuth2RefusesASecretValue(t *testing.T) {
 		t.Fatal("refused service was saved")
 	}
 }
+
+// The service page shows the OAuth client ID, token URL and the secret's key
+// name (never its value), and says when that key has no value.
+func TestServicePageShowsOAuthSettings(t *testing.T) {
+	e := newEnv(t)
+	pasted := `{"service":"gm","base":"https://gmail.googleapis.com","auth":"oauth2","oauth2":{"token_url":"https://oauth2.googleapis.com/token","client_id":"123-abc.apps.googleusercontent.com","client_secret_key":"GM_SECRET"}}`
+	e.request("POST", "/keys", url.Values{"name": {"GM_SECRET"}, "value": {gmailSecret}, "password": {password}})
+	e.addAndConnect("GM_REFRESH", gmailRefresh, url.Values{"pasted": {pasted}})
+	page := e.request("GET", "/services/gm", nil).Body.String()
+	for _, want := range []string{"123-abc.apps.googleusercontent.com", "https://oauth2.googleapis.com/token", "GM_SECRET"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("service page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, gmailSecret) || strings.Contains(page, gmailRefresh) || strings.Contains(page, "no value stored") {
+		t.Fatal("a secret is shown, or the stored secret is reported missing")
+	}
+	e.request("POST", "/keys/GM_SECRET/delete", url.Values{"password": {password}, "confirm_in_use": {"yes"}})
+	if page := e.request("GET", "/services/gm", nil).Body.String(); !strings.Contains(page, "GM_SECRET <span class=\"mute\">(no value stored)") {
+		t.Fatal("a missing client secret is not flagged")
+	}
+}

@@ -278,6 +278,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 {{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
+{{with .OAuth2}}<dt>OAuth client ID</dt><dd class="mono">{{.ClientID}}</dd><dt>Token URL</dt><dd class="mono">{{.TokenURL}}</dd>{{if .ClientSecretKey}}<dt>Client secret</dt><dd class="mono">{{.ClientSecretKey}}{{if not $.SecretStored}} <span class="mute">(no value stored)</span>{{end}}</dd>{{end}}{{with .Scopes}}<dt>Scopes</dt><dd class="mono">{{range .}}{{.}}<br>{{end}}</dd>{{end}}{{end}}
 {{if .F.ExtraHeaders}}<dt>Extra secret headers</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
 </dl></div>
 {{if .Editable}}
