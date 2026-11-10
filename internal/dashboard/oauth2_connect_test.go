@@ -220,12 +220,12 @@ func TestOAuthPlaceholderClientIDRefused(t *testing.T) {
 		t.Fatal("a placeholder client ID was saved")
 	}
 	// Opaque IDs of other providers that merely contain such words are fine.
-	for _, id := range []string{"REPORTING_CLIENT_ID", "WORKYOURWAY", "your.app.client"} {
+	for _, id := range []string{"REPORTING_CLIENT_ID", "WORKYOURWAY", "your.app.client", "enter_47f9e2", "app_here", "client_id_7f3"} {
 		if got := clientIDProblem(&policy.OAuth2{ClientID: id, TokenURL: "https://auth.example.com/token"}); got != "" {
 			t.Errorf("%s refused: %s", id, got)
 		}
 	}
-	for _, id := range []string{"YOUR_CLIENT_ID", "client_id", "PASTE-ID-HERE", "${CLIENT}", "{{client_id}}"} {
+	for _, id := range []string{"YOUR_CLIENT_ID", "client_id", "Enter-Your-OAuth-Client-ID-Here", "YOUR_GOOGLE_CLIENT_ID", "${CLIENT}", "{{client_id}}"} {
 		if clientIDProblem(&policy.OAuth2{ClientID: id, TokenURL: "https://auth.example.com/token"}) == "" {
 			t.Errorf("%s accepted", id)
 		}

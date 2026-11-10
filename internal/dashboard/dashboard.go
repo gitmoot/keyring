@@ -930,10 +930,11 @@ func clientIDProblem(o *policy.OAuth2) string {
 	return ""
 }
 
-// placeholderID is a template value: one that starts with an instruction
-// (PASTE_, YOUR_, ENTER_, INSERT_, REPLACE_), ends in _HERE, is just the
-// field name, or uses <...>, {{...}} or ${...} placeholder syntax.
-var placeholderID = regexp.MustCompile(`(?i)^(paste|your|enter|insert|replace)[_-]|[_-]here$|^client[_-]?id$|<[^>]*>|\{\{|\$\{`)
+// placeholderID is a complete template value for the field itself, such as
+// PASTE_YOUR_CLIENT_ID_HERE, YOUR_CLIENT_ID or client_id, or explicit
+// placeholder syntax: <...>, {{...}} or ${...}. Nothing else, so an opaque ID
+// (REPORTING_CLIENT_ID, enter_47f9e2) is never refused.
+var placeholderID = regexp.MustCompile(`(?i)^((paste|enter|insert|put|replace)[_-])?(your[_-])?((oauth2?|google)[_-])?client[_-]?id([_-]here)?$|<[^<>]+>|\{\{|\$\{`)
 
 // connectFormFor fills the form from a preset for key name.
 func (b *Backend) connectFormFor(name, id string) connectForm {
