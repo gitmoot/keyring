@@ -37,10 +37,12 @@ const (
 var errOAuthRejected = errors.New("refresh token or client rejected")
 
 // oauthError is a failed refresh. Its text is safe to show and log: it never
-// holds a token, a secret or the provider's free-text description.
+// holds a token, a secret or the provider's free-text description. The
+// description is kept apart, checked, for the owner's dashboard only (#144).
 type oauthError struct {
-	rejected bool
-	msg      string
+	rejected    bool
+	msg         string
+	description string
 }
 
 func (e *oauthError) Error() string { return e.msg }
@@ -214,6 +216,11 @@ func (h *Handler) OAuthFailure(keyName string) (message string, reconnect bool) 
 		if e != nil && e.err != nil {
 			msg = e.err.Error()
 			rejected = errors.Is(e.err, errOAuthRejected)
+			var oe *oauthError
+			if errors.As(e.err, &oe) && oe.description != "" {
+				// For the owner only; agents' 503 bodies carry msg alone.
+				msg += ` — provider said: "` + oe.description + `"`
+			}
 		}
 		h.oauth.mu.Unlock()
 		if msg != "" {
@@ -224,6 +231,30 @@ func (h *Handler) OAuthFailure(keyName string) (message string, reconnect bool) 
 }
 
 var oauthErrorCode = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// oauthDescription is the provider's error_description fit to show: printable
+// ASCII, at most 160 bytes, and "" if it contains the refresh token, secret or
+// client ID (a provider could echo them).
+func oauthDescription(d, refresh, secret, clientID string) string {
+	d = strings.TrimSpace(d)
+	if d == "" {
+		return ""
+	}
+	for _, v := range []string{refresh, secret, clientID} {
+		if v != "" && strings.Contains(d, v) {
+			return ""
+		}
+	}
+	if len(d) > 160 {
+		d = d[:160]
+	}
+	for i := 0; i < len(d); i++ {
+		if d[i] < 0x20 || d[i] > 0x7e {
+			return ""
+		}
+	}
+	return d
+}
 
 // usableAccessToken reports whether token may go into an Authorization
 // header: 1 to 8192 printable ASCII characters, no spaces.
@@ -276,6 +307,10 @@ func (h *Handler) fetchAccessToken(ctx context.Context, cfg policy.OAuth2, refre
 		TokenType   string          `json:"token_type"`
 		ExpiresIn   json.RawMessage `json:"expires_in"`
 		Error       string          `json:"error"`
+		// Description tells cases apart that share one code (Google's
+		// invalid_client: "The OAuth client was not found." for the ID,
+		// "Unauthorized" for the secret).
+		Description string `json:"error_description"`
 	}
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body)
 	if resp.StatusCode != http.StatusOK {
@@ -283,11 +318,16 @@ func (h *Handler) fetchAccessToken(ctx context.Context, cfg policy.OAuth2, refre
 		if decodeErr == nil && oauthErrorCode.MatchString(body.Error) {
 			code = body.Error
 		}
+		e := &oauthError{msg: fmt.Sprintf("oauth2 refresh failed: token endpoint answered %d (%s)", resp.StatusCode, code)}
 		switch body.Error {
 		case "invalid_grant", "invalid_client", "unauthorized_client":
-			return fail(true, "the provider rejected the refresh token or client (%s); connect the account again", code)
+			e.rejected = true
+			e.msg = "oauth2 refresh failed: the provider rejected the refresh token or client (" + code + "); connect the account again"
 		}
-		return fail(false, "token endpoint answered %d (%s)", resp.StatusCode, code)
+		if decodeErr == nil {
+			e.description = oauthDescription(body.Description, refresh, secret, cfg.ClientID)
+		}
+		return "", 0, e
 	}
 	if decodeErr != nil {
 		return fail(false, "token endpoint sent invalid JSON")

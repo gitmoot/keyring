@@ -100,3 +100,24 @@ func TestShowPartialKeyAndExactCopy(t *testing.T) {
 		t.Fatal("Copy does not carry the exact value")
 	}
 }
+
+// #144: Show value flags what a copy-paste may have added to a single-line
+// value: an invisible character, or quotes around it.
+func TestShowValueFlagsInvisibleCharactersAndQuotes(t *testing.T) {
+	e := newEnv(t)
+	for name, c := range map[string]struct{ value, want string }{
+		"ZW_KEY":    {"GOCSPX-abc\u200bdef", "U+200B at character 11"},
+		"QUOTE_KEY": {`"GOCSPX-abcdef"`, "starts and ends with quotes"},
+		"OK_KEY":    {"GOCSPX-abcdef", ""},
+	} {
+		if err := store.Set(e.backend.StorePath, name, c.value); err != nil {
+			t.Fatal(err)
+		}
+		keys, _ := store.Load(e.backend.StorePath)
+		e.proxy.Swap(e.proxy.Config(), keys)
+		body := html.UnescapeString(e.request("POST", "/keys/"+name+"/reveal", url.Values{"password": {password}}).Body.String())
+		if c.want == "" && strings.Contains(body, "This value ") || c.want != "" && !strings.Contains(body, c.want) {
+			t.Errorf("%s: warning wrong", name)
+		}
+	}
+}
