@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -22,15 +23,20 @@ func registerServices(b *Backend) {
 }
 
 // editableService reports whether the dashboard form can change the service
-// without losing settings it does not show. Sign-only, OAuth, Google and
-// egress-proxy services carry their own fields and stay in access.json.
+// without losing settings it does not show. Static and OAuth services can;
+// sign-only, Google and egress-proxy services carry their own fields and stay
+// in access.json.
 func editableService(svc policy.Service) bool {
 	switch svc.Auth {
 	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery:
+		if svc.OAuth2 != nil {
+			return false
+		}
+	case policy.AuthOAuth2:
 	default:
 		return false
 	}
-	return svc.OAuth2 == nil && svc.EgressProxy == nil && svc.GoogleAccount == "" &&
+	return svc.EgressProxy == nil && svc.GoogleAccount == "" &&
 		svc.AppleAds == nil && svc.AppStoreConnect == nil && svc.Minisign == nil
 }
 
@@ -41,11 +47,17 @@ type serviceForm struct {
 	Name, Key, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
 	FixedHeaders                                                            map[string]string
 	ExtraHeaders                                                            []string
+	// OAuth client settings of an oauth2 service (#142): the secret is a key
+	// name, never a value.
+	ClientID, TokenURL, ClientSecretKey string
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
 		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders}
+	if o := svc.OAuth2; o != nil {
+		f.ClientID, f.TokenURL, f.ClientSecretKey = o.ClientID, o.TokenURL, o.ClientSecretKey
+	}
 	for header, key := range svc.ExtraHeaders {
 		f.ExtraHeaders = append(f.ExtraHeaders, header+" ← "+key)
 	}
@@ -120,8 +132,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		Name: name, Key: strings.TrimSpace(r.PostFormValue("key")), Base: strings.TrimSpace(r.PostFormValue("base")),
 		Auth: r.PostFormValue("auth"), Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
 		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")),
-		Project: strings.TrimSpace(r.PostFormValue("project")),
-		Pasted:  strings.TrimSpace(r.PostFormValue("pasted")),
+		Project:  strings.TrimSpace(r.PostFormValue("project")),
+		Pasted:   strings.TrimSpace(r.PostFormValue("pasted")),
+		ClientID: strings.TrimSpace(r.PostFormValue("client_id")), TokenURL: strings.TrimSpace(r.PostFormValue("token_url")),
+		ClientSecretKey: strings.TrimSpace(r.PostFormValue("client_secret_key")),
 	}
 	again := func(status int, msg string) {
 		// Refused pasted settings are not shown again: they may hold a value
@@ -139,6 +153,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	pasted := f.Pasted != ""
 	var fixed map[string]string
 	var extra *map[string]string // nil: keep the stored extra headers
+	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
 	if pasted {
 		var a agentSettings
 		dec := json.NewDecoder(strings.NewReader(f.Pasted))
@@ -158,7 +173,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			return
 		}
 		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
-		fixed, extra = a.FixedHeaders, a.ExtraHeaders
+		fixed, extra, oauth = a.FixedHeaders, a.ExtraHeaders, a.OAuth2
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -179,6 +194,12 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	if f.Key == "" {
 		f.Key = cur.Key
 	}
+	// The kind of an OAuth service does not change here: it would lose its
+	// OAuth settings. A static service does not become OAuth either.
+	if (cur.Auth == policy.AuthOAuth2) != (f.Auth == policy.AuthOAuth2) {
+		again(http.StatusBadRequest, "An OAuth service stays OAuth, and a static one stays static. Connect a new service for the other kind.")
+		return
+	}
 	if f.Key != cur.Key {
 		if ok, err := b.knownValue(f.Key); err != nil {
 			b.fail(w, sid, err)
@@ -195,6 +216,30 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	if pasted {
 		updated.FixedHeaders = fixed
+	}
+	if cur.Auth == policy.AuthOAuth2 {
+		next := *cur.OAuth2
+		switch {
+		case oauth != nil:
+			next = *oauth
+		case !pasted:
+			next.ClientID, next.TokenURL, next.ClientSecretKey = f.ClientID, f.TokenURL, f.ClientSecretKey
+		}
+		if next.ClientSecretKey != "" {
+			stored, err := b.storedNames()
+			if err != nil {
+				b.fail(w, sid, err)
+				return
+			}
+			if msg := storedKeyRef(stored, "client secret", next.ClientSecretKey); msg != "" {
+				again(http.StatusBadRequest, msg)
+				return
+			}
+		}
+		updated.OAuth2 = &next
+	} else if oauth != nil {
+		again(http.StatusBadRequest, "oauth2 settings belong to an OAuth service; connect a new service for that.")
+		return
 	}
 	if extra != nil {
 		if msg, err := b.extraHeaderKeys(*extra); err != nil {
@@ -261,6 +306,7 @@ func changedFields(old, now policy.Service) []string {
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
 		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
 		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},
+		{"oauth2", !reflect.DeepEqual(old.OAuth2, now.OAuth2)},
 	} {
 		if c.diff {
 			changed = append(changed, c.name)

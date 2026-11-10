@@ -288,12 +288,17 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label>Base URL<input name="base" value="{{.F.Base}}" inputmode="url" autocapitalize="none" spellcheck="false"></label>
-<label>Key sent as<select name="auth">
+{{if eq .F.Auth "oauth2"}}<input type="hidden" name="auth" value="oauth2">
+<p class="hint">OAuth service: the key is the refresh token. An "invalid_client" from the provider means the client ID or secret below does not match its console.</p>
+<label>OAuth client ID<input name="client_id" value="{{.F.ClientID}}" autocapitalize="none" spellcheck="false"></label>
+<label>Token URL<input name="token_url" value="{{.F.TokenURL}}" inputmode="url" autocapitalize="none" spellcheck="false"></label>
+<label>Client secret (a key)<select name="client_secret_key"><option value=""{{if not .F.ClientSecretKey}} selected{{end}}>none (public client)</option>{{range .Keys}}<option{{if eq . $.F.ClientSecretKey}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+{{else}}<label>Key sent as<select name="auth">
 <option value="bearer"{{if eq .F.Auth "bearer"}} selected{{end}}>Authorization: Bearer</option>
 <option value="header"{{if eq .F.Auth "header"}} selected{{end}}>a header</option>
 <option value="query"{{if eq .F.Auth "query"}} selected{{end}}>a query parameter</option></select></label>
 <div class="two"><label>Header (if a header)<input name="header" value="{{.F.Header}}" autocapitalize="none"></label>
-<label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>
+<label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>{{end}}
 <label>Test request path (optional; sent with the method shown above, {{.TestMethod}})<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
 <label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.F.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>
 <label>Project (optional: a client or engagement this service belongs to; lowercase letters, digits and -)<input name="project" value="{{.F.Project}}" placeholder="e.g. noted" autocapitalize="none" spellcheck="false"></label>
