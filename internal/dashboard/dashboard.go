@@ -886,18 +886,24 @@ func (b *Backend) extraHeaderKeys(extra map[string]string) (string, error) {
 		return "", err
 	}
 	for _, header := range sortedNames(extra) {
-		key := extra[header]
-		if !store.ValidName(key) {
-			// Never repeat it: it may be a secret pasted by mistake.
-			return "extra_headers: " + header + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here.", nil
-		}
-		if !stored[key] {
-			// The name is not repeated either: an identifier-shaped secret
-			// can pass as a name.
-			return "extra_headers: " + header + " must name a key with a stored value. Add the value under Keys first, then name that key here.", nil
+		if msg := storedKeyRef(stored, "extra_headers: "+header, extra[header]); msg != "" {
+			return msg, nil
 		}
 	}
 	return "", nil
+}
+
+// storedKeyRef checks that key names a stored key and returns the message to
+// show if not, naming field and never key: a secret pasted by mistake must
+// not be repeated, and an identifier-shaped secret can pass as a name.
+func storedKeyRef(stored map[string]bool, field, key string) string {
+	if !store.ValidName(key) {
+		return field + " must name a stored key (letters, digits and _), never a value. Add the value under Keys first, then name that key here."
+	}
+	if !stored[key] {
+		return field + " must name a key with a stored value. Add the value under Keys first, then name that key here."
+	}
+	return ""
 }
 
 // connectFormFor fills the form from a preset for key name.
@@ -1012,11 +1018,13 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if f.OAuth2 != nil && f.OAuth2.ClientSecretKey != "" {
 		// Same rule as extra headers: a stored key's name, never a value,
 		// and never repeated in the message.
-		if msg, err := b.extraHeaderKeys(map[string]string{"client_secret_key": f.OAuth2.ClientSecretKey}); err != nil {
+		stored, err := b.storedNames()
+		if err != nil {
 			b.fail(w, sid, err)
 			return
-		} else if msg != "" {
-			again(http.StatusBadRequest, strings.Replace(msg, "extra_headers: client_secret_key", "oauth2.client_secret_key", 1))
+		}
+		if msg := storedKeyRef(stored, "oauth2.client_secret_key", f.OAuth2.ClientSecretKey); msg != "" {
+			again(http.StatusBadRequest, msg)
 			return
 		}
 	}
