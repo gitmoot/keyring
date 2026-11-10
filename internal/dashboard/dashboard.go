@@ -842,6 +842,7 @@ type connectForm struct {
 	// as the main credential, and header names for the others.
 	KeyPart     string
 	PartHeaders map[string]string
+	OAuth2      *policy.OAuth2
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -869,6 +870,9 @@ type agentSettings struct {
 	// credential (sent as auth/header/param); extra_headers may then name the
 	// key's other values by their part names.
 	KeyPart string `json:"key_part,omitempty"`
+	// OAuth2 makes an "oauth2" service: the key is the refresh token, and
+	// client_secret_key names another stored key (never a value).
+	OAuth2 *policy.OAuth2 `json:"oauth2,omitempty"`
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -947,7 +951,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
-		f.APNs, f.SignInWithApple, f.KeyPart = a.APNs, a.SignInWithApple, a.KeyPart
+		f.APNs, f.SignInWithApple, f.KeyPart, f.OAuth2 = a.APNs, a.SignInWithApple, a.KeyPart, a.OAuth2
 		f.PartHeaders = nil
 	}
 	b.Mu.Lock()
@@ -1005,11 +1009,22 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusBadRequest, msg)
 		return
 	}
+	if f.OAuth2 != nil && f.OAuth2.ClientSecretKey != "" {
+		// Same rule as extra headers: a stored key's name, never a value,
+		// and never repeated in the message.
+		if msg, err := b.extraHeaderKeys(map[string]string{"client_secret_key": f.OAuth2.ClientSecretKey}); err != nil {
+			b.fail(w, sid, err)
+			return
+		} else if msg != "" {
+			again(http.StatusBadRequest, strings.Replace(msg, "extra_headers: client_secret_key", "oauth2.client_secret_key", 1))
+			return
+		}
+	}
 	var extra map[string]string
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
