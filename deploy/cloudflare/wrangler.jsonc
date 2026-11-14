@@ -20,6 +20,9 @@
   "vars": {
     // Set to the Worker's https origin, e.g. https://keyring.example.com
     "PUBLIC_BASE": "https://keyring.example.com",
+    // Optional, comma-separated https origins a link's return_url may point
+    // to: the done page sends the person back there after a few seconds.
+    "RETURN_ORIGINS": "",
     // The services every new keyring starts with, and the router's access.
     "SERVICES_TEMPLATE": {
       "services": {

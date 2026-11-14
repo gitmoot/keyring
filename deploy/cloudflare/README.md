@@ -72,6 +72,7 @@ Inputs:
 |---|---|---|
 | `PUBLIC_BASE` | var in `wrangler.jsonc` | https origin of the Worker, e.g. `https://keyring.example.com`; may change, see [Changing `PUBLIC_BASE`](#changing-public_base) |
 | `SERVICES_TEMPLATE` | var in `wrangler.jsonc` | services each keyring starts with, and the router role's access |
+| `RETURN_ORIGINS` | var in `wrangler.jsonc` (optional) | comma-separated https origins, e.g. `https://app.example.com`, that a link's `return_url` may point to; sent as consent `return_origins` on each keyring's next start, like a `PUBLIC_BASE` change |
 | `MASTER_KEY` | secret | `head -c32 /dev/urandom \| base64`. Losing it makes every keyring unreadable; rotating it needs a re-seal (not built yet) |
 | `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per Phobos server |
 | `ADMIN_TOKEN` | secret | the router's admin bearer token |

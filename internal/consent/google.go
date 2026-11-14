@@ -38,7 +38,7 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request, l *link, h 
 	delete(s.links, h)
 	s.signIns[hashOf(state)] = &signIn{
 		service: l.service, browser: hashOf(browser), expires: s.now().Add(signInTTL),
-		google: true, googleEpoch: l.googleEpoch,
+		google: true, googleEpoch: l.googleEpoch, returnURL: l.returnURL,
 	}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -115,7 +115,7 @@ func (s *Server) googlePage(w http.ResponseWriter, r *http.Request, id string, p
 		data.Form, data.GoogleCode = true, true
 		data.Message = "Open Google sign-in, then paste its verification code here. Never send the code in chat."
 	case "connected":
-		data.Message = "Drive and Sheets are connected. You can close this page."
+		data = done(data, "Drive and Sheets are connected.", f.returnURL)
 	case "failed":
 		data.Problem = true
 		data.Form, data.GoogleRetry = true, true

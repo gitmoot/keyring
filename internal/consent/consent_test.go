@@ -192,9 +192,15 @@ func (e *env) api(method, path, token, body string) *httptest.ResponseRecorder {
 }
 
 // link creates a link and returns its path below the pages listener.
-func (e *env) link(service string) string {
+func (e *env) link(service string) string { return e.linkWith(service, "") }
+
+// linkWith adds extra, `"field":value` pairs, to the create-link body.
+func (e *env) linkWith(service, extra string) string {
 	e.t.Helper()
-	w := e.api("POST", "/links", apiToken, `{"service":"`+service+`","label":"Alice (+31 6...)"}`)
+	if extra != "" {
+		extra = "," + extra
+	}
+	w := e.api("POST", "/links", apiToken, `{"service":"`+service+`","label":"Alice (+31 6...)"`+extra+`}`)
 	if w.Code != http.StatusCreated {
 		e.t.Fatalf("create link for %s: %d %s", service, w.Code, w.Body)
 	}
@@ -406,7 +412,11 @@ func TestPagesListenerServesNothingElse(t *testing.T) {
 // redirect and the cookie set on the browser.
 func (e *env) startSignIn() (*url.URL, *http.Cookie) {
 	e.t.Helper()
-	path := e.link("gmail")
+	return e.signInFrom(e.link("gmail"))
+}
+
+func (e *env) signInFrom(path string) (*url.URL, *http.Cookie) {
+	e.t.Helper()
 	if w := e.page("GET", path, nil, nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Sign in") {
 		e.t.Fatalf("gmail link page: %d %s", w.Code, w.Body)
 	}
@@ -882,5 +892,38 @@ func TestOAuthCallbackRechecksBindingAfterExchange(t *testing.T) {
 	w := <-done
 	if w.Code != http.StatusConflict || e.keys.get("GMAIL_REFRESH") != "" || e.keys.get("NEW_REFRESH") != "" {
 		t.Fatalf("callback published into a changed binding: %d", w.Code)
+	}
+}
+
+// A link made with a return_url sends the person back there once connected;
+// one without keeps the close-this-page ending. Only allowed origins.
+func TestReturnURLAfterConnecting(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Consent.ReturnOrigins = []string{"https://app.example.com"}
+	if err := e.cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"https://evil.example.com/", "http://app.example.com/", "https://x@app.example.com/", "javascript:alert(1)", "https://app.example.com/;url=https://evil.example.com"} {
+		if w := e.api("POST", "/links", apiToken, `{"service":"gmail","return_url":"`+bad+`"}`); w.Code != http.StatusBadRequest {
+			t.Errorf("return_url %q: %d", bad, w.Code)
+		}
+	}
+	back := "https://app.example.com/g/7?tab=email"
+	to, cookie := e.signInFrom(e.linkWith("gmail", `"return_url":"`+back+`"`))
+	w := e.page("GET", callbackPath(url.Values{"code": {"good-code"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "Taking you back") || strings.Contains(body, "close this page") ||
+		!strings.Contains(body, `<meta http-equiv="refresh" content="3;url=https://app.example.com/g/7?tab=email">`) ||
+		!strings.Contains(body, `href="https://app.example.com/g/7?tab=email"`) {
+		t.Fatalf("callback page: %d %s", w.Code, body)
+	}
+	// A value link also goes back; a plain one does not.
+	w = e.page("POST", e.linkWith("other", `"return_url":"https://app.example.com/"`), url.Values{"value": {"v"}}, fromPage)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `content="3;url=https://app.example.com/"`) {
+		t.Fatalf("value page: %d %s", w.Code, w.Body)
+	}
+	w = e.page("POST", e.link("other"), url.Values{"value": {"v"}}, fromPage)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "url=") || !strings.Contains(w.Body.String(), "close this page") {
+		t.Fatalf("plain value page: %d %s", w.Code, w.Body)
 	}
 }

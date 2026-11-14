@@ -23,6 +23,12 @@ export interface Env {
 	PUBLIC_BASE: string;
 	/** The services every new instance starts with (a JSON var). */
 	SERVICES_TEMPLATE: Template | string;
+	/**
+	 * Optional, comma-separated https origins a connection link may send the
+	 * person back to once connected (the link's return_url), e.g.
+	 * https://app.example.com. Each keyring gets them on its next start.
+	 */
+	RETURN_ORIGINS?: string;
 	/** Secret: base64 of 32 random bytes; derives every instance's data key. */
 	MASTER_KEY: string;
 	/** Secret: the router's proof, sent as X-Keyring-Caller. */
@@ -268,12 +274,24 @@ const K_USAGE = "usage";
 const K_OPEN_UNTIL = "openUntil";
 const K_SECRETS = "clientSecretsHash";
 const K_LAST_USED = "lastUsed";
-/** The consent public_url last sent to the keyring and saved in its sealed state. */
-const K_CONSENT_URL = "consentPublicUrl";
+/**
+ * What of the consent settings was last sent to the keyring and saved in its
+ * sealed state (consentStamp; before return origins, the bare public_url).
+ */
+const K_CONSENT = "consentPublicUrl";
 /** lastUsed is written to storage at most this often. */
 const LAST_USED_WRITE_MS = 30 * 1000;
 
 class Deleted extends Error {}
+
+/**
+ * The part of the consent settings that can change between starts. Without
+ * return origins it is the bare public_url, the value kept before them, so
+ * existing keyrings are not sent the same settings again.
+ */
+function consentStamp(c: { public_url: string; return_origins?: string[] }): string {
+	return c.return_origins ? JSON.stringify([c.public_url, c.return_origins]) : c.public_url;
+}
 
 export class KeyringInstance extends DurableObject<Env> {
 
@@ -435,26 +453,30 @@ export class KeyringInstance extends DurableObject<Env> {
 
 	/** The keyring's consent settings; public_url follows PUBLIC_BASE. */
 	private async consentSettings(m: Identity) {
+		const origins = (this.env.RETURN_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean);
 		return {
 			listen: `0.0.0.0:${PORT_PAGES}`,
 			public_url: `${this.env.PUBLIC_BASE}/connect`,
 			api_listen: `0.0.0.0:${PORT_CONSENT_API}`,
 			api_token_sha256: await sha256Hex(m.consentToken),
+			// Left out when empty, as the keyring omits it.
+			...(origins.length ? { return_origins: origins } : {}),
 		};
 	}
 
 	/**
-	 * Sends the consent settings again when PUBLIC_BASE changed since they
-	 * were last sent. The keyring builds link, Google page and callback URLs
-	 * from its own public_url, kept in its sealed state; publishLink and the
-	 * page route expect them under PUBLIC_BASE. Open links and accounts stay.
+	 * Sends the consent settings again when PUBLIC_BASE or RETURN_ORIGINS
+	 * changed since they were last sent. The keyring builds link, Google page
+	 * and callback URLs from its own public_url, kept in its sealed state;
+	 * publishLink and the page route expect them under PUBLIC_BASE. Open
+	 * links and accounts stay.
 	 */
 	private async pushConsent(m: Identity): Promise<void> {
 		const consent = await this.consentSettings(m);
-		if (consent.public_url === (await this.ctx.storage.get<string>(K_CONSENT_URL))) return;
+		if (consentStamp(consent) === (await this.ctx.storage.get<string>(K_CONSENT))) return;
 		await this.adminJSON(m, "PUT", "/consent", consent);
 		await this.sync(m);
-		await this.put(K_CONSENT_URL, consent.public_url);
+		await this.put(K_CONSENT, consentStamp(consent));
 	}
 
 	private async pushClientSecrets(m: Identity): Promise<void> {
@@ -508,7 +530,7 @@ export class KeyringInstance extends DurableObject<Env> {
 			}
 			await this.pushClientSecrets(m);
 			await this.sync(m);
-			await this.put(K_CONSENT_URL, consent.public_url);
+			await this.put(K_CONSENT, consentStamp(consent));
 			if (!role.token) throw new KeyringError(502, "the keyring returned no role token");
 			return { role_token: role.token };
 		} catch (e) {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -355,6 +356,20 @@ func TestValidateConsent(t *testing.T) {
 	if !c.Consent.APISourceAllowed(netip.MustParseAddr("10.0.0.5")) || c.Consent.APISourceAllowed(netip.MustParseAddr("10.0.0.6")) {
 		t.Fatal("APISourceAllowed")
 	}
+	c.Consent.ReturnOrigins = []string{"https://app.example.com"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid return origin refused: %v", err)
+	}
+	for link, ok := range map[string]bool{
+		"https://app.example.com/": true, "https://app.example.com/g/7?x=1": true,
+		"http://app.example.com/": false, "https://app.example.com.evil.net/": false,
+		"https://evil.net@app.example.com/": false, "https://app.example.com:8443/": false,
+	} {
+		u, err := url.Parse(link)
+		if err != nil || c.Consent.ReturnAllowed(u) != ok {
+			t.Errorf("ReturnAllowed(%s) != %v", link, ok)
+		}
+	}
 	cases := map[string]func(*Config){
 		"pages on the proxy port":    func(c *Config) { c.Consent.Listen = c.Listen },
 		"api on the proxy port":      func(c *Config) { c.Consent.APIListen = c.Listen },
@@ -366,6 +381,9 @@ func TestValidateConsent(t *testing.T) {
 		"no api sources":             func(c *Config) { c.Consent.APIAllowSources = nil },
 		"bad token hash":             func(c *Config) { c.Consent.APITokenSHA256 = "x" },
 		"api token is a role token":  func(c *Config) { c.Consent.APITokenSHA256 = hash("t1") },
+		"return origin over http":    func(c *Config) { c.Consent.ReturnOrigins = []string{"http://app.example.com"} },
+		"return origin with a path":  func(c *Config) { c.Consent.ReturnOrigins = []string{"https://app.example.com/"} },
+		"return origin with a user":  func(c *Config) { c.Consent.ReturnOrigins = []string{"https://a@app.example.com"} },
 		"pages on the dashboard port": func(c *Config) {
 			c.AdminListen, c.AdminPasswordFile = "127.0.0.1:7702", "/x/admin.pw"
 			c.Consent.Listen = c.AdminListen
