@@ -115,6 +115,9 @@ type Consent struct {
 	APIAllowSources []string `json:"api_allow_sources"`
 	// APITokenSHA256 is the hex SHA-256 of the API token (keyring new-token).
 	APITokenSHA256 string `json:"api_token_sha256"`
+	// ReturnOrigins are the https origins a link may send the person back
+	// to after connecting (return_url); none = no link carries one.
+	ReturnOrigins []string `json:"return_origins,omitempty"`
 
 	public     *url.URL
 	apiSources []netip.Prefix
@@ -127,7 +130,17 @@ func (a *Consent) Equal(b *Consent) bool {
 		return a == b
 	}
 	return a.Listen == b.Listen && a.PublicURL == b.PublicURL && a.APIListen == b.APIListen &&
-		slices.Equal(a.APIAllowSources, b.APIAllowSources) && a.APITokenSHA256 == b.APITokenSHA256
+		slices.Equal(a.APIAllowSources, b.APIAllowSources) && a.APITokenSHA256 == b.APITokenSHA256 &&
+		slices.Equal(a.ReturnOrigins, b.ReturnOrigins)
+}
+
+// ReturnAllowed reports whether link u, already parsed, may be a return
+// URL: https, no user info, and its origin exactly one of ReturnOrigins.
+func (a *Consent) ReturnAllowed(u *url.URL) bool {
+	if u == nil || u.Scheme != "https" || u.User != nil || u.Host == "" || u.Opaque != "" {
+		return false
+	}
+	return slices.Contains(a.ReturnOrigins, u.Scheme+"://"+u.Host)
 }
 
 // PublicBase returns the parsed public_url of validated settings.
@@ -996,6 +1009,12 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 	k.anySource = c.ContainerMode
 	if !tokenHash.MatchString(k.APITokenSHA256) {
 		return errors.New("consent api_token_sha256 must be 64 lowercase hex characters")
+	}
+	for _, o := range k.ReturnOrigins {
+		u, err := url.Parse(o)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Scheme+"://"+u.Host != o {
+			return fmt.Errorf("consent return_origins: %q must be an https origin such as https://app.example.com", o)
+		}
 	}
 	return nil
 }

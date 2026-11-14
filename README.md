@@ -676,7 +676,7 @@ A consent link lets the owner of an account connect it themselves: "tap here to 
 - A change to `consent` needs a restart; `SIGHUP` refuses it.
 
 API:
-- `POST /links` `{"service": "gmail", "ttl_seconds": 900, "label": "Alice"}` returns `{"url", "expires_at"}` (201). `ttl_seconds` is 60 to 3600 (default 900); the label (at most 100 characters) is shown on the page. Scopes, paths and keys cannot be set here: they come from the access file. Only `bearer`, `header` and `query` services, and `oauth2` services with an `auth_url`, can get a link; signing keys stay with the owner.
+- `POST /links` `{"service": "gmail", "ttl_seconds": 900, "label": "Alice"}` returns `{"url", "expires_at"}` (201). `ttl_seconds` is 60 to 3600 (default 900); the label (at most 100 characters) is shown on the page. An optional `return_url` (https, at most 512 characters, on one of the consent block's `return_origins`, e.g. `"return_origins": ["https://app.example.com"]`) makes the done page say "Taking you back…" and go there after 3 seconds, with a button to go at once; without it the page says the person can close it. Scopes, paths and keys cannot be set here: they come from the access file. Only `bearer`, `header` and `query` services, and `oauth2` services with an `auth_url`, can get a link; signing keys stay with the owner.
 - `DELETE /keys/<service>` deletes the service's stored key. For an `oauth2` service with a `revoke_url`, the provider is asked to revoke the refresh token first (RFC 7009); the key is deleted even if that fails, and the reply says `"revoked": false`.
 
 The link:

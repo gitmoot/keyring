@@ -86,6 +86,9 @@ type link struct {
 	google       bool
 	googleEpoch  uint64
 	workspace    *workspace.ConsentBinding
+	// returnURL, if set, is where the done page sends the person back
+	// (an allowed return origin, checked when the link was made).
+	returnURL string
 }
 
 type signIn struct {
@@ -101,6 +104,7 @@ type signIn struct {
 	google      bool
 	googleEpoch uint64
 	workspace   *workspace.ConsentBinding
+	returnURL   string // the link's
 }
 
 // New builds a consent server. config returns the settings in use (the
@@ -318,6 +322,9 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		Service    string `json:"service"`
 		TTLSeconds int    `json:"ttl_seconds"`
 		Label      string `json:"label"`
+		// ReturnURL, optional, is where the person goes back after
+		// connecting: https on one of consent.return_origins.
+		ReturnURL string `json:"return_url"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	dec.DisallowUnknownFields()
@@ -368,6 +375,13 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "label must be at most 100 characters without control characters")
 		return
 	}
+	if req.ReturnURL != "" {
+		u, err := url.Parse(req.ReturnURL)
+		if err != nil || len(req.ReturnURL) > maxReturnURL || !cfg.Consent.ReturnAllowed(u) || strings.ContainsAny(req.ReturnURL, " \t\r\n;") {
+			apiError(w, http.StatusBadRequest, "return_url must be an https URL on one of consent return_origins")
+			return
+		}
+	}
 	id := randomToken()
 	h := hashOf(id)
 	now := s.now()
@@ -396,7 +410,7 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.links[h] = &link{service: req.Service, key: svc.Key, extraHeaders: maps.Clone(svc.ExtraHeaders), label: req.Label, expires: expires, workspace: binding}
+	s.links[h] = &link{service: req.Service, key: svc.Key, extraHeaders: maps.Clone(svc.ExtraHeaders), label: req.Label, expires: expires, workspace: binding, returnURL: req.ReturnURL}
 	if svc.Auth == policy.AuthGcloudLogin {
 		s.links[h].google = true
 		s.links[h].googleEpoch = s.google.Epoch()
@@ -675,7 +689,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		s.startGoogle(w, r, l, h, public)
 		return
 	}
-	service, label := l.service, l.label
+	service, label, back := l.service, l.label, l.returnURL
 	if svc.Auth != policy.AuthOAuth2 {
 		var value string
 		var err error
@@ -715,7 +729,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 			return
 		}
 		s.writeAudit("connected", map[string]any{"service": service, "key": svc.Key, "link": ref(h), "kind": "value"})
-		render(w, http.StatusOK, pageData{Service: service, Label: label, Message: "Saved. You can close this page."})
+		render(w, http.StatusOK, done(pageData{Service: service, Label: label}, "Saved.", back))
 		return
 	}
 	if len(s.signIns) >= maxPending {
@@ -736,6 +750,7 @@ func (s *Server) linkSubmit(w http.ResponseWriter, r *http.Request, id string, p
 		browser:   hashOf(browser),
 		expires:   now.Add(signInTTL),
 		workspace: l.workspace,
+		returnURL: back,
 	}
 	s.mu.Unlock()
 
@@ -876,7 +891,23 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request, public *url.UR
 		return
 	}
 	s.writeAudit("connected", map[string]any{"service": f.service, "key": svc.Key, "kind": "oauth2"})
-	render(w, http.StatusOK, pageData{Service: f.service, Message: "Connected. You can close this page."})
+	render(w, http.StatusOK, done(pageData{Service: f.service}, "Connected.", f.returnURL))
+}
+
+// maxReturnURL bounds a link's return_url.
+const maxReturnURL = 512
+
+// done is a success page: with a return URL it says it goes back and does
+// so after a few seconds (a plain refresh: the pages run no scripts), with
+// a button for doing it at once; without one, the person closes the page.
+func done(data pageData, said, back string) pageData {
+	if back == "" {
+		data.Message = said + " You can close this page."
+		return data
+	}
+	data.Message = said + " Taking you back…"
+	data.Return = back
+	return data
 }
 
 // exchange trades the authorization code for tokens (RFC 6749 4.1.3, RFC
@@ -1002,6 +1033,8 @@ type pageData struct {
 	// GoogleStep is the Google connection's current step while it runs
 	// (1 sign-in, 2 project setup), shown as a list; 0 shows none.
 	GoogleStep int
+	// Return, on a success page, is where it sends the person back.
+	Return string
 }
 
 type credentialField struct {
@@ -1026,7 +1059,7 @@ func credentialForm(data *pageData, svc policy.Service) {
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-{{if .Refresh}}<meta http-equiv="refresh" content="2">{{end}}
+{{if .Refresh}}<meta http-equiv="refresh" content="2">{{else if .Return}}<meta http-equiv="refresh" content="3;url={{.Return}}">{{end}}
 <title>{{if .Label}}Connect {{.Label}}{{else if .Service}}Connect {{.Service}}{{else}}Private connection page{{end}}</title>
 <style>
 :root{--bg:#f7f8fa;--card:#fff;--ink:#16181d;--mut:#5f6670;--line:#e6e9ee;--blue:#2466e0;--green:#1f7d5a;--red:#b42318;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Helvetica Neue",Arial,sans-serif}
@@ -1072,6 +1105,7 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 {{if .Label}}<h1>Connect {{.Label}}</h1>{{else if .Service}}<h1>Connect {{.Service}}</h1>{{end}}
 {{if .Message}}<div class="msg{{if or .Problem (ge .Status 400)}} err{{else if not (or .Form .Refresh)}} ok{{end}}{{if not (or .Label .Service)}} only{{end}}" role="{{if or .Problem (ge .Status 400)}}alert{{else}}status{{end}}">
 {{if or .Problem (ge .Status 400)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>{{else if not (or .Form .Refresh)}}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="m7.5 12.5 3 3 6-6.5"/></svg>{{else if .Refresh}}<span class="spin" aria-hidden="true"></span>{{end}}<span>{{.Message}}</span></div>{{end}}
+{{with .Return}}<a class="btn" href="{{.}}">Back now</a>{{end}}
 {{if .GoogleStep}}<ol class="steps" aria-label="Progress"><li class="{{if eq .GoogleStep 1}}now{{else}}done{{end}}">Sign in to Google</li><li{{if eq .GoogleStep 2}} class="now"{{end}}>Set up Drive and Sheets</li><li>Done</li></ol>{{end}}
 {{if .Google}}
 {{if .SignIn}}<p class="hint">Connect your own Google Drive and Sheets. After sign-in, this creates a Google Cloud project in your account and enables their APIs. No billing account is attached. Your Google credentials stay in your private keyring, not with the assistant.</p>{{end}}
