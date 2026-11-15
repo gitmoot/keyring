@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"container/heap"
 	"encoding/json"
 	"errors"
 	"io"
@@ -86,8 +87,9 @@ func AuditWindow(fromText, toText string, now time.Time) (time.Time, time.Time, 
 }
 
 // SearchAudit scans the audit log at path for records in [from, to)
-// matching f, newest first; past AuditLimit it keeps the last written and
-// reports more. The log is append-only and never rotated, so it is streamed:
+// matching f, newest first; past AuditLimit it keeps the newest by time and
+// reports more. A record is written when its call ends but stamped with its
+// start, so the last written are not the newest (#153 review). The log is append-only and never rotated, so it is streamed:
 // a line's time is compared as text before it is decoded.
 func SearchAudit(path string, from, to time.Time, f AuditFilter) ([]AuditRow, bool, error) {
 	file, err := os.Open(path)
@@ -96,7 +98,7 @@ func SearchAudit(path string, from, to time.Time, f AuditFilter) ([]AuditRow, bo
 	}
 	defer file.Close()
 	lo, hi := from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339)
-	var kept []AuditRow
+	kept := &newestRows{}
 	more := false
 	rd := bufio.NewReaderSize(file, 64<<10)
 	for {
@@ -110,10 +112,15 @@ func SearchAudit(path string, from, to time.Time, f AuditFilter) ([]AuditRow, bo
 		}
 		if len(line) > 0 {
 			if row, ok := auditMatch(line, lo, hi, f); ok {
-				if len(kept) == AuditLimit {
-					kept, more = kept[1:], true
+				if kept.Len() < AuditLimit {
+					heap.Push(kept, row)
+				} else {
+					more = true
+					if row.Time > (*kept)[0].Time {
+						(*kept)[0] = row
+						heap.Fix(kept, 0)
+					}
 				}
-				kept = append(kept, row)
 			}
 		}
 		if err == io.EOF {
@@ -123,10 +130,23 @@ func SearchAudit(path string, from, to time.Time, f AuditFilter) ([]AuditRow, bo
 			return nil, false, err
 		}
 	}
-	// A line is written when the call ends but stamped with its start, so
-	// file order is not time order.
-	slices.SortStableFunc(kept, func(a, b AuditRow) int { return strings.Compare(b.Time, a.Time) })
-	return kept, more, nil
+	rows := []AuditRow(*kept)
+	slices.SortStableFunc(rows, func(a, b AuditRow) int { return strings.Compare(b.Time, a.Time) })
+	return rows, more, nil
+}
+
+// newestRows is a min-heap by time: its root is the oldest row kept.
+type newestRows []AuditRow
+
+func (h newestRows) Len() int           { return len(h) }
+func (h newestRows) Less(i, j int) bool { return h[i].Time < h[j].Time }
+func (h newestRows) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *newestRows) Push(x any)        { *h = append(*h, x.(AuditRow)) }
+func (h *newestRows) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
 }
 
 func auditMatch(line []byte, lo, hi string, f AuditFilter) (AuditRow, bool) {

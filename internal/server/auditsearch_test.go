@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
 )
@@ -68,5 +70,33 @@ func TestAuditSearchOnlyForAllowedAgents(t *testing.T) {
 	if !strings.Contains(audit.String(), `"role":"jarvis"`) || !strings.Contains(audit.String(), `"note":"audit search"`) ||
 		!strings.Contains(audit.String(), `"role":"tandem","method":"GET","path":"/_keyring/audit","status":403`) {
 		t.Fatalf("searches not audited:\n%s", audit)
+	}
+}
+
+// #153 review: past the limit the newest by time are kept, even when an
+// older, slow call was written last.
+func TestSearchAuditKeepsNewestPastTheLimit(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "audit.log")
+	var b strings.Builder
+	base := time.Date(2026, 11, 15, 16, 0, 0, 0, time.UTC)
+	for i := 1; i <= AuditLimit; i++ {
+		fmt.Fprintf(&b, `{"time":%q,"role":"r","service":"s","method":"GET","path":"/x"}`+"\n", base.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
+	}
+	// The oldest call, slow, is written last.
+	fmt.Fprintf(&b, `{"time":%q,"role":"slow","service":"s","method":"GET","path":"/x"}`+"\n", base.Format(time.RFC3339))
+	if err := os.WriteFile(log, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, more, err := SearchAudit(log, base, base.Add(time.Hour), AuditFilter{})
+	if err != nil || !more || len(rows) != AuditLimit {
+		t.Fatalf("rows %d more %v err %v", len(rows), more, err)
+	}
+	if want := base.Add(AuditLimit * time.Second).Format(time.RFC3339); rows[0].Time != want {
+		t.Errorf("newest row %s, want %s", rows[0].Time, want)
+	}
+	for _, r := range rows {
+		if r.Role == "slow" {
+			t.Fatal("kept the oldest (slow, last-written) call over a newer one")
+		}
 	}
 }
