@@ -300,9 +300,9 @@ func TestServiceProjectFromTheDashboard(t *testing.T) {
 	}
 }
 
-// Jarvis 488215: forward_role is set by pasted settings, survives a plain
-// form edit, shows on the service page, and its change is audited.
-func TestForwardRoleSetByPasteKeptByFormEdit(t *testing.T) {
+// Jarvis 488215: forward_role is set by pasted settings or the edit form's
+// checkbox, shows on the service page, and its change is audited.
+func TestForwardRoleSetByPasteOrCheckbox(t *testing.T) {
 	e := newEnv(t)
 	base := e.proxy.Config().Services["api"].Base
 	w := e.edit("api", url.Values{"pasted": {`{"base":"` + base + `","auth":"bearer","forward_role":true}`}})
@@ -315,8 +315,22 @@ func TestForwardRoleSetByPasteKeptByFormEdit(t *testing.T) {
 	if !strings.Contains(e.request("GET", "/services/api", nil).Body.String(), "X-Keyring-Role") {
 		t.Fatal("service page does not show that the agent's name is sent")
 	}
-	w = e.edit("api", url.Values{"key": {"API_KEY"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/ping"}})
+	// The edit form has a checkbox for it, shown ticked: kept when ticked,
+	// cleared when not.
+	if !strings.Contains(e.request("GET", "/services/api", nil).Body.String(), `name="forward_role" value="yes" checked`) {
+		t.Fatal("edit form does not show forward_role ticked")
+	}
+	w = e.edit("api", url.Values{"key": {"API_KEY"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/ping"}, "forward_role": {"yes"}})
 	if w.Header().Get("Location") != "/services/api?done=saved" || !e.proxy.Config().Services["api"].ForwardRole {
-		t.Fatalf("a form edit dropped forward_role: %d", w.Code)
+		t.Fatalf("a ticked form edit dropped forward_role: %d", w.Code)
+	}
+	w = e.edit("api", url.Values{"key": {"API_KEY"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/ping"}})
+	if w.Header().Get("Location") != "/services/api?done=saved" || e.proxy.Config().Services["api"].ForwardRole {
+		t.Fatalf("unticking did not clear forward_role: %d", w.Code)
+	}
+	// And the plain form turns it on, with nothing pasted.
+	w = e.edit("api", url.Values{"key": {"API_KEY"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/ping"}, "forward_role": {"yes"}})
+	if w.Header().Get("Location") != "/services/api?done=saved" || !e.proxy.Config().Services["api"].ForwardRole {
+		t.Fatalf("ticking the box did not set forward_role: %d", w.Code)
 	}
 }

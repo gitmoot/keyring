@@ -49,7 +49,7 @@ type serviceForm struct {
 	// OAuth client settings of an oauth2 service (#142): the secret is a key
 	// name, never a value.
 	ClientID, TokenURL, ClientSecretKey string
-	// ForwardRole is shown, and changed only by pasting settings.
+	// ForwardRole: the form's checkbox, or forward_role in pasted settings.
 	ForwardRole bool
 }
 
@@ -137,6 +137,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		Pasted:   strings.TrimSpace(r.PostFormValue("pasted")),
 		ClientID: strings.TrimSpace(r.PostFormValue("client_id")), TokenURL: strings.TrimSpace(r.PostFormValue("token_url")),
 		ClientSecretKey: strings.TrimSpace(r.PostFormValue("client_secret_key")),
+		ForwardRole:     r.PostFormValue("forward_role") == "yes",
 	}
 	again := func(status int, msg string) {
 		// Refused pasted settings are not shown again: they may hold a value
@@ -216,6 +217,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated := cur
 	updated.Base, updated.Key, updated.Auth, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Header, f.Param
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
+	updated.ForwardRole = f.ForwardRole
 	if pasted {
 		updated.FixedHeaders, updated.ForwardRole = fixed, forwardRole
 	}
