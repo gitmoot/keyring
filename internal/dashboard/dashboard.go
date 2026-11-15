@@ -136,6 +136,7 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/connect", b.connectKey)
 	registerServices(b)
 	registerProjects(b)
+	registerActivity(b)
 	registerAccess(b)
 }
 
