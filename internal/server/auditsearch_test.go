@@ -100,3 +100,30 @@ func TestSearchAuditKeepsNewestPastTheLimit(t *testing.T) {
 		}
 	}
 }
+
+// #155 review: a window with fractional seconds matches exactly the
+// whole-second records inside it.
+func TestAuditWindowFractionalSeconds(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "audit.log")
+	if err := os.WriteFile(log, []byte(`{"time":"2026-11-15T16:39:20Z","role":"r","service":"s","method":"GET","path":"/x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		from, to string
+		want     int
+	}{
+		{"2026-11-15T16:39:19.5Z", "2026-11-15T16:39:20.5Z", 1},
+		{"2026-11-15T16:39:20.5Z", "2026-11-15T16:39:21.5Z", 0},
+		{"2026-11-15T16:39:19Z", "2026-11-15T16:39:20Z", 0},
+		{"2026-11-15T16:39:20Z", "2026-11-15T16:39:20.001Z", 1},
+	} {
+		from, to, err := AuditWindow(c.from, c.to, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, _, err := SearchAudit(log, from, to, AuditFilter{})
+		if err != nil || len(rows) != c.want {
+			t.Errorf("[%s, %s): %d rows, want %d (%v)", c.from, c.to, len(rows), c.want, err)
+		}
+	}
+}

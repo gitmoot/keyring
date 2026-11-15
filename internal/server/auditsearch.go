@@ -83,7 +83,17 @@ func AuditWindow(fromText, toText string, now time.Time) (time.Time, time.Time, 
 	if !from.Before(to) {
 		return from, to, errors.New("the start must be before the end")
 	}
-	return from, to, nil
+	// Records are stamped to the second: for a whole-second t, t >= x and
+	// t < y exactly when t >= ceil(x) and t < ceil(y). So the window is
+	// rounded up to whole seconds without changing what matches (#155 review).
+	return ceilSecond(from), ceilSecond(to), nil
+}
+
+func ceilSecond(t time.Time) time.Time {
+	if s := t.Truncate(time.Second); !s.Equal(t) {
+		return s.Add(time.Second)
+	}
+	return t
 }
 
 // SearchAudit scans the audit log at path for records in [from, to)
