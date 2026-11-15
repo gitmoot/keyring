@@ -669,6 +669,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if callerUploadToken != "" {
 		sendKey = callerUploadToken
 	}
+	if svc.ForwardRole {
+		header.Set(policy.RoleHeader, roleName)
+	}
 	out, err := buildOutbound(r.Context(), svc, sendKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
 	if errors.Is(err, errBadQuery) {
 		h.refund(roleName, service, access.DailyRequests, start)
@@ -968,6 +971,7 @@ func outboundHeader(in http.Header, svc policy.Service) http.Header {
 		out.Del(name)
 	}
 	out.Del(TokenHeader)
+	out.Del(policy.RoleHeader)
 	out.Del(workspace.GenerationHeader)
 	out.Del("Authorization")
 	out.Del("Cookie")

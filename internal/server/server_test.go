@@ -732,3 +732,38 @@ func TestRestoreDailyCountsNeverGivesMoreCalls(t *testing.T) {
 		t.Fatalf("next day: %d", w.Code)
 	}
 }
+
+// Jarvis 488215: a service with forward_role learns which role called it;
+// a caller cannot forge the header, and services without it never see one.
+func TestForwardRoleNamesTheCallerAndCannotBeForged(t *testing.T) {
+	up, got := upstream(t)
+	on := bearer
+	on.ForwardRole = true
+	h, _ := newHandler(t, up.URL, on, allowAll)
+	if w := call(h, "POST", "/api/v1/jobs/j1/cancel", testToken, map[string]string{"x-keyring-role": "owner"}); w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if v := got.last(t).Header.Values(policy.RoleHeader); len(v) != 1 || v[0] != "phobos" {
+		t.Fatalf("upstream role header = %q, want [phobos]", v)
+	}
+	h, _ = newHandler(t, up.URL, bearer, allowAll)
+	call(h, "GET", "/api/v1/x", testToken, map[string]string{policy.RoleHeader: "owner"})
+	if v := got.last(t).Header.Values(policy.RoleHeader); len(v) != 0 {
+		t.Fatalf("service without forward_role got %q", v)
+	}
+	for _, svc := range []string{
+		`{"auth":"minisign-sign","key":"K"}`,
+		`{"auth":"egress-proxy","key":"K"}`,
+	} {
+		var s policy.Service
+		if err := json.Unmarshal([]byte(svc), &s); err != nil {
+			t.Fatal(err)
+		}
+		s.ForwardRole = true
+		cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
+			AccessList: policy.AccessList{Services: map[string]policy.Service{"x": s}}}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "forward_role") {
+			t.Errorf("%s with forward_role: %v", svc, err)
+		}
+	}
+}

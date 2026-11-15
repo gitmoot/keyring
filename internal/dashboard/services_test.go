@@ -299,3 +299,24 @@ func TestServiceProjectFromTheDashboard(t *testing.T) {
 		t.Fatal("a call to a service in a paused project was not refused")
 	}
 }
+
+// Jarvis 488215: forward_role is set by pasted settings, survives a plain
+// form edit, shows on the service page, and its change is audited.
+func TestForwardRoleSetByPasteKeptByFormEdit(t *testing.T) {
+	e := newEnv(t)
+	base := e.proxy.Config().Services["api"].Base
+	w := e.edit("api", url.Values{"pasted": {`{"base":"` + base + `","auth":"bearer","forward_role":true}`}})
+	if w.Header().Get("Location") != "/services/api?done=saved" || !e.proxy.Config().Services["api"].ForwardRole {
+		t.Fatalf("paste with forward_role: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(e.audit.String(), `"forward_role"`) {
+		t.Fatalf("audit does not name the change: %s", e.audit.String())
+	}
+	if !strings.Contains(e.request("GET", "/services/api", nil).Body.String(), "X-Keyring-Role") {
+		t.Fatal("service page does not show that the agent's name is sent")
+	}
+	w = e.edit("api", url.Values{"key": {"API_KEY"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/ping"}})
+	if w.Header().Get("Location") != "/services/api?done=saved" || !e.proxy.Config().Services["api"].ForwardRole {
+		t.Fatalf("a form edit dropped forward_role: %d", w.Code)
+	}
+}
