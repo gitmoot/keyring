@@ -38,6 +38,7 @@ func registerAccess(b *Backend) {
 	a.Handle("GET /agents/{role}", b.agentPage)
 	a.Handle("POST /agents/{role}/token", b.newAgentToken)
 	a.Handle("POST /agents/{role}/revoke", b.revokeAgent)
+	a.Handle("POST /agents/{role}/audit", b.setAuditRead)
 }
 
 // maxChips is how many APIs an agent's row lists before "+N more".
@@ -570,7 +571,41 @@ func (b *Backend) agentPage(w http.ResponseWriter, r *http.Request, sid string) 
 		"ProjectGrants": sortedNames(rl.Projects),
 		"File":          tokenDir + "/" + role + ".token", "Current": rl.TokenSHA256[:12],
 		"Error": agentErrors[r.URL.Query().Get("error")], "Added": r.URL.Query().Get("done") == "added",
+		"AuditRead": rl.AuditRead, "AuditSaved": r.URL.Query().Get("done") == "audit",
 	})
+}
+
+// setAuditRead allows or stops the agent's audit search (owner, 2026-11-15:
+// per agent, off by default).
+func (b *Backend) setAuditRead(w http.ResponseWriter, r *http.Request, sid string) {
+	role := r.PathValue("role")
+	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
+		http.Redirect(w, r, "/agents/"+role+"?error=password", http.StatusSeeOther)
+		return
+	}
+	allow := r.PostFormValue("allow") == "yes"
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	next, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	rl, ok := next.Roles[role]
+	if !ok {
+		b.notFound(w, sid)
+		return
+	}
+	if rl.AuditRead != allow {
+		rl.AuditRead = allow
+		next.Roles[role] = rl
+		if err := b.saveAndApply(next); err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		b.Admin.Audit("agent_audit_read", sid, map[string]any{"role": role, "allowed": allow})
+	}
+	http.Redirect(w, r, "/agents/"+role+"?done=audit", http.StatusSeeOther)
 }
 
 func (b *Backend) newAgentToken(w http.ResponseWriter, r *http.Request, sid string) {

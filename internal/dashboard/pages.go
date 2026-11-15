@@ -261,6 +261,11 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <ul class="grants">{{range .Services}}<li><a class="grant" href="/access/{{$.Role}}/{{.Service}}"><span class="svc">{{.Service}}</span><span class="what">{{.Label}}{{with .Via}} · through project {{.}}{{end}}</span></a></li>{{else}}<li class="mute">None yet.</li>{{end}}</ul>
 {{if .Off}}<form method="get" action="/access/{{.Role}}/-" class="add" data-pathpick><select name="service" aria-label="Add a service"><option value="">Add a service…</option>{{range .Off}}<option>{{.}}</option>{{end}}</select><noscript><button class="ghost">Open</button></noscript></form>{{end}}
 </div>
+<div class="card"><h2>Activity log</h2>{{if .AuditSaved}}<p class="notice">Saved.</p>{{end}}
+<p>{{if .AuditRead}}{{.Role}} may search the audit log: every agent's calls (time, service, path, status) and dashboard events, never key values.{{else}}{{.Role}} may not search the audit log.{{end}}</p>
+<form method="post" action="/agents/{{.Role}}/audit"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="allow" value="{{if .AuditRead}}no{{else}}yes{{end}}">
+{{template "password" .}}<div class="actions"><button{{if .AuditRead}} class="ghost"{{end}}>{{if .AuditRead}}Stop audit access{{else}}Allow audit search{{end}}</button></div></form>
+<p class="hint">Through its relay: <code>GET /{{.Role}}/_keyring/audit?from=2026-11-15T16:39&amp;to=2026-11-15T16:39&amp;service=&amp;role=&amp;path=</code>, the same search as the Activity page.</p></div>
 <div class="card"><dl><dt>Ends</dt><dd>{{with .Expires}}{{.}}{{else}}never{{end}}</dd><dt>Token file</dt><dd><code>{{.File}}</code></dd></dl></div>
 <details class="card"><summary>Make a new token</summary><form method="post" action="/agents/{{.Role}}/token"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="current" value="{{.Current}}">
 <p class="mute">Shown once. The old token stops working at once.</p>{{template "password" .}}<div class="actions"><button>Make a new token</button></div></form></details>
