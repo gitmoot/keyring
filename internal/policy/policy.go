@@ -321,9 +321,19 @@ type Service struct {
 	Minisign *Minisign `json:"minisign,omitempty"`
 	// APNs fixes the public identity of an APNs auth key (auth apns).
 	APNs *APNs `json:"apns,omitempty"`
+	// ForwardRole sends the calling role's name upstream in RoleHeader, so
+	// a service the fleet runs itself can tell callers apart (Jarvis
+	// 488215: macserve saw every relay caller as the same client). Off by
+	// default: a third-party API has no use for role names.
+	ForwardRole bool `json:"forward_role,omitempty"`
 
 	base *url.URL
 }
+
+// RoleHeader carries the calling role's name to a service with ForwardRole.
+// The keyring drops any caller-sent copy on every call, so it cannot be
+// forged through the keyring.
+const RoleHeader = "X-Keyring-Role"
 
 // AppleAds fixes the public identity of the Apple Ads client secret.
 type AppleAds struct {
@@ -1066,6 +1076,9 @@ func (s *Service) validate() error {
 			}
 			seenHeaders[name], seenKeys[key] = true, true
 		}
+	}
+	if s.ForwardRole && (s.SignOnly() || s.Auth == AuthGcloudLogin || s.Auth == AuthEgressProxy) {
+		return errors.New("forward_role needs a service that forwards calls")
 	}
 	if s.Minisign != nil && s.Auth != AuthMinisignSign {
 		return errors.New("minisign settings require auth minisign-sign")

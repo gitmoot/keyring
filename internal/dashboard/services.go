@@ -49,11 +49,13 @@ type serviceForm struct {
 	// OAuth client settings of an oauth2 service (#142): the secret is a key
 	// name, never a value.
 	ClientID, TokenURL, ClientSecretKey string
+	// ForwardRole is shown, and changed only by pasting settings.
+	ForwardRole bool
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
-		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders}
+		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole}
 	if o := svc.OAuth2; o != nil {
 		f.ClientID, f.TokenURL, f.ClientSecretKey = o.ClientID, o.TokenURL, o.ClientSecretKey
 	}
@@ -151,6 +153,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	}
 	pasted := f.Pasted != ""
 	var fixed map[string]string
+	var forwardRole bool
 	var extra *map[string]string // nil: keep the stored extra headers
 	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
 	if pasted {
@@ -172,7 +175,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			return
 		}
 		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
-		fixed, extra, oauth = a.FixedHeaders, a.ExtraHeaders, a.OAuth2
+		fixed, extra, oauth, forwardRole = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -214,7 +217,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated.Base, updated.Key, updated.Auth, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Header, f.Param
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	if pasted {
-		updated.FixedHeaders = fixed
+		updated.FixedHeaders, updated.ForwardRole = fixed, forwardRole
 	}
 	if cur.Auth == policy.AuthOAuth2 {
 		next := *cur.OAuth2
@@ -309,7 +312,7 @@ func changedFields(old, now policy.Service) []string {
 	}{
 		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
-		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)},
+		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)}, {"forward_role", old.ForwardRole != now.ForwardRole},
 		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},
 		{"oauth2", !old.OAuth2.Equal(now.OAuth2)},
 	} {

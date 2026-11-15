@@ -849,6 +849,7 @@ type connectForm struct {
 	KeyPart     string
 	PartHeaders map[string]string
 	OAuth2      *policy.OAuth2
+	ForwardRole bool
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -863,6 +864,8 @@ type agentSettings struct {
 	TLSPin       string            `json:"tls_pin_sha256,omitempty"`
 	FixedHeaders map[string]string `json:"fixed_headers,omitempty"`
 	Project      string            `json:"project,omitempty"`
+	// ForwardRole sends the calling agent's name upstream (X-Keyring-Role).
+	ForwardRole bool `json:"forward_role,omitempty"`
 	// ExtraHeaders sends more secret values with each call: header name ->
 	// name of another stored key, never a value. A pointer, so an edit can
 	// tell "left out" (keep) from {} (remove).
@@ -983,7 +986,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			return
 		}
 		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
-		f.FixedHeaders, f.Project = a.FixedHeaders, a.Project
+		f.FixedHeaders, f.Project, f.ForwardRole = a.FixedHeaders, a.Project, a.ForwardRole
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
@@ -1068,7 +1071,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, ForwardRole: f.ForwardRole, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
