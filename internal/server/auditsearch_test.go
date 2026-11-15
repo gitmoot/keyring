@@ -67,6 +67,16 @@ func TestAuditSearchOnlyForAllowedAgents(t *testing.T) {
 	if w := call(h, "GET", AuditPath, "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no token: %d", w.Code)
 	}
+	// The answer names the window as asked, fractions included, so it can be
+	// sent again (#155 review).
+	w = call(h, "GET", AuditPath+"?from=2026-11-15T16:39:53.1Z&to=2026-11-15T16:39:53.2Z", reader, nil)
+	var win struct{ From, To string }
+	if err := json.Unmarshal(w.Body.Bytes(), &win); w.Code != http.StatusOK || err != nil || win.From != "2026-11-15T16:39:53.1Z" || win.To != "2026-11-15T16:39:53.2Z" {
+		t.Fatalf("window echoed as %+v (%d)", win, w.Code)
+	}
+	if w := call(h, "GET", AuditPath+"?from="+win.From+"&to="+win.To, reader, nil); w.Code != http.StatusOK {
+		t.Fatalf("replaying the echoed window: %d", w.Code)
+	}
 	if !strings.Contains(audit.String(), `"role":"jarvis"`) || !strings.Contains(audit.String(), `"note":"audit search"`) ||
 		!strings.Contains(audit.String(), `"role":"tandem","method":"GET","path":"/_keyring/audit","status":403`) {
 		t.Fatalf("searches not audited:\n%s", audit)

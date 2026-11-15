@@ -83,10 +83,7 @@ func AuditWindow(fromText, toText string, now time.Time) (time.Time, time.Time, 
 	if !from.Before(to) {
 		return from, to, errors.New("the start must be before the end")
 	}
-	// Records are stamped to the second: for a whole-second t, t >= x and
-	// t < y exactly when t >= ceil(x) and t < ceil(y). So the window is
-	// rounded up to whole seconds without changing what matches (#155 review).
-	return ceilSecond(from), ceilSecond(to), nil
+	return from, to, nil
 }
 
 func ceilSecond(t time.Time) time.Time {
@@ -107,7 +104,11 @@ func SearchAudit(path string, from, to time.Time, f AuditFilter) ([]AuditRow, bo
 		return nil, false, err
 	}
 	defer file.Close()
-	lo, hi := from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339)
+	// Records are stamped to the second and compared as text, so compare
+	// against whole seconds: for a whole-second t, t >= x and t < y exactly
+	// when t >= ceil(x) and t < ceil(y) (#155 review). The caller's window
+	// itself is not changed.
+	lo, hi := ceilSecond(from).UTC().Format(time.RFC3339), ceilSecond(to).UTC().Format(time.RFC3339)
 	kept := &newestRows{}
 	more := false
 	rd := bufio.NewReaderSize(file, 64<<10)
@@ -219,6 +220,6 @@ func (h *Handler) serveAuditSearch(w http.ResponseWriter, r *http.Request, snap 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339), "rows": rows, "more": more, "limit": AuditLimit,
+		"from": from.Format(time.RFC3339Nano), "to": to.Format(time.RFC3339Nano), "rows": rows, "more": more, "limit": AuditLimit,
 	})
 }
