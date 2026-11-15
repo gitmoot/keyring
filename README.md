@@ -839,6 +839,8 @@ Safety:
 
 The Keys and Agents pages are sortable tables (click a column); forms are one column. Everything works on a phone (the tables scroll sideways with the name column pinned) and follows the system's light or dark mode.
 
+The **Activity** page (`/activity`) searches the audit log, read-only, so the owner can see who did what without a terminal or `sudo`: a UTC time window by the minute (default: the last hour; the end minute is included), and optionally a service, an agent and text the path contains. It lists each matching call (time, agent, service, method and path, status, source address, note) and dashboard event, newest first, at most 500 (narrow the search for more). It shows only what the audit log holds: no key values, no query strings. The log is streamed, never loaded whole.
+
 The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (with a dot: full or limited access), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. Values are not shown in the table; a key's page can show its value on request (below).
 - **Show value** (a key's page) shows the stored value, or each named value, after
   the dashboard password, with a Copy button. It is the answer to that one request:

@@ -12,6 +12,7 @@ var pages = template.Must(template.New("pages").Parse(`
 <a href="/keys" class="nav{{if or (eq .Page "keys") (eq .Page "key") (eq .Page "newkey") (eq .Page "service")}} on{{end}}">Keys<span class="n">{{.Nav.Keys}}</span></a>
 <a href="/access" class="nav{{if or (eq .Page "access") (eq .Page "cell") (eq .Page "agent") (eq .Page "newagent") (eq .Page "token")}} on{{end}}">Agents<span class="n">{{.Nav.Agents}}</span></a>
 <a href="/projects" class="nav{{if or (eq .Page "projects") (eq .Page "project")}} on{{end}}">Projects<span class="n">{{.Nav.Projects}}</span></a>
+<a href="/activity" class="nav{{if eq .Page "activity"}} on{{end}}">Activity</a>
 <a href="/access#requests" class="nav">Requests<span class="n{{if .PendingCount}} hot{{end}}">{{.PendingCount}}</span></a>
 </nav>
 {{with .Nav.ProjectList}}<p class="sec">Projects</p><nav class="sidenav projects" aria-label="Projects">{{range .}}<a href="/projects/{{.Name}}" class="nav"><i class="dot {{.Dot}}"></i>{{.Name}}<span class="n">{{.Services}}</span></a>{{end}}</nav>{{end}}
@@ -311,6 +312,27 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="actions"><button>Save</button></div>
 </form></div>
 {{else}}<div class="card"><p class="mute">This is a {{.Kind}} service. It carries settings this form does not show, so it is changed in access.json, not here.</p></div>{{end}}
+{{template "bottom"}}{{end}}
+
+{{define "activity"}}{{template "top" .}}
+<div class="bar"><h1>Activity</h1></div>
+<form method="get" action="/activity" class="card"><div class="two">
+<label>From (UTC)<input type="datetime-local" name="from" value="{{.Q.From}}"></label>
+<label>To (UTC, minute included)<input type="datetime-local" name="to" value="{{.Q.To}}"></label>
+</div><div class="two">
+<label>Service<input name="service" value="{{.Q.Service}}" autocapitalize="none" spellcheck="false" placeholder="any"></label>
+<label>Agent<input name="role" value="{{.Q.Role}}" autocapitalize="none" spellcheck="false" placeholder="any"></label>
+</div>
+<label>Path contains<input name="path" value="{{.Q.Path}}" autocapitalize="none" spellcheck="false" placeholder="e.g. /v1/jobs/j_ce4ce15b"></label>
+<div class="actions"><button>Show</button></div></form>
+{{with .ActivityError}}<p class="error">{{.}}</p>{{end}}
+{{if .Rows}}{{if .More}}<p class="hint">Showing the newest {{.Limit}}; narrow the search to see older ones.</p>{{end}}
+<div class="tablewrap"><table class="t"><thead><tr><th>Time (UTC)</th><th>Agent</th><th>Service</th><th>Call</th><th class="num">Status</th><th>From</th><th>Note</th></tr></thead><tbody>
+{{range .Rows}}<tr><td class="mono">{{.Time}}</td><td>{{if .Admin}}<span class="mute">dashboard</span>{{else}}{{.Role}}{{end}}</td><td>{{.Service}}</td>
+<td class="mono">{{if .Admin}}{{.Admin}}{{else}}{{.Method}} {{.Path}}{{end}}</td><td class="num">{{if .Status}}{{.Status}}{{end}}</td><td class="mono mute">{{.Source}}</td><td class="mute">{{.Note}}</td></tr>{{end}}
+</tbody></table></div>
+{{else if not .ActivityError}}<p class="mute">Nothing in this window.</p>{{end}}
+<p class="hint">From the audit log: every call an agent made through the keyring and every dashboard change. Paths are shown without their query string; key values are never recorded.</p>
 {{template "bottom"}}{{end}}
 
 {{define "projects"}}{{template "top" .}}
