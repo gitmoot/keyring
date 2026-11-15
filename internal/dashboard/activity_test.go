@@ -52,3 +52,31 @@ func TestActivityFindsTheCallerByMinuteAndPath(t *testing.T) {
 		t.Errorf("bad time: %d", w.Code)
 	}
 }
+
+// Owner, 2026-11-15: audit search is allowed per agent on its page, with the
+// password, off by default, and the change is audited.
+func TestAllowAndStopAgentAuditSearch(t *testing.T) {
+	e := newEnv(t)
+	if e.proxy.Config().Roles["phobos"].AuditRead {
+		t.Fatal("audit search is on by default")
+	}
+	if !strings.Contains(e.request("GET", "/agents/phobos", nil).Body.String(), "Allow audit search") {
+		t.Fatal("agent page has no audit-search control")
+	}
+	if w := e.request("POST", "/agents/phobos/audit", url.Values{"allow": {"yes"}, "password": {"wrong-password-123"}}); w.Header().Get("Location") != "/agents/phobos?error=password" || e.proxy.Config().Roles["phobos"].AuditRead {
+		t.Fatalf("wrong password allowed it: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if w := e.request("POST", "/agents/phobos/audit", url.Values{"allow": {"yes"}, "password": {password}}); w.Header().Get("Location") != "/agents/phobos?done=audit" || !e.proxy.Config().Roles["phobos"].AuditRead {
+		t.Fatalf("allow: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if !strings.Contains(e.audit.String(), `"agent_audit_read"`) || !strings.Contains(string(e.accessBytes()), `"audit_read": true`) {
+		t.Fatal("not audited or not saved to the access file")
+	}
+	if !strings.Contains(e.request("GET", "/agents/phobos", nil).Body.String(), "Stop audit access") {
+		t.Fatal("page does not offer to stop it")
+	}
+	e.request("POST", "/agents/phobos/audit", url.Values{"allow": {"no"}, "password": {password}})
+	if e.proxy.Config().Roles["phobos"].AuditRead {
+		t.Fatal("stop did not take effect")
+	}
+}

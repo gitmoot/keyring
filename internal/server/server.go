@@ -48,8 +48,10 @@ type Handler struct {
 	snap atomic.Pointer[snapshot]
 	// requests, when set, takes access requests at RequestsPath.
 	requests *requests.Store
-	audit    io.Writer
-	client   *http.Client
+	// auditSearch lets one audit search (AuditPath) run at a time.
+	auditSearch sync.Mutex
+	audit       io.Writer
+	client      *http.Client
 	// pinned holds one client per tls_pin_sha256 value (see clientFor).
 	pinned sync.Map
 	now    func() time.Time
@@ -290,6 +292,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.Role = roleName
 	if role.Expired(start) {
 		fail(http.StatusUnauthorized, "role expired")
+		return
+	}
+	if r.URL.Path == AuditPath {
+		h.serveAuditSearch(w, r, snap, role.AuditRead, &rec, fail)
 		return
 	}
 	var accountID string

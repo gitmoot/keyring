@@ -666,6 +666,10 @@ type Role struct {
 	// services added to it later, with the same limits (#111). A grant in
 	// Access for a single service takes precedence over its project's grant.
 	Projects map[string]Access `json:"projects,omitempty"`
+	// AuditRead lets the role search the audit log (every agent's calls and
+	// dashboard events, never values) at the keyring's /_keyring/audit. Off
+	// unless the owner allows it on the agent's page (owner, 2026-11-15).
+	AuditRead bool `json:"audit_read,omitempty"`
 }
 
 type Access struct {
