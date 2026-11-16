@@ -4,7 +4,7 @@ One keyring per person (gitmoot/keyring#46, option B1). Each person gets a conta
 
 ```mermaid
 flowchart LR
-  R[Phobos router] -- "X-Keyring-Caller + role token" --> W[Worker]
+  R[agent router] -- "X-Keyring-Caller + role token" --> W[Worker]
   R -- "X-Keyring-Caller + admin token" --> W
   P[Person's browser] -- "consent link, OAuth callback" --> W
   W --> D[Durable Object: one per person]
@@ -74,13 +74,13 @@ Inputs:
 | `SERVICES_TEMPLATE` | var in `wrangler.jsonc` | services each keyring starts with, and the router role's access |
 | `RETURN_ORIGINS` | var in `wrangler.jsonc` (optional) | comma-separated https origins, e.g. `https://app.example.com`, that a link's `return_url` may point to; sent as consent `return_origins` on each keyring's next start, like a `PUBLIC_BASE` change |
 | `MASTER_KEY` | secret | `head -c32 /dev/urandom \| base64`. Losing it makes every keyring unreadable; rotating it needs a re-seal (not built yet) |
-| `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per Phobos server |
+| `CALLER_SECRET` | secret | the router's `X-Keyring-Caller` value, one per router server |
 | `ADMIN_TOKEN` | secret | the router's admin bearer token |
 | `OAUTH_CLIENT_SECRETS` | secret | JSON `{"GOOGLE_CLIENT_SECRET": "..."}`, pushed into every keyring |
 | `OAUTH_CLIENT_SECRETS_SHARED` | secret | Optional additive JSON map, pushed into every keyring; overrides matching global names without replacing the existing opaque global binding |
 | `OAUTH_CLIENT_SECRETS_BY_INSTANCE` | secret | JSON `{"keyring_id": {"GOOGLE_CLIENT_SECRET": "..."}}`, imported only by the named keyring; overrides matching global and shared names there |
 
-Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both service entries. For a personal pilot, update only that person's existing instance, not the global template. The separate Drive connection below uses Google's own `gcloud` client and needs no Phobos-owned OAuth application. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
+Gmail and Calendar need an owner-approved Web application OAuth client with redirect URI `<PUBLIC_BASE>/connect/callback`; put the same client ID in both service entries. For a personal pilot, update only that person's existing instance, not the global template. The separate Drive connection below uses Google's own `gcloud` client and needs no OAuth application of your own. Do not publish a Google project, create shared credentials, or deploy the sample Workspace grants without the owner's approval.
 
 ```sh
 cd deploy/cloudflare
@@ -135,7 +135,7 @@ The profile does not request permanent mailbox deletion, calendar ACL/sharing,
 or full-mail/full-calendar scopes.
 
 The template grants only named API path families, but grants are not action
-approval. Phobos must keep these services out of unrestricted guest HTTP and
+approval. The router must keep these services out of unrestricted guest HTTP and
 enforce its own exact operation allowlist and durable confirmation before
 send, trash/delete, or attendee-changing operations. That includes the
 signature-expanded outgoing message and Calendar `If-Match`/`sendUpdates`
@@ -465,7 +465,7 @@ browser flow expires that flow; saved login/project progress can be retried
 through a new link after wake.
 
 Container access-token renewal (SDK startup plus token validation) has a bounded
-45-second budget, leaving 15 seconds within the current Phobos gateway's
+45-second budget, leaving 15 seconds within the current agent gateway's
 60-second response-header limit for forwarding and the upstream response.
 File-mode hosts retain their 30-second renewal budget. Cached requests do not
 start the SDK again, and a renewal timeout does not require reconnecting the

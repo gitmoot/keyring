@@ -1,899 +1,145 @@
 # keyring
 
-Keeps API keys on a separate machine. Agents call APIs **through** the keyring,
-so a key never reaches the machine where agents run.
+**A vault for AI agents.** Agents call APIs, sign requests and use OAuth *through* the keyring, and never see a secret.
 
-Apple Ads and App Store Connect also support **sign-only** access: the Mac
-signs a short-lived JWT while the private key stays in the keyring. They use
-separate services, identities, keys and role grants.
-
-Status: the service, the relay and the Mac installer are done and in use; the dashboard is #15. Plan and steps: #1.
+[![Release](https://img.shields.io/github/v/release/gitmoot/keyring)](https://github.com/gitmoot/keyring/releases)
+[![CI](https://github.com/gitmoot/keyring/actions/workflows/ci.yml/badge.svg)](https://github.com/gitmoot/keyring/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Go 1.24](https://img.shields.io/github/go-mod/go-version/gitmoot/keyring)](go.mod)
 
 ## Why
 
-On the agent server every agent runs as root, so any agent can read every key
-in `/root/.env`, and keys leak by accident into chats, PRs and logs. Moving
-the keys to another machine means there is nothing on the agent server to
-read or leak.
+Agents need real credentials to do real work: an LLM API key, a Google account, an Apple signing key. Giving them the keys is the risk. An agent that can read a key can leak it into a chat, a pull request or a log, and every agent on the machine can read every key in its `.env`.
+
+The keyring keeps the keys on a **separate machine**. An agent sends its request without a key; the keyring checks who is asking and whether that is allowed, adds the key, calls the API and passes the answer back. There is nothing on the agents' machine to read or leak.
 
 ## How it works
 
+```mermaid
+flowchart LR
+  subgraph agents["Agents' machine (no secrets)"]
+    A["agent"] -->|"GET /my-agent/openrouter/api/v1/models<br/>no key"| R["local relay<br/>127.0.0.1:7700<br/>adds the role token"]
+  end
+  subgraph vault["Keyring machine (holds every key)"]
+    K["keyring<br/>1. who is calling?<br/>2. allowed? (service, path, limits)<br/>3. add the key, call the API<br/>4. audit it, mask echoed keys"]
+    S[("key store")]
+    S -.-> K
+  end
+  R -->|"private network"| K
+  K -->|"HTTPS + key"| API["OpenRouter, Google,<br/>Apple, Cloudflare, …"]
 ```
-agent server                           keyring machine (tailnet only)
-┌──────────────────────┐               ┌───────────────────────────────┐
-│ agent                │               │ keyring service               │
-│   │ POST /openrouter/…               │  1. who is calling? (role)    │
-│   ▼                  │   tailnet     │  2. allowed? (key, path, cap) │
-│ local relay :7700 ───┼──────────────▶│  3. add the key, call the API │
-│   (adds role token)  │               │  4. log it, return the answer │
-└──────────────────────┘               └──────────────┬────────────────┘
-                                                      ▼
-                                             OpenRouter, Apple, …
-```
 
-Three ways to use a key:
+The key never leaves the keyring machine. The agent holds only a role token, which the owner can limit, watch and revoke.
 
-| Mode  | What the agent does | Key leaves the keyring? |
-|-------|---------------------|-------------------------|
-| proxy | Sends the request without a key; the keyring adds it | never |
-| sign  | Asks for a short-lived token (Apple JWTs) | only the token, minutes |
-| run   | Asks for the raw key for one command | yes (last resort, logged) |
+## What it does
 
-Per role: which keys, which API paths, a spending cap, and an expiry. Every
-call is logged without the key. Rotating a key is one change on the keyring
-machine.
+- **API proxy.** Bearer, header or query-parameter keys, up to two extra secret headers, and keys with several values. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
+- **Request signing without handing out the private key.** Apple Ads and App Store Connect JWTs, Sign in with Apple client secrets, APNs push, raw Ed25519, and minisign release signatures. [Apple](docs/apple.md) · [Signing](docs/signing.md)
+- **OAuth with refresh.** The keyring holds the refresh token and mints access tokens, for Gmail, Drive and any OAuth 2 provider; Google accounts can also come from `gcloud`. [OAuth](docs/oauth.md) · [Google via gcloud](docs/google-gcloud.md)
+- **Per-agent access.** Each agent (a *role*) gets only the services, methods and paths it was given, with daily request and byte limits and an end date. Agents ask with `keyring request`; the owner approves in one tap.
+- **Projects.** Group a client's services, give an agent a whole project, pause it or let it expire in one place. [Projects](docs/projects.md)
+- **Dashboard and audit.** Add, test, replace and upload keys; see each key's status and use; approve agents; search the audit log of every call. [Dashboard](docs/dashboard.md)
+- **Consent links.** Send a person a one-time link to connect their own account (OAuth sign-in) or paste a key, instead of sending it in a chat. [Consent links](docs/consent-links.md)
+- **Egress tunnels.** Let an agent's traffic leave through a person's own proxy, with the proxy credential kept in the keyring. [Egress proxy](docs/egress-proxy.md)
+- **One keyring per person.** Instance mode runs a small keyring per user under a supervisor, for example on Cloudflare Containers. [Instance mode](docs/instance-mode.md)
 
-## Limits
+![The dashboard's Keys page: each key, its API, status, agents with access and use (demo data)](docs/images/dashboard-keys.png)
 
-- Each role's token sits on the agent server, so a misbehaving root agent can
-  use another role's access. It still cannot read the keys, and every call is
-  logged and revocable.
-- If the keyring machine is off or asleep, API calls fail.
+## Quick start (5 minutes, one machine)
 
-## Using it
+This runs the keyring and the relay on one machine so you can see a call go through. In real use the keyring runs on a different machine from the agents; see [Relay](docs/relay.md).
+
+**1. Install.** Download a binary from [Releases](https://github.com/gitmoot/keyring/releases) (macOS arm64, Linux amd64; check it against `SHA256SUMS`), or build it:
 
 ```sh
-keyring set --store keys.json OPENROUTER_API_KEY   # value read from stdin, not echoed
-keyring list --store keys.json                     # names only
-keyring new-token                                  # role token + sha256 for the access file
+go install github.com/gitmoot/keyring/cmd/keyring@latest
+```
+
+**2. Store a key.** The value is read from stdin and never echoed.
+
+```sh
+mkdir -m 700 demo && cd demo
+keyring set --store keys.json OPENROUTER_API_KEY
+```
+
+**3. Make a token for your agent.** It prints a token (for the agent's side) and its SHA-256 (for the keyring).
+
+```sh
+keyring new-token
+```
+
+**4. Say who may connect, and what the agent may do.**
+
+```sh
+cat > rules.json <<EOF
+{"listen": "127.0.0.1:7701", "allow_sources": ["127.0.0.1"],
+ "audit_log": "$PWD/audit.log", "access_file": "$PWD/access.json"}
+EOF
+cat > access.json <<'EOF'
+{"services": {"openrouter": {"base": "https://openrouter.ai", "key": "OPENROUTER_API_KEY", "auth": "bearer"}},
+ "roles": {"my-agent": {"token_sha256": "<sha256 from step 3>",
+                        "access": {"openrouter": {"paths": ["/api/v1"], "daily_requests": 100}}}}}
+EOF
+chmod 600 rules.json access.json
 keyring check --config rules.json --store keys.json
 keyring serve --config rules.json --store keys.json
-kill -HUP <pid>                                    # re-read access file and keys, no restart
 ```
 
-There are two settings files.
-
-**`rules.json`**: who may connect. It is owned by root, and the service can only read it:
-
-```json
-{
-  "listen": "192.0.2.10:7701",
-  "allow_sources": ["192.0.2.20"],
-  "audit_log": "/Library/Application Support/keyring/data/audit.log",
-  "access_file": "/Library/Application Support/keyring/data/access.json"
-}
-```
-
-**`access.json`**: which services exist and what each role may do. It is owned by the service user, mode 600:
-
-```json
-{
-  "services": {
-    "openrouter": {"base": "https://openrouter.ai", "key": "OPENROUTER_API_KEY", "auth": "bearer"},
-    "tavily": {"base": "https://api.tavily.com", "key": "TAVILY_API_KEY", "auth": "header", "header": "X-Api-Key"}
-  },
-  "roles": {
-    "phobos": {
-      "token_sha256": "<from keyring new-token>",
-      "access": {"openrouter": {"paths": ["/api/v1"], "daily_requests": 2000}}
-    }
-  }
-}
-```
-
-A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
-
-`SIGHUP` re-reads the rules file, the access file and the keys. A change to `allow_sources` applies at once; a changed `listen`, `audit_log` or `access_file`, or an invalid file, is refused, and the previous settings stay in use. Daily counts carry over.
-
-### Apple Ads signing (not an API proxy)
-
-Configure this service in the access file; these three identifiers are public,
-fixed configuration, never caller-supplied claims:
-
-```json
-{
-  "services": {
-    "apple-ads": {
-      "key": "APPLE_ADS_PRIVATE_KEY",
-      "auth": "apple-ads-sign",
-      "apple_ads": {
-        "client_id": "SEARCHADS.your-client-id",
-        "team_id": "YOUR_TEAM_ID",
-        "key_id": "YOUR_KEY_ID"
-      }
-    }
-  }
-}
-```
-
-Merge it into the existing access file; do not replace existing roles or services.
-Store the full unencrypted P-256 PEM under `APPLE_ADS_PRIVATE_KEY` with the
-bounded, non-echoing `keyring set --file` import described in
-[the Mac operator instructions](deploy/mac/README.md#apple-ads-signing-upgrade-and-key-import).
-PKCS#8 `PRIVATE KEY` and SEC1 `EC PRIVATE KEY` encodings are supported.
-`base`, `header`, `param`, `test_method`, `test_path`, and `tls_pin_sha256` must be absent.
-No other service may share this signing key, and no other service name may
-use `apple-ads-sign`. Dashboard access edits preserve its identity; dashboard
-**Test** is unavailable because this service has no upstream.
-
-A separately approved role needs `POST` permission on service `apple-ads` path
-`/`, for example `"apple-ads": {"methods":["POST"],"paths":["/"]}` inside that
-role's `access` map. Its token, allowed source, role/service expiry, daily
-request limit and audit checks apply as for proxy calls.
-
-Call `POST /_keyring/sign/apple-ads` on the keyring with `X-Keyring-Token`, or
-`POST /<role>/_keyring/sign/apple-ads` through the loopback relay. The request
-must have **zero body bytes** (not even `{}` or whitespace), no query string
-(not even a bare `?`), and the exact unencoded path. The caller config is
-`APPLE_ADS_SIGN_URL=http://127.0.0.1:7700/<role>/_keyring/sign/apple-ads`.
-The relay supplies the role token; never put it in that URL.
-
-The JSON response is `{"token":"<JWT>","expires_at":"<RFC3339 UTC time>"}`
-with `Cache-Control: no-store`. Its ES256 header uses the fixed key ID.
-Claims are `iss=team_id`, `sub=client_id`,
-`aud=https://appleid.apple.com`, `iat=server time`, and `exp` at most
-20 minutes later and no later than either access expiry. Expiry is rounded
-down to whole seconds; if no positive validity window remains, signing fails.
-The caller retains its public client ID and exchanges the JWT at
-`https://appleid.apple.com/auth/oauth2/token` with
-`grant_type=client_credentials`, `scope=searchadsorg`, `client_id` and
-`client_secret=<JWT>`. There is no private-key fallback.
-
-Missing, malformed, encrypted or non-P-256 keys fail closed with a generic
-503; claims/body/query errors never reach a signer. Wrong methods, expired or
-unauthorized roles/access, proxy requests to `/apple-ads/...`, and dashboard
-Test requests cannot send the PEM upstream. Neither PEM, JWT nor caller body
-is written to audit. Tokens themselves remain sensitive and must not be logged.
-
-**Scope warning:** a signing grant lets its holder obtain an Apple OAuth token
-with the underlying key's Apple privileges. Keyring methods/paths restrict
-signing, **not subsequent direct Apple API requests**. The 20-minute JWT bound
-does not shorten Apple's approximately one-hour OAuth token lifetime, and
-revoking a role does not revoke already issued Apple tokens. A sign-only role
-is not an Apple read-only scope. Existing campaign holds remain operational
-requirements. An Apple Ads grant does not authorize App Store Connect signing.
-
-### App Store Connect signing
-
-App Store Connect uses a separate P-256 API key and issuer, not the Apple Ads
-client identity. Configure the fixed public identity in the access file:
-
-```json
-{
-  "services": {
-    "appstoreconnect": {
-      "key": "APP_STORE_CONNECT_PRIVATE_KEY",
-      "auth": "app-store-connect-sign",
-      "app_store_connect": {
-        "issuer_id": "YOUR_APP_STORE_CONNECT_ISSUER_ID",
-        "key_id": "YOUR_APP_STORE_CONNECT_KEY_ID"
-      }
-    }
-  }
-}
-```
-
-Import the private key only on the Mac using the protected-file procedure in
-[the Mac deployment guide](deploy/mac/README.md#app-store-connect-signing).
-Grant an approved role `POST` on this service's `/` path. A temporary release
-grant should have an explicit expiry and request limit. Neither an Apple Ads
-grant nor a proxy grant permits this signer.
-
-The caller sends an empty `POST` through its loopback relay to
-`/<role>/_keyring/sign/appstoreconnect`. The keyring route is
-`/_keyring/sign/appstoreconnect`. As with Apple Ads, request bodies, query
-strings and encoded paths are refused; no caller supplies JWT claims.
-The `no-store` JSON response contains `token` and `expires_at`.
-
-The token has an ES256 header with the configured `kid`, and fixed claims:
-`iss=issuer_id`, `aud=appstoreconnect-v1`, `iat=server time`, and `exp` at most
-20 minutes later, further bounded by the role and grant expiry. It has no
-Apple Ads `sub` claim. Use this token as `Authorization: Bearer <token>` in
-direct calls to `https://api.appstoreconnect.apple.com`; there is no OAuth
-exchange. Refresh it by requesting another signature, never by loading a
-private key locally. Keep tokens out of command arguments, logs and receipts.
-
-**Signing authority is not API path authority.** This grants the underlying
-key's Apple permissions, not access to one app or a read-only Apple scope.
-Keyring path/method rules restrict token issuance, not subsequent Apple API
-calls. Removing a grant stops new signatures; already issued App Store
-tokens remain usable until expiry. No `base`, proxy/test settings, mixed
-Apple identities, or key reuse by another service are allowed. Dashboard
-Test remains unavailable so it cannot send a PEM upstream.
-
-
-A Docker caller needs a separate relay sharing its loopback network namespace;
-`127.0.0.1` in a container is not host loopback. Keep role-token files only in
-the relay, and do not deploy or grant another role without owner approval.
-
-Build the token-only relay image from the reviewed keyring checkout:
+**5. Start the relay** (in another terminal; on a real setup this is the agents' machine). It holds the token, never a key.
 
 ```sh
-docker build -f deploy/relay.Dockerfile --build-arg VERSION=REVIEWED_RELEASE \
-  -t keyring-relay:REVIEWED_RELEASE .
+mkdir -m 700 tokens && (umask 077; echo '<token from step 3>' > tokens/my-agent.token)
+keyring relay --listen 127.0.0.1:7700 --upstream http://127.0.0.1:7701 --tokens "$PWD/tokens"
 ```
 
-Replace `REVIEWED_RELEASE` with the release being installed; the build uses
-this checkout's source, not a downloaded binary. The image includes a static
-keyring and CA bundle, runs as UID/GID `65532:65532`, and its entrypoint is
-`/usr/local/bin/keyring relay`. Supply the flags
-`--listen 127.0.0.1:7700 --upstream https://KEYRING_HOST:7701 --tokens /run/keyring/tokens`
-(use the existing approved upstream URL and scheme, not a guessed address).
-Mount only the caller's role-token directory read-only, owned by UID 65532,
-directory mode 0700 and token mode 0600. It contains no Apple private key.
-The image pre-creates `/run/keyring` owned by UID 65532: the relay checks
-ownership of both the token directory and its parent before starting.
-Join the caller's network namespace instead of publishing relay ports.
-Building this image does not deploy it or authorize a role.
-
-
-A call is `<METHOD> http://<listen>/<service>/<path>` with header `X-Keyring-Token: <role token>`. The keyring:
-- accepts a path only in a plain form: printable ASCII after one decode, with no `..` or `.` segment, no `;`, no `%` left (double encoding), and no encoded `/`, `.` or `\`. It forwards the path it checked, escaped again, not the caller's raw text;
-- drops the caller's `Authorization`, `Cookie` and role token, and every casing of the key's header or query parameter, then adds the key. The one exception is a Cloudflare Worker static-asset upload, `POST /accounts/<32 lowercase hex>/workers/assets/upload`, on a `bearer` service whose base is `https://api.cloudflare.com/client/v4`: that call is authenticated by a short-lived upload token Cloudflare returned earlier in the same `wrangler deploy`, so the keyring forwards the caller's own single `Authorization: Bearer <token>` and does not send the account token. A call to it without one is refused (401) and not counted. The role still needs access to that path, and the account token is still masked in replies;
-- drops inbound edge metadata: `CF-Connecting-IP`, `CF-Connecting-IPv6`, `CF-IPCountry`, `CF-Ray`, `CF-Visitor`, `CF-EW-Via`, `CF-Pseudo-IPv4`, `CDN-Loop`, `True-Client-IP`, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Real-IP`. This avoids Cloudflare Error 1000 at upstream services. Other `CF-*` headers are not blanket-blocked; configured `CF-Access-Client-*` credentials still work;
-- does not follow redirects;
-- replaces an echoed key with `[REDACTED]`, in headers and bodies, as sent, URL-encoded (either hex case), or with JSON-escaped slashes, even when split across chunks;
-- refuses (502) a reply compressed with anything other than gzip, which it decodes, because it could not check that reply for the key;
-- does not count a call against the daily limit if the service was unreachable;
-- writes one audit line per call, with no keys, tokens, query strings or bodies. The audit log, like the store, is refused if other users can read it.
-
-**Naming the caller to a service you run.** With `"forward_role": true` on a service, every call carries `X-Keyring-Role: <role>`, so a service the fleet runs itself (a build server, for example) can log which agent sent a call; through a relay all callers otherwise look the same. It is off by default (third-party APIs get no role names) and refused for services that forward nothing (signing, `gcloud-login`, `egress-proxy`). The keyring drops a caller-sent `X-Keyring-Role` on every call, so the header cannot be forged through it; anything that reaches the service without the keyring can still send one. Turn it on with the "Tell the service which agent is calling" box on the service's edit form, with `"forward_role": true` in pasted settings, or in `access.json`; the service page shows it.
-
-A service that echoes a key in some other encoding (for example base64 inside a larger text) is not protected; do not route such a service through the keyring.
-
-Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its access (401); an access's own `"expires"` (RFC 3339, like `"2026-12-31T00:00:00Z"`) ends only that service (403).
-
-A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
-
-Static `bearer`, `header`, and `query` services may add up to two secret headers:
-`"extra_headers": {"CF-Access-Client-Secret": "ACCESS_SECRET"}` maps each header
-to a distinct store key, not a credential value. For Cloudflare Access, use
-`"auth": "header", "header": "CF-Access-Client-Id", "key": "ACCESS_ID"` as the
-primary credential. Header names are case-insensitive; duplicates, primary
-collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
-refused. Signing keys and OAuth credentials cannot be reused as extra headers.
-**A key with several values** (dashboard): on **Add key**, open "This key has several
-values", name each value and paste it, for example `MODAL` with `id` ← `wk-…` and
-`secret` ← `ws-…`. They are stored as `MODAL.id` and `MODAL.secret` and shown as one
-key with its value names, never the values. On the key's page, **Connect to a service**
-asks which value is sent as the key and, optionally, a header for each other value
-(Modal: `id` as `Modal-Key`, `secret` as `Modal-Secret`); pasted settings say the same
-with `"key_part": "id", "extra_headers": {"Modal-Secret": "secret"}`. **Replace or add a
-value** names the value; **Delete** removes all of them. Access files may name the
-values directly (`"key": "MODAL.id"`). A store holding such values cannot be read by a
-keyring older than this release, so delete them before downgrading.
-
-Separate keys work too: add each value as its own key, open the primary key, choose
-**Connect to a service** and paste the settings with `extra_headers` naming the other
-key, for example on `MODAL_PROXY_ID`
-`{"service":"modal-ocr","base":"https://WORKSPACE--app-web.modal.run","auth":"header","header":"Modal-Key","test_path":"/health","extra_headers":{"Modal-Secret":"MODAL_PROXY_SECRET"}}`.
-The named keys must already have stored values; otherwise the paste is refused,
-and neither the refusal message nor the re-shown form repeats what was pasted. On a service's edit page, pasted settings without
-`extra_headers` keep the stored ones, a new map replaces them and `{}` removes them.
-The audit log names the headers and keys, never values. **Test** sends every secret.
-The proxy replaces caller-supplied values, requires the complete bundle before
-dispatch (503 if a value is missing), and redacts every injected credential.
-A stored key sent in a header (`bearer`, `header` and extra headers) must be a legal
-header value, with no line break or other control character (tab and space are fine).
-Go will not send one that is not, so the proxy answers 503 `stored key NAME contains a
-line break or control character` instead of a network error, sends nothing, and does not
-count the call against the daily limit. The dashboard Test button says the same.
-Existing role paths, methods and quotas still apply.
-
-Static `bearer`, `header`, and `query` services also support `fixed_headers`
-for **nonsecret** constants, such as `"fixed_headers": {"CF-R2-Jurisdiction": "default"}`.
-Each configured value replaces all caller values for that header, including
-duplicate and differently cased names. The proxy and dashboard Test button use
-the same setting. These constants are not store key names and are not added to
-response-secret redaction: backup bytes containing `default` stay unchanged.
-Actual credentials remain redacted; never place a credential in `fixed_headers`.
-
-At most two fixed headers are allowed. Names must be valid HTTP header names,
-unique without regard to case, and must not collide with primary or extra
-credential headers. Authorization, cookies, routing, hop-by-hop, framing,
-encoding and `X-Keyring-*` headers are refused. Values must contain 1–512
-printable ASCII bytes with no surrounding whitespace.
-
-An authorized owner can set `fixed_headers` on a service in `access.json`, then
-reload through the normal owner-operated service procedure. In the dashboard,
-open **Keys → an existing stored key → Connect to a service → Or paste settings
-from an agent**, and include the field in the settings JSON:
-
-```json
-{
-  "service": "r2-backup",
-  "base": "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/r2/buckets/BUCKET_NAME",
-  "auth": "bearer",
-  "fixed_headers": {"CF-R2-Jurisdiction": "default"}
-}
-```
-
-Use the confirmed account, bucket and jurisdiction, and confirm with the
-dashboard password. Do not paste or replace the stored API credential. Creating
-the service does not grant agent access. Separately configure the intended role
-with only the approved methods and paths (for object backups, `GET`, `PUT`,
-`DELETE` and `/objects`), then verify the effective scope before enabling use.
-
-A one-time consent link collects the primary credential and every extra header
-in password fields, never displays stored values, and saves the complete bundle
-atomically. Missing or multiline values leave the link usable without changing
-any credential. Changing the extra-header mapping invalidates previously issued
-links. Disconnecting the service removes the entire bundle. Unrelated Workspace
-account revocation does not block saving or disconnecting a static bundle;
-changes to an account's own refresh or client secret still respect its gate.
-
-A service with its own self-signed certificate (such as macserve on the Mac Studio) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
-
-### Sign in with Apple client secret
-
-Auth `sign-in-with-apple-sign` signs the short-lived `client_secret` an app sends to
-`https://appleid.apple.com/auth/token` and `/auth/revoke` (for example to revoke a
-user's Apple sign-in when they delete their account). The key (`.p8` for Sign in
-with Apple) never leaves the keyring; the service is sign-only and proxies nothing.
-
-```json
-"tandem-siwa": {"key": "TANDEM_SIWA_KEY", "auth": "sign-in-with-apple-sign",
-  "sign_in_with_apple": {"client_id": "com.example.app", "team_id": "ABCDE12345", "key_id": "KEY1234567"}}
-```
-
-- Any service name except `apple-ads` and `appstoreconnect`, whose sign paths are fixed. `team_id` and `key_id` are Apple's 10-character IDs; `client_id`
-  is the app's bundle ID or Services ID.
-- A granted role calls `POST http://127.0.0.1:7700/<role>/_keyring/sign/<service>`
-  with an empty body and gets `{"token": "<JWT>", "expires_at": "<RFC 3339>"}`:
-  ES256, header `kid` = key ID, claims `iss` = team ID, `sub` = client ID,
-  `aud` = `https://appleid.apple.com`, `iat`, and `exp` at most 20 minutes later
-  (earlier if the grant ends sooner). Grant `POST` on path `/`.
-- The caller then sends Apple the form itself, e.g. `client_id`, `client_secret` (the
-  token), `token` and `token_type_hint` to `/auth/revoke`.
-- Import the `.p8` with `keyring set --file` (multi-line), then on the key's dashboard
-  page **Connect to a service** with
-  `{"service":"tandem-siwa","auth":"sign-in-with-apple-sign","sign_in_with_apple":{"client_id":"…","team_id":"…","key_id":"…"}}`.
-- An unusable key gets 503 `Apple signing unavailable` and is not counted.
-
-### Apple Push Notification service (APNs)
-
-Auth `apns` proxies push requests to Apple with a provider token minted from an Apple
-push key (`.p8`); the `.p8` itself never leaves the keyring and is never logged.
-
-```json
-"apns": {"base": "https://api.push.apple.com", "key": "TANDEM_APNS_KEY", "auth": "apns",
-         "apns": {"key_id": "ABC123DEFG", "team_id": "TEAM456789"}}
-```
-
-- `base` is exactly `https://api.push.apple.com`, or `https://api.sandbox.push.apple.com`
-  for development builds (use a second service, e.g. `apns-sandbox`, with the same key).
-  No other host, port or path is accepted, nor `header`, `param`, a TLS pin, extra
-  headers or a test request.
-- `key_id` and `team_id` are Apple's 10-character IDs (Certificates, Identifiers & Profiles).
-- Each call carries `authorization: bearer <JWT>`: ES256, header `kid` = key ID, claims
-  `iss` = team ID and `iat` only. One token is reused for 40 minutes, across reloads
-  with the same key, then replaced (Apple accepts tokens up to an hour old and refuses
-  refreshes more often than every 20 minutes). A caller's own `Authorization` is
-  dropped; `apns-*` headers and the JSON body pass through unchanged. The request goes
-  out over HTTP/2, which APNs requires.
-- Import the `.p8` with `keyring set --file` (it is multi-line, so the dashboard's
-  one-line value box cannot take it), as in
-  [the Mac operator instructions](deploy/mac/README.md#apple-ads-signing-upgrade-and-key-import).
-  Then, on the key's dashboard page, **Connect to a service** with pasted settings
-  `{"service":"apns","base":"https://api.push.apple.com","auth":"apns","apns":{"key_id":"…","team_id":"…"}}`.
-- A stored value that is not an ES256 `.p8` gets 503 `stored key NAME is not a usable
-  APNs .p8 key`; nothing is sent and the call is not counted.
-- Grant a role `POST` on path `/3/device`. It calls
-  `POST http://127.0.0.1:7700/<role>/apns/3/device/<device token>` with the usual
-  `apns-topic`, `apns-push-type`, `apns-priority`, `apns-expiration` and
-  `apns-collapse-id` headers; Apple's status, `apns-id` header and JSON `reason` come
-  back unchanged.
-
-### Projects: a client's services, paused or expired together
-
-Services that belong to one client or engagement can be grouped in a **project** (#111). A service joins one with `"project": "noted"` (lowercase letters, digits and `-`, like a service name); set it on the service's edit page in the dashboard, or in pasted settings. A project exists as soon as a service names it. Services without a project behave exactly as before, and existing access files need no change.
-
-Project settings, all optional, go in the access file under `projects`:
-
-```json
-"projects": {
-  "noted": {"paused": true, "expires": "2027-03-31T00:00:00Z", "client_owned": true}
-}
-```
-
-- `paused`: every call to the project's services is refused with **403 `project_paused: project noted is paused`**, before any key is used, any quota spent or anything sent. Keys and agent access stay as they are; removing `paused` restores everything.
-- `expires`: from that moment the project counts as paused (`project noted is expired`) until the date is moved or removed.
-- `client_owned`: marks the project's keys as belonging to the client. It changes no call; the project page then shows a handover list.
-
-In the dashboard, the **Projects** tab lists every project with its state, and each project's page shows its services (key, API, last use, calls today) and the agents with access. From that page, with the password:
-- **Settings:** pause or resume, set or clear an end date (from the start of that day, UTC, the project counts as paused), and mark the keys client-owned. Saved as `project_changed` in the audit log with what changed.
-- **Give an agent access to the project:** in one step, with chosen methods, paths, a daily limit (applied to each service separately) and an end date. Without "Include services added to this project later" it writes an ordinary grant for each service the project has now (`access_changed` audit line per service); with it, one grant covers the whole project as it changes (`project_access_granted`).
-- **Remove an agent's access to the project:** takes away its access to every service in the project, and its whole-project grant, in one step, and only those; its access elsewhere stays. One `access_revoked` audit line per service, and `project_access_revoked` for a whole-project grant.
-- **Handover list** (client-owned projects): each project key with when it was added here and when it was last replaced, for rotating them when the engagement ends. Values are never shown; "unknown" means the key predates the dashboard keeping that date (keys added with `keyring set` also show unknown).
-
-A whole-project grant is stored on the role in the access file:
-
-```json
-"roles": {"noted": {"token_sha256": "…", "access": {}, "projects": {"noted": {"methods": ["GET"], "paths": ["/"]}}}}
-```
-
-A role's own grant for a single service takes precedence over its grant for that service's project, so one service can be narrowed (or widened). Moving a service into or out of a project changes which whole-project grants reach it; the edit's audit line names agents that gained or lost access that way (`access_gained_by`, `access_lost_by`). The agent and access pages show access that comes through a project. An agent can ask for a whole project with `keyring request ... --project noted` (with or without `--service`); approving it gives full access to the whole project, services added later included. To give less, decline and use the project page.
-
-The Keys and Agents pages filter by project: "Personal" is everything outside a project, and the filter is kept by search, status filters and sorting. Each key shows its project.
-
-The dashboard Test button refuses a stopped project the same way. Every audit line for a project's service carries `"project"`. A `projects` entry without services is allowed, so removing a project's last service never blocks. Apply changes with a reload (SIGHUP), as for any access-file edit. A keyring older than v0.14.5 refuses an access file that uses `project` or `projects` (on a service, at the top level, or on a role), so take them out before downgrading.
-
-### OAuth services with refresh tokens
-
-Google (Gmail, Drive, Sheets, Calendar) and similar APIs give a long-lived refresh token and access tokens that expire after about an hour. A service with `"auth": "oauth2"` stores the refresh token under its `key`; the keyring mints access tokens from it and sends `Authorization: Bearer <access token>`:
-
-```json
-"gmail": {
-  "base": "https://gmail.googleapis.com", "key": "GMAIL_REFRESH_TOKEN", "auth": "oauth2",
-  "test_path": "/gmail/v1/users/me/profile",
-  "oauth2": {"token_url": "https://oauth2.googleapis.com/token", "client_id": "<id>.apps.googleusercontent.com", "client_secret_key": "GOOGLE_CLIENT_SECRET"}
-}
-```
-
-- `client_id` is public configuration. `client_secret_key` names the store key holding the client secret; leave it out for a public client. `token_url` must be `https` (plain `http` only to a loopback test server).
-- The refresh token and client secret go only to `token_url`, never to the API, and are masked like a key if the API echoes them. Access tokens are cached in memory only, never written to the store or the log, and replaced a minute before they expire (or after 10 minutes if the provider gives no lifetime). Concurrent calls share one refresh.
-- If the API answers 401, the cached access token is dropped and the next call mints a new one.
-- A refresh that the provider refuses (`invalid_grant`, `invalid_client`, `unauthorized_client`: revoked or expired consent) fails closed with 503 and a message to connect the account again; other refresh failures give 502. Nothing else is tried, the call does not count against the daily limit, and the token endpoint is asked again only after 10 seconds. The dashboard shows the key as failing with the reason until a refresh works.
-- Several services can share one refresh token (one Google login for Gmail and Drive) only if they are all `oauth2` with the same `oauth2` settings. A refresh token or client secret can never be the key of a service that sends its key upstream.
-- Per-role paths, methods, daily limits and expiry apply as for any service. Replacing the refresh token (dashboard or `keyring set` and `SIGHUP`) stops use of tokens minted from the old one.
-
-To get the refresh token, store it with `keyring set` or the dashboard, or let the account's owner sign in through a consent link (next section).
-
-From the dashboard: add the refresh token and the client secret as two keys, open the
-refresh token's key, choose **Connect to a service** and paste the settings with an
-`oauth2` block naming the secret's key (never its value), for example
-`{"service":"google-lenscale-gmail-send","base":"https://gmail.googleapis.com","auth":"oauth2","oauth2":{"token_url":"https://oauth2.googleapis.com/token","client_id":"<id>.apps.googleusercontent.com","client_secret_key":"GMAIL_LENSCALE_SECRET"}}`.
-A Gmail refresh token for one scope (for example `https://www.googleapis.com/auth/gmail.send`)
-can be made with Google's OAuth 2.0 Playground using your own OAuth client: add
-`https://developers.google.com/oauthplayground` as an authorized redirect URI of a
-*Web application* client, tick "Use your own OAuth credentials", authorize only that
-scope, and exchange the code. `gmail.send` cannot read the profile, so such a service
-has no test request; a first real send is the test.
-
-### Personal and business Google accounts through gcloud (host only)
-
-`auth: "gcloud"` uses the Google CLI's own login and token minting. It needs
-no manually created OAuth app. Keyring never reads gcloud refresh tokens or
-reuses its OAuth client identity. Install gcloud on the **Keyring host**, not
-on an agent using the relay. This mode is unavailable in per-person containers.
-
-Each account has a separate private gcloud directory and an explicit email.
-After the owner approves setup, sign in **as the Keyring service user** with
-the fixed gcloud executable, for each account:
+**6. Call the API without a key.**
 
 ```sh
-CLOUDSDK_CONFIG=/private/keyring/google-personal /absolute/path/to/gcloud \
-  auth login personal@example.com --configuration=default --enable-gdrive-access
+curl http://127.0.0.1:7700/my-agent/openrouter/api/v1/models   # works: the keyring adds the key
+curl http://127.0.0.1:7700/my-agent/openrouter/admin           # 403: path not allowed for this role
+tail -2 audit.log                                              # both calls, never the key
 ```
 
-The directory must already be private (0700), accessible only to that service
-user and the host administrator. Use another directory for the business
-account. Follow Google's browser login; do not copy credentials from an agent,
-extract refresh tokens, or change existing personal login state. Account access
-to a Shared Drive must be granted separately by its owner.
-
-Add the bindings to **root-owned rules.json**, not access.json:
-
-```json
-"google_accounts": {
-  "personal": {
-    "executable": "/absolute/path/to/gcloud",
-    "config_dir": "/private/keyring/google-personal",
-    "account": "personal@example.com",
-    "quota_project": "owner-approved-quota-project"
-  },
-  "business": {
-    "executable": "/absolute/path/to/gcloud",
-    "config_dir": "/private/keyring/google-business",
-    "account": "business@example.com"
-  }
-}
-```
-
-`quota_project` is optional. When set it overrides `X-Goog-User-Project`;
-otherwise the caller's header is preserved. The selected Google account must
-have permission to use that quota project. Executable and configuration paths
-are privileged host configuration: requests and dashboard forms cannot set them.
-Keyring runs fixed argv, never a request-supplied shell command. Environment
-credential overrides are not inherited. Google validates the returned token's
-email and remaining lifetime before Keyring sends it upstream.
-
-In access.json, configure separate service names and **separate role grants**
-for each account. Example personal services (repeat with `business`):
-
-```json
-"google-personal-drive": {
-  "base": "https://www.googleapis.com/drive/v3",
-  "auth": "gcloud", "google_account": "personal"
-},
-"google-personal-upload": {
-  "base": "https://www.googleapis.com/upload/drive/v3",
-  "auth": "gcloud", "google_account": "personal"
-},
-"google-personal-sheets": {
-  "base": "https://sheets.googleapis.com/v4",
-  "auth": "gcloud", "google_account": "personal"
-}
-```
-
-These services have **no `key` field**. Check the configuration and reload as
-usual. Nothing grants an agent access just because the owner signed in.
-Keep personal and business relay role tokens separate; grant only intended
-service paths and methods. The dashboard shows account bindings, their service
-names and the last credential status without exposing tokens. It is an
-administrator dashboard, not a shared Google-data browser.
-
-Relay requests use `/<role>/<service>/<path>`: Drive listing/downloads go to
-the drive service (`/files`, `/files/ID?alt=media`), uploads to the upload service
-(`/files?uploadType=...`), and Sheets to the sheets service (`/spreadsheets/...`).
-Clients must validate and translate upload session URLs/redirects back through
-the same account's relay services; never bypass the relay or fall back to a
-local Google login. Shared Drive operations also require the relevant Google
-API flags (`supportsAllDrives`, `includeItemsFromAllDrives`, `driveId`, `corpora`).
-Google-account paths accept encoded spaces for Sheets A1 names such as
-`'My Tab'!A1:append`; control characters, encoded separators, double encoding
-and traversal remain rejected. Other authentication modes retain their existing
-no-whitespace path rule.
-
-For Drivekey's full operations, the approved grants need Drive paths `/about`,
-`/files`, `/changes`, `/drives` with GET/POST; upload `/files` with POST/PATCH
-(this client's resumable chunks use POST, replacement uses PATCH); and Sheets
-`/spreadsheets` with GET/POST when using
-batch reads/writes and append. Narrow these to the operations the role needs.
-
-Renewal is single-flight per complete account binding, with a 30-second deadline
-including command descendants, bounded output, and redacted failures. Tokens
-are cached only until their verified expiry, with early renewal. Callers wait for
-that renewal rather than continuing with the old token; this matches OAuth mode.
-An in-flight renewal remains single-flight across configuration reloads, including
-removing and re-adding the same binding. A failed renewal fails closed (502), with
-the existing 10-second error-cache delay; **no background retry or diagnostic
-probe runs**. It never uses another account or a stale token. An upstream 401
-invalidates only the token used and is returned **without replay**, including
-POST/PATCH writes. Only a confirmed reauthentication requirement asks the owner
-to sign in; runtime, network and unknown failures must not be treated as login
-problems. Host logout alone does not erase an already minted in-memory access
-token: revoke the role first to stop new proxy calls immediately, then perform
-owner-approved logout and remove/reload the host binding. Historical audit
-records remain.
-
-Drivekey's explicit relay-profile support is tracked in
-[drivekey#14](https://github.com/jerryfane/drivekey/issues/14).
-Provider support alone is not proof of live two-account or Shared Drive access;
-complete that acceptance with owner-authorized fixtures and readback.
-
-#### Google renewal diagnosis and recovery
-
-A failed renewal retains the existing HTTP **502 / text/plain** response with
-fixed, safe wording. Its machine-readable contract is exactly:
-
-- `X-Keyring-Google-Cause`
-- `X-Keyring-Google-Stage`: `configuration`, `command_start`, `command`, or
-  `token_validation`
-- `X-Keyring-Google-Recovery`
-
-| Cause | Recovery | Next action |
-|---|---|---|
-| `reauth_required` | `owner_reauth` | Owner signs in to the affected account only. This does not establish a Workspace-policy cause. |
-| `credentials_invalid` | `owner_review_credentials` | Review the rejected, expired, revoked or mismatched credential before choosing a repair. |
-| `permission_denied` | `repair_host` | Inspect service-user access to the private configuration/runtime. |
-| `configuration_error` | `repair_host` | Repair the existing private/default configuration. |
-| `runtime_unavailable` | `repair_host` | Repair the installed executable or Python/SDK runtime. |
-| `network_error` | `check_connectivity` | Inspect connectivity/TLS, not a new login. |
-| `provider_error` | `inspect_provider` | Inspect the provider/token-validation failure, not a new login. |
-| `timeout` | `inspect_host`, or `check_connectivity` at `token_validation` | Inspect the recorded stage's time-bound failure. |
-| `output_limit` | `repair_host` | Inspect the installed command's excessive output. |
-| `unknown` | `inspect_host` | Use the protected incident record; sign-in is not established as the remedy. |
-
-Only the exact `reauth_required` + `owner_reauth` pair may prescribe sign-in.
-Missing, invalid or inconsistent fields must never do so. No account identity,
-email, raw error text, URL, code or token is included in these headers. Keyring
-strips all three reserved headers, case-insensitively, from **every forwarded
-upstream response**, regardless of service authentication or HTTP status.
-
-The owner dashboard's **Host Google accounts** table shows the last diagnosis and
-recent incident/recovery history; opening it does not run gcloud. Agents receive
-only the diagnosis for a request their role is already authorized to make.
-`google-renewals.json`, beside the host's key store, is written atomically at mode
-0600 after each actual renewal attempt. It retains at most **64 complete account
-bindings**, with **8 incidents per binding**; loading is limited to **1 MiB**.
-Google account binding names are limited to **128 characters**. Configuration
-validation rejects longer names rather than accepting an account whose history
-cannot be retained.
-Changing an account behind a reused label does not expose the old binding's
-history. An insecure, oversized or corrupt history is not read or overwritten;
-the owner dashboard warns if persistence is unavailable.
-
-Records contain binding labels, a binding fingerprint, UTC first/last failure
-and last-success times, fixed category/stage/evidence codes, exit and bound flags
-when applicable, and recovery outcomes. Repeated identical failures update the
-same incident; a changed diagnosis preserves the prior one. A successfully
-validated renewal closes the active incident without deleting it. Raw command
-stdout/stderr, credentials, auth URLs/codes, environments and token-info request
-URLs are never retained. SDK/runtime versions are not inferred from error text;
-use the host deployment record when available. No version or extra token command
-is issued to obtain a diagnosis.
-
-For **confirmed reauthentication only**, reuse the existing trusted wrapper,
-service user, private directory and default configuration. For example, on a Mac
-installed as `_keyring`, with the business binding below (use that binding's
-actual configured email):
-
-```sh
-(cd / && sudo -u _keyring /usr/bin/env -i \
-  PATH=/usr/local/libexec:/usr/bin:/bin \
-  HOME='/Library/Application Support/keyring/google/business' \
-  CLOUDSDK_CONFIG='/Library/Application Support/keyring/google/business' \
-  CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true \
-  CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
-  CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
-  CLOUDSDK_PYTHON_SITEPACKAGES=0 LANG=C.UTF-8 \
-  /bin/sh -c 'set -eu; cd "$CLOUDSDK_CONFIG"; test -f configurations/config_default;
-    /usr/local/libexec/keyring-gcloud auth login business@example.com \
-      --account=business@example.com --configuration=default \
-      --enable-gdrive-access --no-launch-browser --force --no-activate')
-```
-
-The initial `cd /` is **before sudo**, avoiding inaccessible-working-directory
-warnings. `--force` starts fresh authorization; `--no-activate` preserves the
-configured active account and project. Verify these flags against the installed
-SDK before using them. Keep Google's URL and verification code in the owner's
-Mac terminal/browser, never in chat or an incident record. Do not delete
-credentials, change projects/grants, alter Google policy or start another
-account's login as a repair. Reauthentication may recur; this feature does not
-bypass Google consent or guarantee unattended renewal.
-
-Provider/consumer integration and its exact contract are tracked in
-[keyring#68](https://github.com/gitmoot/keyring/issues/68) and
-[drivekey#18](https://github.com/jerryfane/drivekey/issues/18).
-
-
-
-### Consent links (off by default)
-
-A consent link lets the owner of an account connect it themselves: "tap here to connect Gmail", or paste a proxy or API key into a one-time page instead of a chat. Nothing changes unless `rules.json` has a `consent` block:
-
-```json
-"consent": {
-  "listen": "127.0.0.1:7710",
-  "public_url": "https://connect.example.com/p/alice",
-  "api_listen": "127.0.0.1:7711",
-  "api_allow_sources": ["127.0.0.1"],
-  "api_token_sha256": "<from keyring new-token>"
-}
-```
-
-- `listen` serves the link pages and the OAuth callback, and nothing else: not the proxy, the dashboard or the API. Put it behind an HTTPS reverse proxy at `public_url`, forwarding the path unchanged (the pages live under the path of `public_url`). `public_url` must be `https` (plain `http` only on loopback, for tests).
-- `api_listen` serves the API, only to `api_allow_sources` and only with `Authorization: Bearer <API token>`. The API token is not a role token (the same token for both is refused). Each of the three listeners has its own address.
-- A change to `consent` needs a restart; `SIGHUP` refuses it.
-
-API:
-- `POST /links` `{"service": "gmail", "ttl_seconds": 900, "label": "Alice"}` returns `{"url", "expires_at"}` (201). `ttl_seconds` is 60 to 3600 (default 900); the label (at most 100 characters) is shown on the page. An optional `return_url` (https, at most 512 characters, on one of the consent block's `return_origins`, e.g. `"return_origins": ["https://app.example.com"]`) makes the done page say "Taking you back…" and go there after 3 seconds, with a button to go at once; without it the page says the person can close it. Scopes, paths and keys cannot be set here: they come from the access file. Only `bearer`, `header` and `query` services, and `oauth2` services with an `auth_url`, can get a link; signing keys stay with the owner.
-- `DELETE /keys/<service>` deletes the service's stored key. For an `oauth2` service with a `revoke_url`, the provider is asked to revoke the refresh token first (RFC 7009); the key is deleted even if that fails, and the reply says `"revoked": false`.
-
-The link:
-- Opening it changes nothing (chat apps fetch links for previews). The page's button (or form) uses it up. A link is used once, expires, names one service, and lives in memory only: a restart ends every open link.
-- Posts must come from the page itself (`Origin` checked).
-- Fixed key: the page has one password field; the value is stored under the service's key.
-- OAuth: the button sends the person to `auth_url` with the code flow and PKCE (S256), the config's `scopes` and `auth_params`, a single-use `state`, and `redirect_uri` = `public_url` + `/callback` (register that with the provider). The browser that pressed the button gets an HttpOnly cookie; the callback is accepted only once, within 10 minutes, with that `state` and that cookie, and only if the service's `oauth2` settings did not change meanwhile. The keyring then trades the code for tokens and stores the refresh token. A reply without a refresh token is refused (Google needs `"auth_params": {"access_type": "offline", "prompt": "consent"}`).
-- Consent pages send only their origin as referrer (`strict-origin`), never the capability-link path. This also preserves the browser's `Origin` header on form POSTs; missing, `null` and cross-origin submissions remain refused.
-
-```json
-"oauth2": {
-  "token_url": "https://oauth2.googleapis.com/token", "client_id": "<id>.apps.googleusercontent.com", "client_secret_key": "GOOGLE_CLIENT_SECRET",
-  "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
-  "scopes": ["https://mail.google.com/"],
-  "auth_params": {"access_type": "offline", "prompt": "consent"},
-  "revoke_url": "https://oauth2.googleapis.com/revoke"
-}
-```
-
-The audit log records links created, sign-ins started, connections, failures and deletions, never a value, code, token, link or state. A link connects whoever opens it to this keyring: a forwarded link connects the wrong account. Keep links short-lived and send them only to the person they are for.
-
-### Instance mode: one small keyring per person
-
-`keyring serve` (files, `SIGHUP`, dashboard) stays the way to run the owner's keyring. `keyring instance` runs one person's keyring for a supervisor, such as a process manager on a host or, at Cloudflare, the person's Durable Object (#46). No hand-edited files are involved, and the person's keys stay in a separate process from every other person's.
-
-```sh
-keyring instance --admin-listen 127.0.0.1:7720 --admin-token-sha256 <hex> [--state /var/lib/keyring/alice.sealed] [--audit /var/log/keyring/alice.log]
-```
-
-- The admin API listens on a loopback address and needs `Authorization: Bearer <admin token>` on every call. Only the token's SHA-256 is given to the process.
-- Everything the instance knows is one **sealed state**: network settings, services, roles (token hashes only), consent settings and key values. It is encrypted with AES-256-GCM and bound to the instance id. The 32-byte data key comes from the supervisor with `create`, `unlock` or `rotate`, and the keyring never writes it anywhere. With `--state` the sealed state is kept in that file (mode 600). Without it, the state lives only in memory and the supervisor stores it from `GET /state`.
-- Every change is validated like the access file, and any new listener must be able to bind. Only then is the state sealed, written and applied; a refused change leaves everything as it was. Each change increases `version` by 1.
-- The audit log (`--audit`, or stdout) takes one JSON line per proxied call and per admin change. It never contains a key value, token or data key.
-- With no `create` or `unlock`, the instance serves only its admin API.
-
-| Call | Body | Reply |
-|---|---|---|
-| `POST /create` | `{"id", "data_key", "listen", "allow_sources"}` | 201 `{"version"}`; refused if a state exists |
-| `POST /unlock` | `{"data_key", "state"?}` (`state`: base64 sealed state; else the `--state` file) | `{"version"}`; 403 for a wrong key or another instance's state |
-| `GET /status` | | settings, services, roles (no token hashes), key **names** |
-| `GET /state` | | `{"version", "state"}` (base64 sealed state) |
-| `PUT /network` | `{"listen", "allow_sources"}` | moves the proxy |
-| `PUT /consent`, `DELETE /consent` | the `consent` block of `rules.json` | consent listeners start or stop |
-| `PUT /services/<name>`, `DELETE /services/<name>` | a service, as in the access file | |
-| `PUT /roles/<name>` | `{"access", "expires"?}` | `{"version", "token"}`; the token appears only when the role is new |
-| `POST /roles/<name>/token` | | `{"token"}`; the old token stops working |
-| `DELETE /roles/<name>` | | |
-| `PUT /keys/<name>`, `DELETE /keys/<name>` | `{"value"}` | |
-| `POST /rotate` | `{"data_key"}` | seals with the new key; the old key opens nothing written after this |
-| `GET /usage` | | `{"day", "counts": [{"role", "service", "count"}]}`, today's daily-limit counts (UTC) |
-| `DELETE /instance` | | overwrites and removes the state file, forgets the state and key, stops the listeners; the process exits |
-
-After `DELETE /instance`, a copy of the sealed state that the supervisor still holds can be opened only with the data key. The supervisor deletes its copy of the key, and then nothing can open it.
-
-One process per person, not one process for many people: the operating system keeps each person's keys in a separate address space, the proxy code is unchanged, and it matches one container per person at Cloudflare. An idle instance measured on Linux x64 (Go 1.24, one service, one role): about 12 MB resident, 8 threads, and 0 CPU ticks over 30 idle seconds.
-
-Daily counts are kept in memory. A supervisor that stops the process (a container going to sleep) keeps the last `GET /usage` and passes it back as `"usage"` in `POST /unlock`. Counts from another day are ignored, and a restore never lowers a count, so a stop cannot give a role a fresh daily limit. Calls made after the supervisor's last `GET /usage` are lost if the process stops without warning, so the supervisor should fetch `/usage` just before it stops the process. Open consent links stay in memory: the supervisor keeps the process running until its last link and sign-in have expired. The audit log goes to stdout unless `--audit` is given.
-
-**Container mode** (`--container`, #51) is for an instance in a container that only its supervisor can reach, such as a Cloudflare Container behind the person's Durable Object. In this mode:
-- the admin API, the proxy and the consent listeners may use a wildcard address such as `0.0.0.0:8080`, and no two may share a port;
-- `allow_sources` and `consent.api_allow_sources` must be empty, and no source address is checked, because every request arrives through the supervisor. The supervisor is the network boundary. It checks the router's proof (`X-Keyring-Caller`, #52) and the admin token before forwarding anything;
-- the keyring never forwards `X-Keyring-Caller` upstream, even if the supervisor failed to remove it.
-
-Container mode is set only by the flag; a rules or access file cannot turn it on, and `keyring serve` never uses it.
-
-### Egress proxy tunnels: a person's own proxy (off by default)
-
-An `egress-proxy` service lets an agent's traffic go out through a person's own proxy. The keyring holds the proxy credential (`user:password`, for example stored through a consent link), and it is never returned to anyone.
-
-```json
-"myproxy": {"key": "PROXY_CREDENTIAL", "auth": "egress-proxy",
-  "egress_proxy": {"type": "http-connect", "address": "proxy.example.net:8080", "tls": false, "ports": [443], "idle_seconds": 300, "max_seconds": 3600}}
-```
-
-- `type` is `http-connect` (CONNECT with `Proxy-Authorization: Basic`, optionally over TLS with `"tls": true`) or `socks5` (username and password).
-- **The person can paste the whole proxy.** Leave `address` (and optionally `type`) out of the config: the consent page has one password box for `username:password@host:port`. Without a scheme, the type dropdown applies (HTTP by default); an optional `http://`, `https://` or `socks5://` prefix selects the type, subject to any configured type/TLS restriction. Credentials are required, as before; bare `host:port` is rejected. Passwords may contain `@` and `:`: the parser splits at the last `@` and the first credential colon. Paste credentials literally, not URL-encoded; the stored URL is encoded by `policy.ProxyURL`. The form never repeats the pasted value, and errors name the invalid part without quoting it. A new link replaces the address and credential together; deleting the key removes both. Public-IP/DNS address checks run on save and before every tunnel, including DNS resolution checks against private addresses. With `address` fixed in config, the form still asks only for username and password and cannot replace the configured endpoint.
-- The service has no `base` and serves only `/<service>/_tunnel?host=H&port=P`. On every other service `/_tunnel` is an ordinary path and is forwarded as before. The request must be a WebSocket upgrade (RFC 6455, no subprotocol). The keyring connects through the proxy first, then answers 101. After that, binary frames carry the raw TCP bytes both ways.
-- `host` is a name, passed to the proxy unresolved so the person's proxy does the DNS lookup, or a public IP. Private, loopback, link-local, CGNAT (including Tailscale's 100.64.0.0/10), reserved, IPv6 outside global unicast 2000::/3 (so IPv4-compatible, SIIT and unique-local forms) and IPv4-carrying global ranges (NAT64, 6to4, Teredo), and any address with a zone (`%eth0`), are refused with 403, as is a port not in `ports` (default `[443]`).
-- Before the upgrade, errors are plain HTTP: 400 bad target or no upgrade; 401 token; 403 access, destination or port; 429 daily limit; 503 no credential stored; 502 proxy unreachable or refused (wrong credential). A failed tunnel does not count against `daily_requests`.
-- After the upgrade, close codes are: 1000 normal, 1002 protocol error (unmasked frame, RSV bits, bad fragmentation, control frame over 125 bytes), 1003 text frame, 1008 `daily_bytes` reached, 1009 frame over 1 MiB, 1011 upstream error, 4000 idle (`idle_seconds`, default 300), 4001 `max_seconds` (default 3600). Each write to the client has a 30-second deadline, so a client that stops reading cannot hold a tunnel open.
-- Per role: `daily_requests` counts tunnels, and `daily_bytes` (egress-proxy only) counts bytes both ways. Both are in an instance's `GET /usage` and are restored on unlock. The audit has one line per tunnel: role, service, `host:port`, close code, bytes up and down, and duration. It never holds the credential or tunnel contents.
-
-### Ed25519 signing (not an API proxy)
-
-For artifacts that need a signature without the key leaving this process — the
-first use is adspower-desk update manifests. A sign-only service with
-`"auth": "ed25519-sign"` holds the base64 of a 64-byte Ed25519 private key
-(Go's `ed25519.PrivateKey`: seed || public key). It takes no base, no identity
-fields and no test path, and may not share a key with any other service.
-
-`POST /<role>/<service>` where the path is exactly `/_keyring/sign/<service>`
-— the service is in the path, so one access rule controls one key. Body:
-`{"message_base64": "<base64 bytes to sign, 1-8192 bytes>"}`. Reply:
-`{"signature_base64": "...", "public_key_base64": "..."}`, `Cache-Control:
-no-store`. Malformed bodies 400, missing access or a non-sign service 403, a
-key that is not a base64 64-byte key 503. The Apple paths still take their
-fixed services; this route covers only `ed25519-sign` services.
-
-### Minisign release signing (not an API proxy)
-
-For release files signed with [minisign](https://jedisct1.github.io/minisign/)
-— the first use is herdr update manifests (#102). A service with
-`"auth": "minisign-sign"` holds the same kind of key as `ed25519-sign` and
-takes one setting:
-
-```json
-"herdr-release": {
-  "key": "HERDR_RELEASE_KEY",
-  "auth": "minisign-sign",
-  "minisign": {"trusted_comment_prefix": "herdr-preview "}
-}
-```
-
-Make the key on the keyring machine with `keyring minisign-keygen --store
-FILE HERDR_RELEASE_KEY`. It is generated straight into the store, never shown,
-and the command prints the minisign public key (`untrusted comment: …` and the
-`RW…` line). It refuses a name that already exists. To rotate, generate a new
-name, embed both public keys in the release, then point the service at the new
-key. One service and one key per product: the key may not be shared with any
-other service, so it cannot sign through the raw `ed25519-sign` route.
-
-`/_keyring/minisign/<service>`, exact path, no query:
-- `GET` returns `{"key_id", "public_key", "public_key_file"}` for embedding.
-- `POST {"blake2b512_hex": "<b2sum of the file>", "trusted_comment":
-  "herdr-preview <build_id> <commit>"}` returns `{"minisig", "key_id",
-  "public_key"}`. Write `minisig` to `<file>.minisig`; `minisign -Vm <file>
-  -p <pub>` verifies it. The file never leaves the caller.
-
-Only prehashed (`ED`) signatures are made; verifiers should refuse legacy ones.
-The trusted comment is signed, must start with the service's prefix and be
-longer than it, and is at most 256 bytes of printable ASCII on one line.
-Unknown body fields, other lengths and other methods are refused (400/405).
-The owner approves a role in the dashboard as for any service; both `GET` and
-`POST` count toward its daily limit. Every call is in the audit log with role,
-time, status and, for signatures, the digest and trusted comment; never the key.
-
-## Dashboard (#15)
-
-`admin_https` in `rules.json` (set by `keyring enable-dashboard --https-host NAME --device IP ...`) also serves the dashboard as `https://NAME` through a local HTTPS proxy, to the listed device IPs only. The proxy must put the client's IP in `X-Keyring-Client`; any other client, or a request without it, gets 403 before the login page. Over HTTPS the session cookie is `Secure` and the page sends HSTS. The Mac installer sets this up with Caddy (`deploy/mac/README.md`, built from `deploy/caddy`, versions pinned in its `go.sum`). A reload refuses a change to `admin_https`; restart the keyring.
-
-The Mac installer turns it on and asks for its password (`deploy/mac/README.md`). By hand: `keyring enable-dashboard --config rules.json` adds two lines to `rules.json`, serving the dashboard on a **loopback** address of the keyring machine:
-
-```json
-"admin_listen": "127.0.0.1:7702",
-"admin_password_file": "/Library/Application Support/keyring/admin.pw"
-```
-
-Set the password as root with `keyring admin-password --config rules.json`. It asks twice, needs at least 12 characters, and stores only a PBKDF2-SHA256 hash, root-owned and mode 640, in a directory only root can change (it refuses any other). Reload with SIGHUP to apply it; that ends every session. Then open `http://127.0.0.1:7702` in a browser on that machine.
-
-Safety:
-- The dashboard listener only accepts a loopback address, and never serves the proxy. The proxy listener never serves the dashboard.
-- Requests with a `Host` other than the listener's address are refused, against DNS rebinding.
-- Every change needs a same-origin `Origin` header and the session's CSRF token.
-- Sessions are in memory only: `HttpOnly`, `SameSite=Strict`, 30 minutes idle, 8 hours at most.
-- Every change to keys or access asks for the password, however recently you logged in. Browsers send the session cookie to every port of `127.0.0.1`, so any other local web page you open could get it; with the cookie alone it can only look at names and usage.
-- Failed passwords (at login or on a change) are slowed after 5 and locked for an hour after 20. Attempts sent at once count too.
-- Every login, logout, password change and failed password is written to the audit log without secrets.
-
-The Keys and Agents pages are sortable tables (click a column); forms are one column. Everything works on a phone (the tables scroll sideways with the name column pinned) and follows the system's light or dark mode.
-
-The **Activity** page (`/activity`) searches the audit log, read-only, so the owner can see who did what without a terminal or `sudo`: a UTC time window by the minute (default: the last hour; the end minute is included), and optionally a service, an agent and text the path contains. It lists each matching call (time, agent, service, method and path, status, source address, note) and dashboard event, newest first, at most 500 (narrow the search for more). It shows only what the audit log holds: no key values, no query strings. The log is streamed, never loaded whole.
-
-**Agents searching the audit log.** The owner can allow an agent to run the same search (off by default; agent's page, "Allow audit search", with the password; stored as `"audit_read": true` on the role). The agent calls `GET /_keyring/audit` on the keyring with its role token (through a relay: `http://127.0.0.1:7700/<role>/_keyring/audit`) with `from` and `to` (UTC minutes such as `2026-11-15T16:39`, the end minute included, or RFC 3339; default the last hour), and optionally `service`, `role` and `path` (contains). It gets JSON `{"from","to","rows":[...],"more","limit"}`. It sees every agent's calls and dashboard events, never key values or query strings. One search runs at a time (another gets 429); each search is itself audited. Without the grant the answer is 403.
-
-The **Keys** page (`/keys`) is a table of every key the access file names or the store holds: key, API, status, the agents with access (with a dot: full or limited access), last use, calls today, calls over the last 7 days, and when the value was last added or replaced here. Filters above it show only working, failing, untested, leaked, missing or unused keys. Values are not shown in the table; a key's page can show its value on request (below).
-- **Show value** (a key's page) shows the stored value, or each named value, after
-  the dashboard password, with a Copy button. It is the answer to that one request:
-  never in a URL, a log or a cached page, and the audit log records `key_revealed`
-  with the key name, never the value. It works for every key, including .p8 and other
-  private keys, from anywhere the dashboard is reachable.
-- **Upload key file** (Keys page) stores a key that comes as a file, such as an Apple
-  `.p8` or a `.pem` private key, from the browser: name, file, and the dashboard
-  password, with Replace ticked to overwrite an existing name. It is stored exactly
-  like `keyring set --file`. A PEM file must hold one usable, unencrypted private key; a
-  `.p8` must be the EC P-256 key Apple issues; public keys, certificates and broken
-  files are refused before anything is stored. Other text files are stored as they are.
-  The file is read in memory (the request is capped at 64 KiB) and not shown back;
-  the key's page shows its kind and a short public-key fingerprint, the audit log
-  records name, kind and fingerprint, and for an Apple key the Connect form offers the
-  APNs and Sign in with Apple settings to paste.
-- **Add key** asks for a name and a value only. The key works as soon as a service names it. Space, tab or line breaks around the pasted value are removed; a value with a line break or control character inside it is refused, because such a key cannot be sent in a header. `keyring set --file` keeps the value exactly (a multi-line private key is legitimate), so a key imported that way with a stray trailing newline is caught by the proxy check above.
-- **Connect to a service** on a key's page adds the service that uses it. The API is guessed from the key's name (`OPENROUTER_API_KEY` is OpenRouter, `vCF_TOKEN` is Cloudflare), with the base URL, how the key is sent and a test request filled in from a built-in list; pick another, or "Other" and fill in the fields. An agent that works out the settings can hand them over as JSON to paste: `{"service":"acme","base":"https://api.acme.com","auth":"header","header":"X-Api-Key","test_path":"/v1/ping"}` (unknown fields are refused); add `"tls_pin_sha256"` for a pinned self-signed service. The whole access list is checked before anything is written.
-- **Edit a service** (`/services/<name>`, reached from the service chip on a key's page): change its key, base URL, how the key is sent, header or parameter, test request and pinned certificate, in the same fields as Connect or from the same pasted JSON. Agents keep their access, with the same methods, paths and limits, so a wrong base URL or key is fixed without deleting the service and asking again. The password is asked, the whole access list is checked before anything is written, and the change is audit-logged as `service_edited` with the names of the settings that changed, never their values. The key may be changed to any listed key; the service name cannot be changed. Pasted JSON replaces every field the form shows (leave out `fixed_headers` to remove them); extra credential header names are shown but their values are never. Sign-only, OAuth, Google and egress-proxy services are not edited here because they carry settings the form does not show: change those in `access.json`.
-- **Test** sends the service's test request and stores only the result (working, or failing with the HTTP status), never the reply. A result is dropped if the key was replaced or deleted while the test ran. Test is the one action that does not ask for the password: it changes nothing but the stored result.
-- **Replace** takes effect at once; it clears the leaked flag and the test result. It trims and checks the new value the same way Add does.
-- **Mark as leaked** flags the key until it is replaced.
-- Under **Leaked or no longer needed**, **Delete value only** keeps the service settings: the key stays listed as missing and its calls answer 503.
-- **Remove completely** deletes the key's stored value and notes, every service that references it, and those services' grants from all agents. The form lists the services that will be removed. It also works when the value was already deleted, so the empty row goes away and stays gone after reload. Other keys and agents are kept; a service using several credentials may leave its other keys listed for separate removal. This removes the key from this keyring, not from the provider's account.
-- Both deletion choices ask for a tick when a role still uses the key. Add, replace, mark as leaked and delete ask for the password every time. They work only on keys the page lists.
-
-Test results and leaked flags are in `keymeta.json` next to the store (mode 600, no values). Every change is written to the audit log with the key name, never the value.
-
-**Access requests.** An agent asks instead of the owner typing grants: `keyring request --upstream http://<keyring>:7701 --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new /etc/keyring/tokens]` (`--project` asks for a whole project; see Projects). With `--new` (a new agent) it makes the role's token in that directory if missing and sends only its SHA-256. The request goes to `POST /_keyring/requests` on the keyring's own listener, so only `allow_sources` can file one. It is checked (known services; a fingerprint exactly for a new agent; no token reuse), kept in `requests.json` next to the store (at most 20 pending, duplicates merged) and **grants nothing** until the owner taps Approve (with the password) at the top of the Agents page. Approving gives full access (every method and path, no limit) to the services asked for; Decline drops it. Both are audited.
-
-The **Agents** page (`/access`) is a table of agents: the APIs each may use (green: full access, amber: limited; after six, "+N more"), calls today, last call and end date. Click an API to change that access, or "Edit access" for the agent's page, where "Add a service…" lists the APIs it may not use yet. Calls today count every attempt, refused ones too; a daily limit counts only calls that went out.
-- **Open a service** to switch access on or off. A service not granted yet opens as full access (every method and path, no limit); "Limit access" sets the methods (read only, full, or a custom list), the allowed paths, the daily limit and an end date (UTC). A refused change leaves the access file as it was.
-- **Add agent** makes a role with no access and shows its token once, with a copy button and the file it belongs in on the calling machine. Only the token's SHA-256 is kept.
-- **New token** on an agent's page shows a new token once; the old one stops working at once. Sending the form twice (reloading the result page) does not replace the token again.
-- **Revoke** removes the agent after a tick; its calls fail at once (401).
-- Every change asks for the password and takes effect on the next call. The dashboard edits the access file on disk, so hand edits made since the last reload are kept, and applied.
-
-## Relay on the agent server (step 2)
-
-The relay listens only on loopback, holds one token per role (never an API key), and forwards to the keyring over the tailnet:
-
-```sh
-keyring relay --listen 127.0.0.1:7700 --upstream http://192.0.2.10:7701 --tokens /etc/keyring/tokens
-```
-
-`/etc/keyring/tokens` must be a real directory (not a symlink), owned by the relay's user, mode 700, inside a parent that only that user can write (for example root-owned `/etc/keyring`). Each `<role>.token` file must be a regular file owned by that user, mode 600. A call picks its role in the path:
-
-```sh
-curl http://127.0.0.1:7700/phobos/openrouter/api/v1/models
-# SDKs: set the base URL to http://127.0.0.1:7700/<role>/openrouter/api/v1 and any placeholder key
-curl http://127.0.0.1:7700/_relay/health       # is the keyring reachable?
-```
-
-The relay replaces any caller-supplied role token with the role's own. It refuses plain http except to a tailnet or loopback address. If the keyring is unreachable, calls fail with 502 `keyring unreachable ... never fall back to local keys`. Install steps are in `deploy/keyring-relay.service`.
+SDKs work the same way: set the base URL to `http://127.0.0.1:7700/my-agent/openrouter/api/v1` and use any placeholder key.
+
+Next: [turn on the dashboard](docs/dashboard.md), [install on a Mac](deploy/mac/README.md), or read the [configuration reference](docs/configuration.md).
+
+## Security model
+
+**What it protects against**
+
+- **Key theft from the agents' machine.** No key is stored there; an agent, a prompt injection or a leaked log has no key to copy.
+- **Keys leaking through replies.** A key echoed by an API (in headers or body, plain, URL-encoded or JSON-escaped, even split across chunks) is replaced with `[REDACTED]`; replies the keyring cannot inspect are refused.
+- **Agents doing more than they were given.** Each role is limited to its services, methods and paths, with daily limits and an end date. Signing services hand out signatures or short-lived tokens, never the private key.
+- **Not knowing what happened.** Every call is written to an audit log (role, service, method, path, status) without keys, tokens, bodies or query strings.
+
+**What it does not protect against**
+
+- **Misuse of granted access.** An agent can do anything its grant allows, with the real key behind it. Grant the smallest paths and limits that work.
+- **A compromised agents' machine.** Role tokens live there; whoever controls that machine can call the keyring as any of its roles (but still cannot read a key), until the tokens are revoked.
+- **A compromised keyring machine.** It holds every key. Run it on a machine you control, reachable only from your agents (a private network, `allow_sources`), with the dashboard on loopback or behind its HTTPS proxy.
+- **Signed tokens after they are issued.** An Apple JWT or OAuth access token is usable until it expires, even after the grant is removed.
+- **APIs that echo a key in an encoding it does not check** (for example base64 inside other text). Don't route such an API through it.
+- **Availability.** If the keyring machine is off, calls fail. They never fall back to local keys.
+
+## Docs
+
+| Topic | |
+|---|---|
+| [Configuration](docs/configuration.md) | Commands, `rules.json`, `access.json`, reloads |
+| [Proxy](docs/proxy.md) | What happens to each call; service settings, extra and fixed headers, multi-value keys, pinned certificates |
+| [Relay](docs/relay.md) | The agents' side: token files, health check, Docker |
+| [Dashboard](docs/dashboard.md) | Web UI, safety rules, Activity page, access requests |
+| [Projects](docs/projects.md) | Group, pause and expire a client's services |
+| [OAuth](docs/oauth.md) | Refresh tokens, Gmail and other providers |
+| [Google via gcloud](docs/google-gcloud.md) | Personal and business Google accounts, renewal and recovery |
+| [Consent links](docs/consent-links.md) | One-time links for a person to connect their account |
+| [Apple](docs/apple.md) | Apple Ads, App Store Connect, Sign in with Apple, APNs |
+| [Signing](docs/signing.md) | Ed25519 and minisign |
+| [Egress proxy](docs/egress-proxy.md) | Tunnels through a person's own proxy |
+| [Instance mode](docs/instance-mode.md) | One keyring per person, under a supervisor |
+| [Mac install](deploy/mac/README.md) · [Cloudflare](deploy/cloudflare/README.md) | Deployment |
+
+## License
+
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE).
