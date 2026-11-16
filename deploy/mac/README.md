@@ -197,7 +197,7 @@ before upgrading. No App Store Connect keys or services are migrated.
    pipeline. Do not work around it by echoing or staging the key.
 
 3. Merge the fixed identity and sign-only service from
-   [the API documentation](../../README.md#apple-ads-signing-not-an-api-proxy)
+   [the API documentation](../../docs/apple.md#apple-ads-signing-not-an-api-proxy)
    into `data/access.json`; grant only explicitly approved roles `POST` on
    the service path `/`, with the approved limits/expiry. No `base` or test
    request is permitted. Existing roles and services must remain unchanged.
@@ -247,7 +247,7 @@ migration, not a reuse of the Apple Ads private key or grant.
    procedure above, with store name `APP_STORE_CONNECT_PRIVATE_KEY`. Never
    send the key to an agent or stage it in a disposable directory.
 3. Merge the `appstoreconnect` service from
-   [the API documentation](../../README.md#app-store-connect-signing) into
+   [the API documentation](../../docs/apple.md#app-store-connect-signing) into
    `data/access.json`, preserving all other services and roles. Configure the
    App Store Connect issuer ID and key ID, not the Apple Ads team/client ID.
    Grant the approved role only `POST` on `/` for signing, with an explicit
