@@ -10,8 +10,11 @@ import (
 // Usage is what the dashboard shows per role and service. It holds counts,
 // times and status codes only: no paths, queries or values.
 type Usage struct {
-	Role       string    `json:"role"`
-	Service    string    `json:"service"`
+	Role    string `json:"role"`
+	Service string `json:"service"`
+	// Key is the store key that sent the calls, for a key-pool service;
+	// "" otherwise.
+	Key        string    `json:"key,omitempty"`
 	Day        string    `json:"day"` // UTC date that Calls counts
 	Calls      int       `json:"calls"`
 	LastUsed   time.Time `json:"last_used"`
@@ -72,22 +75,22 @@ func (u Usage) Week() [historyDays]int {
 
 type usageBook struct {
 	mu   sync.Mutex
-	rows map[[2]string]*Usage
+	rows map[[3]string]*Usage
 }
 
 // record counts one call. Only a known role and a configured service are
 // recorded, so arbitrary requests cannot grow the table.
-func (b *usageBook) record(role, service string, status int, at time.Time) {
+func (b *usageBook) record(role, service, key string, status int, at time.Time) {
 	day := at.UTC().Format("2006-01-02")
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.rows == nil {
-		b.rows = map[[2]string]*Usage{}
+		b.rows = map[[3]string]*Usage{}
 	}
-	k := [2]string{role, service}
+	k := [3]string{role, service, key}
 	u, ok := b.rows[k]
 	if !ok {
-		u = &Usage{Role: role, Service: service}
+		u = &Usage{Role: role, Service: service, Key: key}
 		b.rows[k] = u
 	}
 	u.rollTo(day)
@@ -114,7 +117,10 @@ func (h *Handler) Usage() []Usage {
 		if out[i].Role != out[j].Role {
 			return out[i].Role < out[j].Role
 		}
-		return out[i].Service < out[j].Service
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		return out[i].Key < out[j].Key
 	})
 	return out
 }
@@ -123,10 +129,10 @@ func (h *Handler) Usage() []Usage {
 func (h *Handler) RestoreUsage(rows []Usage) {
 	h.usage.mu.Lock()
 	defer h.usage.mu.Unlock()
-	h.usage.rows = make(map[[2]string]*Usage, len(rows))
+	h.usage.rows = make(map[[3]string]*Usage, len(rows))
 	for _, u := range rows {
 		c := u
 		c.Past = maps.Clone(u.Past)
-		h.usage.rows[[2]string{u.Role, u.Service}] = &c
+		h.usage.rows[[3]string{u.Role, u.Service, u.Key}] = &c
 	}
 }

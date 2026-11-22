@@ -48,6 +48,8 @@ type Handler struct {
 	snap atomic.Pointer[snapshot]
 	// requests, when set, takes access requests at RequestsPath.
 	requests *requests.Store
+	// pool is what is known about each value of a pooled key.
+	pool poolBook
 	// auditSearch lets one audit search (AuditPath) run at a time.
 	auditSearch sync.Mutex
 	audit       io.Writer
@@ -205,6 +207,10 @@ type auditRecord struct {
 	Bytes   int64  `json:"bytes"`
 	Ms      int64  `json:"ms"`
 	Note    string `json:"note,omitempty"`
+	// Key and Attempts, for a key-pool service: the store key (never its
+	// value) that sent the call, and how many values were tried.
+	Key      string `json:"key,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
 	// Digest and TrustedComment record what a minisign-sign request asked
 	// to sign (BLAKE2b-512 hex, as b2sum prints it).
 	Digest         string `json:"digest,omitempty"`
@@ -280,7 +286,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.Ms = h.now().Sub(start).Milliseconds()
 		h.writeAudit(rec)
 		if _, known := snap.config.Services[rec.Service]; known && rec.Role != "" {
-			h.usage.record(rec.Role, rec.Service, rec.Status, start)
+			h.usage.record(rec.Role, rec.Service, rec.Key, rec.Status, start)
 		}
 	}()
 	fail := func(status int, note string) {
@@ -502,6 +508,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if selected != nil {
 		key = selected.Refresh
 	}
+	members := policy.PoolMembers(svc, snap.keys)
+	if svc.KeyPool && len(members) > 0 {
+		key = snap.keys[members[0]]
+	}
 	if key == "" && svc.Auth != policy.AuthGcloud {
 		fail(http.StatusServiceUnavailable, "key not loaded")
 		return
@@ -688,15 +698,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if svc.ForwardRole {
 		header.Set(policy.RoleHeader, roleName)
 	}
-	out, err := buildOutbound(r.Context(), svc, sendKey, r.Method, rest, r.URL.RawQuery, header, r.Body, r.ContentLength)
-	if errors.Is(err, errBadQuery) {
-		h.refund(roleName, service, access.DailyRequests, start)
-		fail(http.StatusBadRequest, "malformed query string")
-		return
-	}
-	if err != nil {
-		fail(http.StatusBadGateway, "could not build upstream request")
-		return
+	// A key pool tries its values in turn; any other service has one.
+	tries := []string{""}
+	var body *replayable
+	if svc.KeyPool {
+		tries = h.pool.order(members, snap.keys, start)
+		for _, name := range members {
+			alsoRedact = append(alsoRedact, snap.keys[name])
+		}
+		var readErr error
+		if body, readErr = readReplayable(r); readErr != nil {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusBadRequest, "request body could not be read")
+			return
+		}
 	}
 	if selected != nil {
 		if err := h.workspace.Revalidate(r.Context(), selected); err != nil {
@@ -706,7 +721,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	resp, err := h.clientFor(svc).Do(out)
+	var resp *http.Response
+	var err error
+	for i, name := range tries {
+		reqBody, length, value := io.Reader(r.Body), r.ContentLength, sendKey
+		if name != "" {
+			value = snap.keys[name]
+			reqBody, length = body.body(r.ContentLength)
+			rec.Key, rec.Attempts = name, i+1
+		}
+		var out *http.Request
+		out, err = buildOutbound(r.Context(), svc, value, r.Method, rest, r.URL.RawQuery, header.Clone(), reqBody, length)
+		if errors.Is(err, errBadQuery) {
+			h.refund(roleName, service, access.DailyRequests, start)
+			fail(http.StatusBadRequest, "malformed query string")
+			return
+		}
+		if err != nil {
+			fail(http.StatusBadGateway, "could not build upstream request")
+			return
+		}
+		resp, err = h.clientFor(svc).Do(out)
+		if err != nil || name == "" {
+			break
+		}
+		v := judge(svc, resp, peekBody(resp))
+		switch {
+		case v.keyProblem:
+			h.pool.failed(name, value, resp.StatusCode, v, start)
+		case resp.StatusCode < 400:
+			h.pool.worked(name, value, start)
+		}
+		if !v.keyProblem || i == len(tries)-1 || body.once() {
+			break
+		}
+		// The provider refused this value before doing anything: send the
+		// same request with the next one.
+		resp.Body.Close()
+	}
 	releaseAccount()
 	if err != nil {
 		// The call never reached the service: do not charge the limit. The

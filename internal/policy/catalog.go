@@ -119,3 +119,37 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 	}
 	return " (did you mean " + strings.Join(similar, ", ") + "?)"
 }
+
+// oauthSecretName is the store key holding svc's OAuth client secret, if any.
+func oauthSecretName(svc Service) string {
+	if svc.OAuth2 == nil {
+		return ""
+	}
+	return svc.OAuth2.ClientSecretKey
+}
+
+// PoolMembers are the store keys a key-pool service may send, in the order
+// tried: its Key first, then the other values of the same key by name. Only
+// names with a value in keys are listed.
+func PoolMembers(svc Service, keys map[string]string) []string {
+	if !svc.KeyPool {
+		return nil
+	}
+	base, _ := splitKeyPart(svc.Key)
+	var rest []string
+	for name, value := range keys {
+		if b, part := splitKeyPart(name); b == base && part != "" && name != svc.Key && value != "" {
+			rest = append(rest, name)
+		}
+	}
+	slices.Sort(rest)
+	if keys[svc.Key] != "" {
+		return append([]string{svc.Key}, rest...)
+	}
+	return rest
+}
+
+func splitKeyPart(name string) (string, string) {
+	key, part, _ := strings.Cut(name, ".")
+	return key, part
+}

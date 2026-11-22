@@ -174,6 +174,14 @@ type keyPart struct {
 	Name     string // "id"
 	Full     string // "MODAL.id", the name services use
 	HasValue bool
+	// Pooled: a key_pool service sends this value (owner, 2026-11-22).
+	// PoolStatus and PoolClass say whether it is working or set aside;
+	// the counts are its calls through the pool.
+	Pooled                bool
+	PoolStatus, PoolClass string
+	CallsToday, CallsWeek int
+	FailuresToday         int
+	LastUsed              string
 }
 
 // valueNames are the stored names behind a key row: its parts, or itself.
@@ -417,9 +425,90 @@ func (b *Backend) rows() ([]keyRow, error) {
 		}
 		row.Status, row.StatusClass = describe(row.HasValue, m)
 		row.State = state(row.HasValue, m)
+		b.describePool(&row, cfg, usage)
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// describePool fills in each pooled value of row and, when values are set
+// aside, says so in the row's status: a pool keeps working while one value
+// does, so some set aside is a warning and all set aside is a failure.
+func (b *Backend) describePool(row *keyRow, cfg *policy.Config, usage []server.Usage) {
+	pooled := false
+	for _, svc := range cfg.Services {
+		if base, _ := store.SplitPart(svc.Key); svc.KeyPool && base == row.Name {
+			pooled = true
+		}
+	}
+	if !pooled {
+		return
+	}
+	now := b.Now()
+	var members, away int
+	var firstAway string
+	for i := range row.Parts {
+		p := &row.Parts[i]
+		if !p.HasValue {
+			continue
+		}
+		p.Pooled = true
+		members++
+		var last time.Time
+		for _, u := range usage {
+			if u.Key == p.Full {
+				p.CallsToday += u.Calls
+				for _, c := range u.Week() {
+					p.CallsWeek += c
+				}
+				if u.LastUsed.After(last) {
+					last = u.LastUsed
+				}
+			}
+		}
+		if !last.IsZero() {
+			p.LastUsed = ago(now, last)
+		}
+		st := b.Proxy.PoolKeyStatus(p.Full)
+		p.FailuresToday = st.FailuresToday
+		switch st.State {
+		case "failing":
+			p.PoolStatus, p.PoolClass = "Failing: "+st.Reason+"; set aside, tried again "+inTime(now, st.Until), "bad"
+		case "cooling":
+			p.PoolStatus, p.PoolClass = "Busy: "+st.Reason+"; set aside, back "+inTime(now, st.Until), "warn"
+		case "working":
+			p.PoolStatus, p.PoolClass = "Working", "ok"
+		default:
+			p.PoolStatus = "Ready"
+			if !st.LastFailure.IsZero() {
+				p.PoolStatus = "Ready again (last failure " + st.Reason + ", " + ago(now, st.LastFailure) + ")"
+			}
+		}
+		if st.State == "failing" || st.State == "cooling" {
+			away++
+			if firstAway == "" {
+				firstAway = p.Name + ": " + st.Reason
+			}
+		}
+	}
+	switch {
+	case members > 0 && away == members:
+		row.Status, row.StatusClass, row.State = fmt.Sprintf("All %d values set aside (%s)", members, firstAway), "bad", "failing"
+	case away > 0:
+		row.Status, row.StatusClass = fmt.Sprintf("%s · %d of %d values set aside (%s)", row.Status, away, members, firstAway), "warn"
+	}
+}
+
+// inTime says when t comes, from now: "in 12 min".
+func inTime(now, t time.Time) string {
+	d := t.Sub(now)
+	switch {
+	case d < time.Minute:
+		return "in under a minute"
+	case d < time.Hour:
+		return fmt.Sprintf("in %d min", int(d.Minutes())+1)
+	}
+	return fmt.Sprintf("in %d h %d min", int(d.Hours()), int(d.Minutes())%60)
 }
 
 func compact(sorted []string) []string {
@@ -851,6 +940,7 @@ type connectForm struct {
 	PartHeaders map[string]string
 	OAuth2      *policy.OAuth2
 	ForwardRole bool
+	KeyPool     bool
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -867,6 +957,8 @@ type agentSettings struct {
 	Project      string            `json:"project,omitempty"`
 	// ForwardRole sends the calling agent's name upstream (X-Keyring-Role).
 	ForwardRole bool `json:"forward_role,omitempty"`
+	// KeyPool uses every value of the key in turn (key_part is tried first).
+	KeyPool bool `json:"key_pool,omitempty"`
 	// ExtraHeaders sends more secret values with each call: header name ->
 	// name of another stored key, never a value. A pointer, so an edit can
 	// tell "left out" (keep) from {} (remove).
@@ -987,7 +1079,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			return
 		}
 		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
-		f.FixedHeaders, f.Project, f.ForwardRole = a.FixedHeaders, a.Project, a.ForwardRole
+		f.FixedHeaders, f.Project, f.ForwardRole, f.KeyPool = a.FixedHeaders, a.Project, a.ForwardRole, a.KeyPool
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
@@ -1072,7 +1164,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, ForwardRole: f.ForwardRole, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
+	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, ForwardRole: f.ForwardRole, KeyPool: f.KeyPool, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
