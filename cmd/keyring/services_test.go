@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -12,30 +13,27 @@ import (
 // #161 review: a cut-off or oversized answer is an error, never printed as
 // if it were the list; an answer without the "ask" hint does not crash.
 func TestServicesCLIRejectsBadAnswers(t *testing.T) {
-	var body string
-	var short bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if short {
-			w.Header().Set("Content-Length", "1000")
-		}
-		io.WriteString(w, body)
-	}))
-	defer srv.Close()
-	run := func(asJSON bool) (string, error) {
+	// Each case has its own server answering a fixed body, so no handler
+	// goroutine reads state the test changes.
+	run := func(body string, declared int, asJSON bool) (string, error) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if declared > 0 {
+				w.Header().Set("Content-Length", strconv.Itoa(declared))
+			}
+			io.WriteString(w, body)
+		}))
+		defer srv.Close()
 		var out bytes.Buffer
 		err := listServices("", srv.URL, "", "", asJSON, &out)
 		return out.String(), err
 	}
-	body, short = `{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]`, true
-	if out, err := run(true); err == nil || out != "" {
+	if out, err := run(`{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]`, 1000, true); err == nil || out != "" {
 		t.Fatalf("cut-off answer: err %v, printed %q", err, out)
 	}
-	body, short = `{"services":[],"x":"`+strings.Repeat("a", 4<<20)+`"}`, false
-	if out, err := run(true); err == nil || out != "" {
+	if out, err := run(`{"services":[],"x":"`+strings.Repeat("a", 4<<20)+`"}`, 0, true); err == nil || out != "" {
 		t.Fatalf("oversized answer: err %v, printed %d bytes", err, len(out))
 	}
-	body = `{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]}`
-	if out, err := run(false); err != nil || !strings.Contains(out, "a ") {
+	if out, err := run(`{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]}`, 0, false); err != nil || !strings.Contains(out, "a ") {
 		t.Fatalf("answer without ask: %v %q", err, out)
 	}
 }
