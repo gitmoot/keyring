@@ -286,7 +286,7 @@ func TestKeyPoolLeavesCloudflareUploadAlone(t *testing.T) {
 	if out, _ := rec.last(t); out.Header.Get("Authorization") != "Bearer "+cfUploadJWT || rec.count() != 1 {
 		t.Fatalf("upload sent Authorization %q in %d calls, want the caller's upload token once", out.Header.Get("Authorization"), rec.count())
 	}
-	if st := h.PoolKeyStatus("CF_TOKENS.main"); st != (PoolKeyStatus{}) {
+	if st := h.PoolKeyStatus("CF_TOKENS.main"); st.State != "" || !st.LastFailure.IsZero() {
 		t.Fatalf("the upload's answer changed the pool: %+v", st)
 	}
 	// Any other call goes out with the pool.
@@ -364,11 +364,20 @@ func TestKeyPoolIgnoresStaleOutcomes(t *testing.T) {
 		},
 	}}
 	up := httptest.NewServer(fake)
-	defer up.Close()
+	// Cleanups run last first: the held request is let go before the
+	// server waits for it, even when an assertion stops the test early.
+	t.Cleanup(up.Close)
+	var releaseOnce sync.Once
+	let := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(let)
 	h, _, _ := poolHandler(t, anthropicBase, up, poolKeys)
-	done := make(chan int)
+	done := make(chan int, 1)
 	go func() { done <- call(h, "POST", "/claude-api/v1/messages", testToken, nil).Code }()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call with the old value never reached the provider")
+	}
 	keys := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-new0", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111"}
 	fake.mu.Lock()
 	fake.answer["sk-ant-main-new0"] = status(401, nil, `{}`)
@@ -380,12 +389,74 @@ func TestKeyPoolIgnoresStaleOutcomes(t *testing.T) {
 	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" {
 		t.Fatalf("new value status %+v", st)
 	}
-	close(release)
-	if code := <-done; code != 200 {
-		t.Fatalf("call with the old value: %d", code)
+	let()
+	select {
+	case code := <-done:
+		if code != 200 {
+			t.Fatalf("call with the old value: %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call with the old value never finished")
 	}
 	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" || st.FailuresToday != 1 {
 		t.Fatalf("the old value's answer changed the new value's status: %+v", st)
+	}
+}
+
+// A call that loaded the keys before a value was replaced may order the
+// pool after the new value was refused: ordering with the old value must
+// not wipe out that refusal, and the new value stays set aside.
+func TestKeyPoolOldOrderingKeepsCurrentRefusal(t *testing.T) {
+	up := httptest.NewServer(&fakeAnthropic{})
+	defer up.Close()
+	h, _, clock := poolHandler(t, anthropicBase, up, poolKeys)
+	members := []string{"CLAUDE_KEYS.main", "CLAUDE_KEYS.backup1", "CLAUDE_KEYS.backup2"}
+	keys := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-new0", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111", "CLAUDE_KEYS.backup2": "sk-ant-b2-2222"}
+	h.Swap(h.Config(), keys)
+	h.poolFailed("CLAUDE_KEYS.main", "sk-ant-main-new0", 401, verdict{true, true, time.Hour, "401 key rejected"}, clock.now())
+	if got := h.pool.order(members, poolKeys, clock.now()); got[0] != "CLAUDE_KEYS.main" {
+		t.Fatalf("old snapshot order %v: its main value was never refused", got)
+	}
+	if got := h.pool.order(members, keys, clock.now()); got[len(got)-1] != "CLAUDE_KEYS.main" {
+		t.Fatalf("current order %v: the refused value is not last", got)
+	}
+	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" || st.FailuresToday != 1 {
+		t.Fatalf("refusal of the current value lost: %+v", st)
+	}
+	// An answer to a value no longer stored is not recorded at all.
+	h.poolWorked("CLAUDE_KEYS.main", "sk-ant-main-0000", clock.now())
+	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" {
+		t.Fatalf("an answer to the old value changed the current one: %+v", st)
+	}
+}
+
+// Sendability belongs to the service: a value with a line break cannot go
+// in a header, but a query pool on the same key sends it. Its health is
+// what the query calls show, and the header service is named beside it.
+func TestKeyPoolStatusPerServiceSendability(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }))
+	defer up.Close()
+	cfg := &policy.Config{
+		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
+		AccessList: policy.AccessList{
+			Services: map[string]policy.Service{
+				"claude-api":   {Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true},
+				"claude-query": {Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthQuery, Param: "key", KeyPool: true},
+			},
+			Roles: map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"claude-api": allowAll, "claude-query": allowAll}}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main\n0000", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111"}
+	h := New(cfg, keys, &bytes.Buffer{})
+	if w := call(h, "GET", "/claude-query/v1/models", testToken, nil); w.Code != 200 {
+		t.Fatalf("query call: %d %s", w.Code, w.Body)
+	}
+	st := h.PoolKeyStatus("CLAUDE_KEYS.main")
+	if st.State != "working" || strings.Join(st.Unsendable, ",") != "claude-api" {
+		t.Fatalf("main status %+v: want working, not sendable by claude-api", st)
 	}
 }
 

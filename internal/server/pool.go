@@ -129,30 +129,27 @@ type poolBook struct {
 	keys map[string]*poolKey
 }
 
-func (b *poolBook) entry(name, value string) *poolKey {
-	sum := sha256.Sum256([]byte(value))
-	if b.keys == nil {
-		b.keys = map[string]*poolKey{}
+// current is the entry for name if it is about value, else nil. Callers
+// hold mu.
+func (b *poolBook) current(name, value string) *poolKey {
+	if k := b.keys[name]; k != nil && k.value == sha256.Sum256([]byte(value)) {
+		return k
 	}
-	k := b.keys[name]
-	if k == nil || k.value != sum {
-		k = &poolKey{value: sum}
-		b.keys[name] = k
-	}
-	return k
+	return nil
 }
 
 // order lists the members to try: those not set aside in pool order, then
 // those set aside, soonest back first. A call never fails locally because
-// every value is set aside: they are still tried.
+// every value is set aside: they are still tried. Ordering only reads: a
+// call holding an older value never replaces what is known about the
+// value stored now.
 func (b *poolBook) order(members []string, keys map[string]string, now time.Time) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var ready, waiting []string
 	until := map[string]time.Time{}
 	for _, name := range members {
-		k := b.entry(name, keys[name])
-		if now.Before(k.coolUntil) {
+		if k := b.current(name, keys[name]); k != nil && now.Before(k.coolUntil) {
 			waiting = append(waiting, name)
 			until[name] = k.coolUntil
 		} else {
@@ -175,20 +172,31 @@ func sendable(svc policy.Service, members []string, keys map[string]string) []st
 	return out
 }
 
-// current is the entry for name if it is still about value: an answer to a
-// value that has since been replaced says nothing about the new one.
-func (b *poolBook) current(name, value string) *poolKey {
-	if k := b.keys[name]; k != nil && k.value == sha256.Sum256([]byte(value)) {
+// poolEntry is the entry to record an answer to value under name, or nil
+// when value is no longer the one stored under name: an answer to a value
+// replaced while the call was out says nothing about its replacement. The
+// stored value is read with h.pool.mu held, so an answer to an older value
+// never overwrites one to the newer. Callers hold h.pool.mu.
+func (h *Handler) poolEntry(name, value string) *poolKey {
+	if h.snap.Load().keys[name] != value {
+		return nil
+	}
+	if k := h.pool.current(name, value); k != nil {
 		return k
 	}
-	return nil
+	if h.pool.keys == nil {
+		h.pool.keys = map[string]*poolKey{}
+	}
+	k := &poolKey{value: sha256.Sum256([]byte(value))}
+	h.pool.keys[name] = k
+	return k
 }
 
-// failed sets value aside after a refusal received at now.
-func (b *poolBook) failed(name, value string, status int, v verdict, now time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	k := b.current(name, value)
+// poolFailed sets value aside after a refusal received at now.
+func (h *Handler) poolFailed(name, value string, status int, v verdict, now time.Time) {
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+	k := h.poolEntry(name, value)
 	if k == nil {
 		return
 	}
@@ -200,10 +208,11 @@ func (b *poolBook) failed(name, value string, status int, v verdict, now time.Ti
 	k.failures++
 }
 
-func (b *poolBook) worked(name, value string, now time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if k := b.current(name, value); k != nil {
+// poolWorked records that value was accepted at now.
+func (h *Handler) poolWorked(name, value string, now time.Time) {
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+	if k := h.poolEntry(name, value); k != nil {
 		k.coolUntil, k.hard, k.lastOK = time.Time{}, false, now
 	}
 }
@@ -211,15 +220,19 @@ func (b *poolBook) worked(name, value string, now time.Time) {
 // PoolKeyStatus is one pooled value as the dashboard shows it. No value, no
 // part of one.
 type PoolKeyStatus struct {
-	// State: "failing" (set aside, the value itself is the problem),
-	// "cooling" (set aside, busy), "working" (worked last), or "" (nothing
-	// known since the value was stored or the keyring started).
+	// State: "failing" (set aside, the value itself is the problem, or no
+	// service pooling it can send it), "cooling" (set aside, busy),
+	// "working" (worked last), or "" (nothing known since the value was
+	// stored or the keyring started).
 	State         string
 	Until         time.Time
 	Status        int
 	Reason        string
 	LastFailure   time.Time
 	FailuresToday int
+	// Unsendable names the pooling services that cannot send the value: it
+	// has a line break or control character and they put it in a header.
+	Unsendable []string
 }
 
 // PoolKeyStatus reports what the keyring knows about the pooled store key
@@ -227,19 +240,27 @@ type PoolKeyStatus struct {
 func (h *Handler) PoolKeyStatus(name string) PoolKeyStatus {
 	snap := h.snap.Load()
 	value := snap.keys[name]
-	for _, svc := range snap.config.Services {
-		if slices.Contains(policy.PoolMembers(svc, snap.keys), name) && unsendableKey(svc, value, snap.keys) != "" {
-			return PoolKeyStatus{State: "failing", Reason: "the value has a line break or control character and cannot be sent; replace it"}
+	var pooling, unsendable []string
+	for sname, svc := range snap.config.Services {
+		if slices.Contains(policy.PoolMembers(svc, snap.keys), name) {
+			pooling = append(pooling, sname)
+			if unsendableKey(svc, value, snap.keys) != "" {
+				unsendable = append(unsendable, sname)
+			}
 		}
+	}
+	slices.Sort(unsendable)
+	if len(unsendable) > 0 && len(unsendable) == len(pooling) {
+		return PoolKeyStatus{State: "failing", Reason: "the value has a line break or control character and cannot be sent; replace it", Unsendable: unsendable}
 	}
 	now := h.now()
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
 	k := h.pool.current(name, value)
 	if k == nil {
-		return PoolKeyStatus{}
+		return PoolKeyStatus{Unsendable: unsendable}
 	}
-	st := PoolKeyStatus{Until: k.coolUntil, Status: k.lastStatus, Reason: k.reason, LastFailure: k.lastFailure}
+	st := PoolKeyStatus{Until: k.coolUntil, Status: k.lastStatus, Reason: k.reason, LastFailure: k.lastFailure, Unsendable: unsendable}
 	if k.failDay == now.UTC().Format("2006-01-02") {
 		st.FailuresToday = k.failures
 	}

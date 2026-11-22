@@ -79,6 +79,26 @@ func TestPoolWithoutItsFirstValueHasAValue(t *testing.T) {
 	}
 }
 
+// A value stored under the bare name is not a pool member: a pool with only
+// that has nothing to send and shows no value, as the proxy refuses its
+// calls.
+func TestPoolWithOnlyABareValueHasNoValue(t *testing.T) {
+	e := newEnv(t)
+	if w := e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-bare-0000"}, "password": {password}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("add: %d %s", w.Code, w.Body)
+	}
+	e.withService("claude-api", policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
+	rows, err := e.backend.rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Name == "CLAUDE_KEYS" && (row.HasValue || row.State != "novalue") {
+			t.Fatalf("pool with only a bare value shows %q (%s), HasValue %v", row.Status, row.State, row.HasValue)
+		}
+	}
+}
+
 // Pasted settings on the service page keep key_pool when they leave it out;
 // an explicit false turns it off.
 func TestEditKeepsKeyPool(t *testing.T) {

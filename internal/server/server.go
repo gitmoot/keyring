@@ -764,9 +764,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		v := judge(svc, resp, got)
 		switch {
 		case v.keyProblem:
-			h.pool.failed(name, value, resp.StatusCode, v, got)
+			h.poolFailed(name, value, resp.StatusCode, v, got)
 		case resp.StatusCode < 400:
-			h.pool.worked(name, value, got)
+			h.poolWorked(name, value, got)
 		}
 		if !v.keyProblem || i == len(tries)-1 || body.once() {
 			break

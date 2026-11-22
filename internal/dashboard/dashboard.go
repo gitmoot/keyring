@@ -352,15 +352,18 @@ func (b *Backend) rows() ([]keyRow, error) {
 	for _, name := range bases {
 		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name], baseStored: has[name]}
 		row.AnyValue = row.HasValue
+		named := false // a named value is stored (MODAL.id)
 		for _, p := range row.Parts {
-			row.AnyValue = row.AnyValue || p.HasValue
+			named = named || p.HasValue
 		}
+		row.AnyValue = row.AnyValue || named
 		pooled := poolsKey(cfg, name)
 		switch {
 		case pooled:
-			// A pool works while any of its values is stored, the one
-			// tried first or not.
-			row.HasValue = row.AnyValue
+			// A pool sends its key's named values, the one tried first or
+			// not, while any is stored; a value under the bare name is not
+			// one of them (policy.PoolMembers).
+			row.HasValue = named
 		case len(row.Parts) > 0:
 			row.HasValue = true
 			for _, p := range row.Parts {
@@ -494,6 +497,14 @@ func (b *Backend) describePool(row *keyRow, usage []server.Usage) {
 			p.PoolStatus = "Ready"
 			if !st.LastFailure.IsZero() {
 				p.PoolStatus = "Ready again (last failure " + st.Reason + ", " + ago(now, st.LastFailure) + ")"
+			}
+		}
+		// Another service pooling the value can still send it; the ones
+		// that cannot are named beside its health.
+		if len(st.Unsendable) > 0 && (st.State != "failing" || !st.Until.IsZero()) {
+			p.PoolStatus += "; cannot be sent by " + strings.Join(st.Unsendable, ", ") + " (line break or control character)"
+			if p.PoolClass == "" || p.PoolClass == "ok" {
+				p.PoolClass = "warn"
 			}
 		}
 		if st.State == "failing" || st.State == "cooling" {
