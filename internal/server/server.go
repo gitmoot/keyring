@@ -51,6 +51,9 @@ type Handler struct {
 	requests *requests.Store
 	// pool is what is known about each value of a pooled key.
 	pool poolBook
+	// order is each key's list order of its value names (key -> parts), set
+	// by the dashboard; a pool tries the values in this order.
+	order atomic.Pointer[map[string][]string]
 	// auditSearch lets one audit search (AuditPath) run at a time.
 	auditSearch sync.Mutex
 	audit       io.Writer
@@ -170,6 +173,20 @@ func (h *Handler) clientFor(svc policy.Service) *http.Client {
 
 // Config returns the settings in use.
 func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
+
+// SetValueOrder sets each key's list order of its value names (key ->
+// parts), which key pools try in that order from the next call on.
+func (h *Handler) SetValueOrder(order map[string][]string) {
+	h.order.Store(&order)
+}
+
+// valueOrder is the list order of key's value names, or nil.
+func (h *Handler) valueOrder(key string) []string {
+	if order := h.order.Load(); order != nil {
+		return (*order)[key]
+	}
+	return nil
+}
 
 // Swap replaces the settings and keys for every later request. config must be
 // validated. Requests already running keep what they started with; daily
@@ -517,7 +534,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if selected != nil {
 		key = selected.Refresh
 	}
-	members := policy.PoolMembers(svc, snap.keys)
+	members := policy.PoolMembers(svc, snap.keys, h.valueOrder(svc.Key))
 	if len(members) > 0 {
 		key = snap.keys[members[0]]
 	}

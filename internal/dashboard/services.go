@@ -72,15 +72,21 @@ func formOf(name string, svc policy.Service) serviceForm {
 	return f
 }
 
-// keyChoices are the key names the service may use: those the keys page lists.
-func (b *Backend) keyChoices() ([]string, error) {
+// keyChoices are the key names the service may use: those the keys page
+// lists. A key pool names a key itself (CLAUDE_KEYS); any other service one
+// value (API_KEY, MODAL.id).
+func (b *Backend) keyChoices(pool bool) ([]string, error) {
 	rows, err := b.rows()
 	if err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
-		names = append(names, row.valueNames()...)
+		if pool {
+			names = append(names, row.Name)
+		} else {
+			names = append(names, row.valueNames()...)
+		}
 	}
 	return names, nil
 }
@@ -98,7 +104,7 @@ func (b *Backend) servicePage(w http.ResponseWriter, r *http.Request, sid string
 func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f serviceForm, notice, msg string) {
 	cfg := b.Proxy.Config()
 	svc := cfg.Services[f.Name]
-	keys, err := b.keyChoices()
+	keys, err := b.keyChoices(f.KeyPool)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
@@ -216,11 +222,15 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		again(http.StatusBadRequest, "An OAuth service stays OAuth, and a static one stays static. Connect a new service for the other kind.")
 		return
 	}
+	pool := cur.KeyPool
+	if keyPool != nil {
+		pool = *keyPool
+	}
 	if f.Key != cur.Key {
-		if ok, err := b.knownValue(f.Key); err != nil {
+		if choices, err := b.keyChoices(pool); err != nil {
 			b.fail(w, sid, err)
 			return
-		} else if !ok {
+		} else if !slices.Contains(choices, f.Key) {
 			again(http.StatusBadRequest, "There is no key named "+f.Key+". Add it under Keys first.")
 			return
 		}

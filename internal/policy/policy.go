@@ -330,11 +330,12 @@ type Service struct {
 	// 488215: macserve saw every relay caller as the same client). Off by
 	// default: a third-party API has no use for role names.
 	ForwardRole bool `json:"forward_role,omitempty"`
-	// KeyPool makes every value of Key's key a candidate (owner, 2026-11-22):
-	// Key ("CLAUDE_KEYS.main") is tried first, then the key's other values by
-	// name, and a value the provider rejects (bad or out-of-credit key, rate
-	// limit) is set aside for a while and the call is sent again with the
-	// next. A value added to the key later joins the pool. See PoolMembers.
+	// KeyPool makes every value of the key named by Key a candidate (owner,
+	// 2026-11-22): Key names the key itself ("CLAUDE_KEYS"), its values
+	// (CLAUDE_KEYS.1, CLAUDE_KEYS.2) are tried in the key's list order, and a
+	// value the provider rejects (bad or out-of-credit key, rate limit) is set
+	// aside for a while and the call is sent again with the next. A value
+	// added to the key later joins the pool. See PoolMembers.
 	KeyPool bool `json:"key_pool,omitempty"`
 
 	base *url.URL
@@ -909,9 +910,9 @@ func (c *Config) Validate() error {
 		}
 		// Every value of a pool's key may be sent upstream: none may be
 		// another service's key, unless that service pools the same key.
-		base, _ := store.SplitPart(pool.Key)
+		base := pool.Key
 		for name, svc := range c.Services {
-			if name == poolName || svc.KeyPool && strings.HasPrefix(svc.Key, base+".") {
+			if name == poolName || svc.KeyPool && svc.Key == base {
 				continue
 			}
 			for _, k := range svc.KeyNames() {
@@ -1072,8 +1073,8 @@ func (s *Service) validate() error {
 		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
 			return errors.New("key_pool needs bearer, header or query authentication")
 		}
-		if _, part := store.SplitPart(s.Key); part == "" {
-			return errors.New("key_pool needs a key with several values; key names the one tried first (e.g. CLAUDE_KEYS.main)")
+		if _, part := store.SplitPart(s.Key); part != "" {
+			return errors.New("key_pool names the key itself (e.g. CLAUDE_KEYS), not one of its values: leave key_part out; the pool uses the key's values in list order")
 		}
 		if len(s.ExtraHeaders) != 0 {
 			return errors.New("key_pool cannot be combined with extra_headers")

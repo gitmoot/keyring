@@ -77,14 +77,12 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/keys"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Name<input name="name" value="{{.Name}}" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENROUTER_API_KEY" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
-<label>Value<input type="password" name="value" autocomplete="off" placeholder="paste it here; it is never shown again"></label>
-<details class="parts"><summary>This key has named values (e.g. an id and a secret, or main and backups)</summary>
-<p class="hint">Name each value and paste it. Leave the single Value above empty. Example for Modal: id ← wk-…, secret ← ws-…. One named value is fine too: more can be added later on the key's page.</p>
-<div id="part-rows">{{range $i, $n := .PartRows}}<div class="two"><label>Value name<input name="part" value="{{$n}}" placeholder="{{if eq $i 0}}id{{else if eq $i 1}}secret{{else}}optional{{end}}" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
-<label>Value<input type="password" name="part_value" autocomplete="off" placeholder="never shown again"></label></div>{{end}}</div>
-<div class="actions"><button type="button" class="ghost" data-addrow="part-rows" data-max="{{.MaxParts}}" hidden>Add another value</button></div>
-<p class="hint">Up to {{.MaxParts}} values. Without the Add another value button (no script), add the key with these, then add more on its page under Replace or add a value.</p>
-</details>
+<p class="hint">Paste one key per row. Names are optional; values are numbered 1, 2, 3.</p>
+<div id="value-rows">{{range $i, $n := .PartRows}}<div class="two"><label>Value<input type="password" name="value" autocomplete="off" placeholder="{{if eq $i 0}}paste it here; it is never shown again{{else}}optional{{end}}"></label>
+<label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
+<label>Value name (optional)<input name="part" value="{{$n}}" pattern="[a-z0-9_]{1,32}" placeholder="e.g. id; empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div>{{end}}</div>
+<div class="actions"><button type="button" class="ghost" data-addrow="value-rows" data-max="{{.MaxParts}}" hidden>Add another value</button></div>
+<p class="hint">One value without a name is the key's value. With more, each is stored as a numbered value of the key (or under its name, such as id and secret for Modal), and a key pool tries them in this order. Up to {{.MaxParts}} values; more can be added on the key's page.</p>
 {{template "password" .}}
 <div class="actions"><button>Add key</button><a class="btn ghost" href="/keys">Cancel</a></div>
 </form></div>
@@ -102,13 +100,13 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{template "bottom"}}{{end}}
 
 {{define "key"}}{{template "top" .}}
-{{if eq .Notice "uploaded"}}<p class="notice">Key file stored{{with .Meta.Kind}}: {{.}}{{end}}{{with .Meta.Fingerprint}}, fingerprint {{.}}{{end}}. Connect it to a service below.</p>{{else if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if eq .Notice "renamed"}}<p class="notice">Key renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-named"}}<p class="notice">The value has a name now. Add more values under Replace or add a value.</p>{{else if eq .Notice "value-renamed"}}<p class="notice">Value renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-removed"}}<p class="notice">Value removed.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
-{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "part"}}<p class="error">Name the value to replace or add: lowercase letters, digits or _.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
+{{if eq .Notice "uploaded"}}<p class="notice">Key file stored{{with .Meta.Kind}}: {{.}}{{end}}{{with .Meta.Fingerprint}}, fingerprint {{.}}{{end}}. Connect it to a service below.</p>{{else if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if eq .Notice "renamed"}}<p class="notice">Key renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-added"}}<p class="notice">Value added, last in the list.</p>{{else if eq .Notice "value-labelled"}}<p class="notice">Label saved.</p>{{else if eq .Notice "value-moved"}}<p class="notice">Order saved. A key pool tries the values in this order.</p>{{else if eq .Notice "value-renamed"}}<p class="notice">Value renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-removed"}}<p class="notice">Value removed.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
+{{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "part"}}<p class="error">Pick the value to replace.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key was replaced or deleted during the test, so its result was not kept. Test again.</p>{{end}}
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
 <div class="head"><a class="back" href="/keys">Keys</a><h1 class="mono">{{.Row.Name}}</h1>{{template "status" .Row}}</div>
 <div class="card"><dl>
-{{if .Row.Parts}}<dt>Values</dt><dd>{{range .Row.Parts}}<span class="chip mono">{{.Name}}</span> {{if .HasValue}}<span class="masked">••••••••</span>{{else}}<span class="mute">none stored</span>{{end}}{{if .Pooled}} <span class="pill {{.PoolClass}}">{{.PoolStatus}}</span> <span class="mute">{{.CallsToday}} today · {{.CallsWeek}} in 7 days{{if .FailuresToday}} · {{.FailuresToday}} refused today{{end}}{{with .LastUsed}} · last {{.}}{{end}}</span>{{end}}<br>{{end}}<span class="mute">never shown</span>{{if and (gt (len .Row.Parts) 0) (index .Row.Parts 0).Pooled}}<br><span class="hint">Key pool: each call uses the first value that is not set aside; a value the provider refuses (bad key, no credit, rate limit) is set aside for a while and the call goes out again with the next.</span>{{end}}</dd>
-{{else}}<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span> <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>{{end}}
+{{if .Row.Parts}}<dt>Values</dt><dd>{{range .Row.Parts}}<span class="chip mono">{{.Name}}</span>{{with .Label}} · {{.}}{{end}} {{if .HasValue}}<span class="masked">••••••••</span>{{else}}<span class="mute">none stored</span>{{end}}{{if .Pooled}} <span class="pill {{.PoolClass}}">{{.PoolStatus}}</span> <span class="mute">{{.CallsToday}} today · {{.CallsWeek}} in 7 days{{if .FailuresToday}} · {{.FailuresToday}} refused today{{end}}{{with .LastUsed}} · last {{.}}{{end}}</span>{{end}}<br>{{end}}<span class="mute">never shown</span>{{if and (gt (len .Row.Parts) 0) (index .Row.Parts 0).Pooled}}<br><span class="hint">Key pool: each call uses the first value in this list that is not set aside; a value the provider refuses (bad key, no credit, rate limit) is set aside for a while and the call goes out again with the next.</span>{{end}}</dd>
+{{else}}<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span>{{with .Row.Label}} · {{.}}{{end}} <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>{{end}}
 {{with .Meta.Kind}}<dt>File</dt><dd>{{.}}{{with $.Meta.Fingerprint}} · <code>{{.}}</code>{{end}}</dd>{{end}}
 <dt>Services</dt><dd>{{range .Row.Services}}<a class="chip" href="/services/{{.}}">{{.}}</a>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Row.UsedBy}}<a class="chip" href="/agents/{{.}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
@@ -120,7 +118,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 </div>
 
 <details class="card"{{if or (not .Row.Services) .ConnectError}} open{{end}}><summary>{{if .Row.Services}}Connect to another service{{else}}Connect to a service{{end}}</summary>
-{{with .ConnectError}}<p class="error">{{.}}{{if $.Connect.NameFirst}} <a href="#name-value">Give the value a name</a>{{end}}</p>{{end}}
+{{with .ConnectError}}<p class="error">{{.}}</p>{{end}}
 <form method="get" action="/keys/{{.Row.Name}}" class="presetpick"><label>Which API?<select name="preset" data-autosubmit>
 <option value=""{{if eq .Connect.Preset ""}} selected{{end}}>Other (fill in below)</option>
 {{range .Presets}}<option value="{{.ID}}"{{if eq .ID $.Connect.Preset}} selected{{end}}>{{.Label}}</option>{{end}}
@@ -147,21 +145,37 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 Push notifications: <code>{"service":"apns","base":"https://api.push.apple.com","auth":"apns","apns":{"key_id":"KEY_ID","team_id":"TEAM_ID"}}</code><br>
 Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","sign_in_with_apple":{"client_id":"BUNDLE_ID","team_id":"TEAM_ID","key_id":"KEY_ID"}}</code></p>{{else}}<details><summary>Or paste settings from an agent</summary>{{end}}
 <label>JSON like {"service":"x","base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
-{{if gt (len .Row.Parts) 1}}<p class="hint">For this key add "key_part" (which value is the key) and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}","extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}}</p>{{end}}
+{{if .Row.Parts}}<p class="hint">For a key pool over all these values, in list order: {"service":"x","base":"https://…","auth":"header","header":"x-api-key","key_pool":true} (no key_part). For one value as the key, add "key_part" and name the others in extra_headers by their value name: {"service":"modal-ocr","base":"https://…","auth":"header","header":"Modal-Key","key_part":"{{(index .Row.Parts 0).Name}}"{{if gt (len .Row.Parts) 1}},"extra_headers":{"Modal-Secret":"{{(index .Row.Parts 1).Name}}"}{{end}}}</p>{{end}}
 <p class="hint">For an API that needs a second secret, either give one key several values, or add it as its own key first, then name it in extra_headers: {"Modal-Secret":"MODAL_PROXY_SECRET"} (header name to key name, never a value; up to two). Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}. These override caller values and are not redacted from responses. Never put credentials here.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Connect</button></div>
 </form></details>
 
-{{if not .Row.Parts}}<div class="card" id="name-value"><h2>Give this value a name</h2>
-<p class="hint">To add more values to this key, for example backup keys for a key pool, give its value a name first, e.g. main. Services that use {{.Row.Name}} then use {{.Row.Name}}.main and keep working.</p>
-<form method="post" action="/keys/{{.Row.Name}}/rename-value"><input type="hidden" name="csrf" value="{{.CSRF}}">
-<label>Value name<input name="new_part" value="main" required pattern="[a-z0-9_]{1,32}" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
-{{template "password" .}}<div class="actions"><button class="ghost">Name the value</button></div></form></div>{{end}}
+<div class="card" id="add-value"><h2>Add a value</h2>
+<p class="hint">It goes last in the list. Without a name it gets the next number{{if not .Row.Parts}}; this key's value becomes value 1 and services using {{.Row.Name}} change to {{.Row.Name}}.1{{end}}.</p>
+<form method="post" action="/keys/{{.Row.Name}}/add-value"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>Value<input type="password" name="value" autocomplete="off" required></label>
+<div class="two"><label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
+<label>Value name (optional)<input name="part" pattern="[a-z0-9_]{1,32}" placeholder="empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div>
+{{template "password" .}}<div class="actions"><button class="ghost">Add value</button></div></form></div>
 
-<div class="card"><h2>Replace {{if .Row.Parts}}or add a value{{else}}value{{end}}</h2><form method="post" action="/keys/{{.Row.Name}}/replace"><input type="hidden" name="csrf" value="{{.CSRF}}">
-{{if .Row.Parts}}<label>Which value<input name="part" list="parts-{{.Row.Name}}" required placeholder="e.g. secret, or a new name" autocapitalize="none" spellcheck="false"></label><datalist id="parts-{{.Row.Name}}">{{range .Row.Parts}}<option>{{.Name}}</option>{{end}}</datalist>{{end}}
+{{if .Row.Parts}}<details class="card" id="values"><summary>Order and labels</summary>
+<form method="post" action="/keys/{{.Row.Name}}/move-up"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<p class="hint">A key pool tries the values in this order.</p>
+{{range $i, $p := .Row.Parts}}<p><span class="chip mono">{{.Name}}</span>{{with .Label}} · {{.}}{{end}}{{if $i}} <button class="ghost" name="part" value="{{.Name}}">Move up</button>{{end}}</p>{{end}}
+{{template "password" .}}</form>
+<hr>{{end}}
+{{if or .Row.Parts .Row.HasValue}}{{if not .Row.Parts}}<details class="card" id="values"><summary>Label</summary>{{end}}
+<form method="post" action="/keys/{{.Row.Name}}/label"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .Row.Parts}}<div class="two"><label>Value<select name="part">{{range .Row.Parts}}<option value="{{.Name}}">{{.Name}}{{with .Label}} · {{.}}{{end}}</option>{{end}}</select></label>{{else}}<input type="hidden" name="part" value="">{{end}}
+<label>Label<input name="label" maxlength="80" placeholder="empty: no label" autocomplete="off"{{if not .Row.Parts}} value="{{.Row.Label}}"{{end}}></label>{{if .Row.Parts}}</div>{{end}}
+{{template "password" .}}<div class="actions"><button class="ghost">Save label</button></div></form>
+<p class="hint">A label is for you only: it is not secret and does not change which value is sent.</p>
+</details>{{end}}
+
+<div class="card"><h2>Replace {{if .Row.Parts}}a value{{else}}value{{end}}</h2><form method="post" action="/keys/{{.Row.Name}}/replace"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .Row.Parts}}<label>Which value<select name="part">{{range .Row.Parts}}<option value="{{.Name}}">{{.Name}}{{with .Label}} · {{.}}{{end}}</option>{{end}}</select></label>{{end}}
 <label>New value<input type="password" name="value" autocomplete="off" required></label>{{template "password" .}}<div class="actions"><button>Replace</button></div></form></div>
 
 <details class="card" id="rename"><summary>Rename {{if .Row.Parts}}the key or a value{{else}}the key{{end}}</summary>
@@ -179,8 +193,8 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <form method="post" action="/keys/{{.Row.Name}}/leaked"><input type="hidden" name="csrf" value="{{.CSRF}}"><p class="mute">Marking it leaked shows a warning until you replace it.</p>{{template "password" .}}<div class="actions"><button class="ghost">Mark as leaked</button></div></form>
 {{if .Row.Parts}}<hr>
 <form method="post" action="/keys/{{.Row.Name}}/remove-value"><input type="hidden" name="csrf" value="{{.CSRF}}">
-<p>Remove one value. A value a service sends as its key or an extra header is kept; a key pool's other values can go (the pool stops using them).</p>
-<label>Value<select name="part">{{range .Row.Parts}}{{if .HasValue}}<option>{{.Name}}</option>{{end}}{{end}}</select></label>
+<p>Remove one value. A value a service names (its key or an extra header) is kept; a key pool's values can go (the pool stops using them).</p>
+<label>Value<select name="part">{{range .Row.Parts}}{{if .HasValue}}<option value="{{.Name}}">{{.Name}}{{with .Label}} · {{.}}{{end}}</option>{{end}}{{end}}</select></label>
 {{template "password" .}}<div class="actions"><button class="ghost">Remove value</button></div></form>{{end}}
 <hr>
 <form method="post" action="/keys/{{.Row.Name}}/delete"><input type="hidden" name="csrf" value="{{.CSRF}}">

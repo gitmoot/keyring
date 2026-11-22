@@ -11,15 +11,19 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gitmoot/keyring/internal/admin"
 	"github.com/gitmoot/keyring/internal/fileutil"
@@ -110,6 +114,67 @@ type KeyMeta struct {
 	// public key. Never the value. Cleared when the value is replaced by hand.
 	Kind        string `json:"kind,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Values are the key's values in list order, with their labels (owner,
+	// 2026-11-22): a key pool tries them in this order. Never values.
+	Values []ValueNote `json:"values,omitempty"`
+	// LastNumber is the highest number a value of the key was named with;
+	// a value added without a name gets the next, so none is given twice.
+	LastNumber int `json:"last_number,omitempty"`
+}
+
+// ValueNote is one value of a key in its list: its value name (the part of
+// KEY.part; "" for the one plain value of KEY) and an optional label, free
+// text the owner chose ("Jerry's Max account"). Not secret; never routes.
+type ValueNote struct {
+	Name  string `json:"name"`
+	Label string `json:"label,omitempty"`
+}
+
+// renewed is m after a new value: not tested and not leaked, with the dates
+// and the value list kept.
+func (m KeyMeta) renewed(now time.Time) KeyMeta {
+	return KeyMeta{UpdatedAt: &now, CreatedAt: m.CreatedAt, Values: m.Values, LastNumber: m.LastNumber}
+}
+
+// order is the key's value names in list order.
+func (m KeyMeta) order() []string {
+	out := make([]string, 0, len(m.Values))
+	for _, v := range m.Values {
+		out = append(out, v.Name)
+	}
+	return out
+}
+
+// label is the label of value name, or "".
+func (m KeyMeta) label(name string) string {
+	for _, v := range m.Values {
+		if v.Name == name {
+			return v.Label
+		}
+	}
+	return ""
+}
+
+// ValueOrder reads each key's list order of its value names from the key
+// notes at metaPath, for the proxy's key pools (server.SetValueOrder).
+func ValueOrder(metaPath string) (map[string][]string, error) {
+	meta, err := (&Backend{MetaPath: metaPath}).loadMeta()
+	if err != nil {
+		return nil, err
+	}
+	return valueOrder(meta), nil
+}
+
+func valueOrder(meta map[string]KeyMeta) map[string][]string {
+	out := map[string][]string{}
+	for key, m := range meta {
+		for _, v := range m.Values {
+			if v.Name != "" {
+				out[key] = append(out[key], v.Name)
+			}
+		}
+	}
+	return out
 }
 
 // rules are the running rules: a SIGHUP may have changed allow_sources since
@@ -138,6 +203,9 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/rename", b.renameKey)
 	a.Handle("POST /keys/{name}/rename-value", b.renameValue)
 	a.Handle("POST /keys/{name}/remove-value", b.removeValue)
+	a.Handle("POST /keys/{name}/add-value", b.addValue)
+	a.Handle("POST /keys/{name}/label", b.labelValue)
+	a.Handle("POST /keys/{name}/move-up", b.moveValueUp)
 	registerServices(b)
 	registerProjects(b)
 	registerActivity(b)
@@ -162,9 +230,12 @@ type keyRow struct {
 	HasValue   bool
 	// Projects are the projects of the key's services (#111).
 	Projects []string
-	// Parts are the named values of a key that has several (MODAL.id,
-	// MODAL.secret); empty for a key with one value.
+	// Parts are the named values of a key (MODAL.id, MODAL.secret;
+	// CLAUDE_KEYS.1), in the key's list order; empty for a key with one
+	// plain value.
 	Parts []keyPart
+	// Label is the label of a key's one plain value.
+	Label string
 	// AnyValue: at least one of the key's values is stored (HasValue needs
 	// all of them).
 	AnyValue bool
@@ -177,6 +248,7 @@ type keyRow struct {
 type keyPart struct {
 	Name     string // "id"
 	Full     string // "MODAL.id", the name services use
+	Label    string // the owner's label, if any
 	HasValue bool
 	// Pooled: a key_pool service sends this value (owner, 2026-11-22).
 	// PoolStatus and PoolClass say whether it is working or set aside;
@@ -281,12 +353,19 @@ func (b *Backend) loadMeta() (map[string]KeyMeta, error) {
 	return meta, nil
 }
 
+// saveMeta writes the key notes and gives the proxy the value order in them.
 func (b *Backend) saveMeta(meta map[string]KeyMeta) error {
 	raw, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600)
+	if err := fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if b.Proxy != nil {
+		b.Proxy.SetValueOrder(valueOrder(meta))
+	}
+	return nil
 }
 
 // NoteKeyChange records in the key notes at metaPath that a key was set or
@@ -306,7 +385,7 @@ func NoteKeyChange(metaPath, name string, deleted bool, now time.Time) error {
 		delete(meta, name)
 	} else {
 		at := now.UTC()
-		meta[name] = KeyMeta{UpdatedAt: &at, CreatedAt: meta[name].CreatedAt}
+		meta[name] = meta[name].renewed(at)
 	}
 	return b.saveMeta(meta)
 }
@@ -354,7 +433,8 @@ func (b *Backend) rows() ([]keyRow, error) {
 	bases = compact(bases)
 	rows := make([]keyRow, 0, len(bases))
 	for _, name := range bases {
-		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name], baseStored: has[name]}
+		row := keyRow{Name: name, HasValue: has[name], Parts: parts[name], baseStored: has[name], Label: meta[name].label("")}
+		orderParts(row.Parts, meta[name])
 		row.AnyValue = row.HasValue
 		named := false // a named value is stored (MODAL.id)
 		for _, p := range row.Parts {
@@ -364,10 +444,11 @@ func (b *Backend) rows() ([]keyRow, error) {
 		pooled := poolsKey(cfg, name)
 		switch {
 		case pooled:
-			// A pool sends its key's named values, the one tried first or
-			// not, while any is stored; a value under the bare name is not
-			// one of them (policy.PoolMembers).
-			row.HasValue = named
+			// A pool sends its key's named values while any is stored, or
+			// the key's one plain value while it has no named ones; a value
+			// under the bare name next to named ones is not sent
+			// (policy.PoolMembers).
+			row.HasValue = named || len(row.Parts) == 0 && has[name]
 		case len(row.Parts) > 0:
 			row.HasValue = true
 			for _, p := range row.Parts {
@@ -449,11 +530,38 @@ func (b *Backend) rows() ([]keyRow, error) {
 // poolsKey reports whether a key_pool service sends the values of key.
 func poolsKey(cfg *policy.Config, key string) bool {
 	for _, svc := range cfg.Services {
-		if base, _ := store.SplitPart(svc.Key); svc.KeyPool && base == key {
+		if svc.KeyPool && svc.Key == key {
 			return true
 		}
 	}
 	return false
+}
+
+// orderParts puts a key's values in its list order and gives each its label.
+func orderParts(parts []keyPart, m KeyMeta) {
+	byName := make(map[string]keyPart, len(parts))
+	names := make([]string, len(parts))
+	for i, p := range parts {
+		byName[p.Name], names[i] = p, p.Name
+	}
+	store.OrderParts(names, m.order())
+	for i, n := range names {
+		parts[i] = byName[n]
+		parts[i].Label = m.label(n)
+	}
+}
+
+// notes are the key's values in list order with their labels, as the
+// dashboard stores them.
+func (r keyRow) notes() []ValueNote {
+	if len(r.Parts) == 0 {
+		return []ValueNote{{Name: "", Label: r.Label}}
+	}
+	out := make([]ValueNote, len(r.Parts))
+	for i, p := range r.Parts {
+		out[i] = ValueNote{Name: p.Name, Label: p.Label}
+	}
+	return out
 }
 
 // describePool fills in each pooled value of row and, when values are set
@@ -839,52 +947,105 @@ func checkValue(raw string) (string, error) {
 	return v, nil
 }
 
-// maxParts bounds the values of one key on the add-key form (owner,
-// 2026-11-22: four was too few for a key pool).
+// maxParts bounds the values of one key (owner, 2026-11-22: four was too few
+// for a key pool).
 const maxParts = 32
 
-// readParts reads the "part" / "part_value" rows of the add-key form: the
-// named values of a key (MODAL: id, secret; CLAUDE_KEYS: main). None when the
-// form has only the single unnamed value.
-func readParts(r *http.Request) (map[string]string, string) {
-	names, values := r.PostForm["part"], r.PostForm["part_value"]
-	parts := map[string]string{}
-	for i, raw := range names {
-		part := strings.ToLower(strings.TrimSpace(raw))
-		value := ""
-		if i < len(values) {
-			value = values[i]
-		}
-		if part == "" && strings.TrimSpace(value) == "" {
-			continue // an empty extra row
-		}
-		if !store.ValidPart(part) {
-			return nil, "Name each value with lowercase letters, digits or _, e.g. id and secret."
-		}
-		if _, dup := parts[part]; dup {
-			return nil, "Two values have the name " + part + "."
-		}
-		v, err := checkValue(value)
-		if err != nil {
-			if errors.Is(err, errValueControl) {
-				return nil, "The value for " + part + " has a line break or control character inside it."
-			}
-			return nil, "Paste a value for " + part + "."
-		}
-		parts[part] = v
+// maxLabel bounds a value's label, in characters.
+const maxLabel = 80
+
+// checkLabel trims a value's label and refuses a long one or one with a
+// line break or control character; it returns the message to show.
+func checkLabel(raw string) (string, string) {
+	label := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(label) > maxLabel || strings.ContainsFunc(label, unicode.IsControl) {
+		return "", fmt.Sprintf("A label is at most %d characters, on one line.", maxLabel)
 	}
-	if len(parts) == 0 {
-		return nil, ""
-	}
-	if len(parts) > maxParts {
-		return nil, fmt.Sprintf("At most %d values per key.", maxParts)
-	}
-	return parts, ""
+	return label, ""
 }
 
-// addKey stores a new key: a name and one value, or several named values
-// (MODAL with id and secret, stored as MODAL.id and MODAL.secret). Which API
-// it is for is set later on the key's page ("Connect to a service").
+// valueRow is one value on the add-key form: the value, and an optional
+// value name and label.
+type valueRow struct{ Name, Value, Label string }
+
+// readRows reads the rows of the add-key form ("value", "part" and "label"
+// fields, one of each per row); empty rows are skipped. It returns the
+// message to show if a row is wrong.
+func readRows(r *http.Request) ([]valueRow, string) {
+	values, names, labels := r.PostForm["value"], r.PostForm["part"], r.PostForm["label"]
+	at := func(list []string, i int) string {
+		if i < len(list) {
+			return list[i]
+		}
+		return ""
+	}
+	var rows []valueRow
+	named := map[string]bool{}
+	for i := range max(len(values), len(names), len(labels)) {
+		raw, rawLabel := at(values, i), at(labels, i)
+		part := strings.ToLower(strings.TrimSpace(at(names, i)))
+		if strings.TrimSpace(raw) == "" && part == "" && strings.TrimSpace(rawLabel) == "" {
+			continue // an empty extra row
+		}
+		if part != "" && !store.ValidPart(part) {
+			return nil, "Name a value with lowercase letters, digits or _ (e.g. id), or leave the name empty."
+		}
+		if named[part] {
+			return nil, "Two values have the name " + part + "."
+		}
+		named[part] = part != ""
+		label, msg := checkLabel(rawLabel)
+		if msg != "" {
+			return nil, msg
+		}
+		v, err := checkValue(raw)
+		if err != nil {
+			what := "the value"
+			if part != "" {
+				what = "the value for " + part
+			}
+			if errors.Is(err, errValueControl) {
+				return nil, "The" + strings.TrimPrefix(what, "the") + " has a line break or control character inside it. Paste only the key itself."
+			}
+			return nil, "Paste " + what + ", on one line."
+		}
+		rows = append(rows, valueRow{Name: part, Value: v, Label: label})
+	}
+	if len(rows) == 0 {
+		return nil, "Paste the value, on one line."
+	}
+	if len(rows) > maxParts {
+		return nil, fmt.Sprintf("At most %d values per key.", maxParts)
+	}
+	return rows, ""
+}
+
+// nextNumber names a value added without a name: one more than the highest
+// number the key has had (*last), skipping taken names. Numbers are never
+// given twice.
+func nextNumber(last *int, taken map[string]bool) string {
+	for {
+		*last++
+		if n := strconv.Itoa(*last); !taken[n] {
+			taken[n] = true
+			return n
+		}
+	}
+}
+
+// noteNumber raises *last to a value name that is a number, so that number
+// is not given again.
+func noteNumber(last *int, name string) {
+	if n, err := strconv.Atoi(name); err == nil && n > *last {
+		*last = n
+	}
+}
+
+// addKey stores a new key: a name and one value, or several values (MODAL
+// with id and secret, stored as MODAL.id and MODAL.secret; CLAUDE_KEYS with
+// three values without names, stored as CLAUDE_KEYS.1, .2 and .3), each with
+// an optional label. Which API it is for is set later on the key's page
+// ("Connect to a service").
 func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	name := strings.TrimSpace(r.PostFormValue("name"))
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
@@ -895,30 +1056,33 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, "The name must be letters, digits and _, not starting with a digit.")
 		return
 	}
-	parts, msg := readParts(r)
-	if msg == "" && parts != nil && strings.TrimSpace(r.PostFormValue("value")) != "" {
-		// A key is plain or has named values, never both.
-		msg = "Fill in either the single Value or the named values, not both."
-	}
+	rows, msg := readRows(r)
 	if msg != "" {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
 		return
 	}
 	values := map[string]string{}
-	if parts == nil {
-		value, err := readValue(r)
-		if err != nil {
-			msg := "Paste the value, on one line."
-			if errors.Is(err, errValueControl) {
-				msg = "The value has a line break or control character inside it. Paste only the key itself."
-			}
-			b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
-			return
+	var notes []ValueNote
+	last := 0
+	if len(rows) == 1 && rows[0].Name == "" {
+		// One value without a name: a plain key. Adding a second value
+		// later gives both numbers.
+		values[name] = rows[0].Value
+		if rows[0].Label != "" {
+			notes = []ValueNote{{Label: rows[0].Label}}
 		}
-		values[name] = value
 	} else {
-		for part, v := range parts {
-			values[name+"."+part] = v
+		taken := map[string]bool{}
+		for _, row := range rows {
+			taken[row.Name] = row.Name != ""
+			noteNumber(&last, row.Name)
+		}
+		for _, row := range rows {
+			if row.Name == "" {
+				row.Name = nextNumber(&last, taken)
+			}
+			values[name+"."+row.Name] = row.Value
+			notes = append(notes, ValueNote{Name: row.Name, Label: row.Label})
 		}
 	}
 	b.Mu.Lock()
@@ -936,23 +1100,25 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 			return
 		}
 	}
-	for _, full := range sortedNames(values) {
-		if err := store.Set(b.StorePath, full, values[full]); err != nil {
-			b.fail(w, sid, err)
-			return
-		}
-		keys[full] = values[full]
+	if err := store.Move(b.StorePath, nil, values); err != nil {
+		b.fail(w, sid, err)
+		return
 	}
+	maps.Copy(keys, values)
 	b.Proxy.Swap(b.Proxy.Config(), keys)
-	// Only the date: a failure here leaves the key stored and working.
+	// Only notes: a failure here leaves the key stored and working.
 	if meta, err := b.loadMeta(); err == nil {
 		now := b.Now().UTC()
-		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now}
+		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now, Values: notes, LastNumber: last}
 		_ = b.saveMeta(meta)
 	}
 	fields := map[string]any{"key": name}
-	if parts != nil {
-		fields["parts"] = sortedNames(parts) // names only, never values
+	if _, plain := values[name]; !plain {
+		var parts []string
+		for _, n := range notes {
+			parts = append(parts, n.Name)
+		}
+		fields["parts"] = parts // names only, never values
 	}
 	b.Admin.Audit("key_added", sid, fields)
 	http.Redirect(w, r, "/keys/"+name+"?done=added", http.StatusSeeOther)
@@ -971,9 +1137,6 @@ type connectForm struct {
 	OAuth2      *policy.OAuth2
 	ForwardRole bool
 	KeyPool     bool
-	// NameFirst: the error asks to give the key's one value a name first,
-	// so the page links to that form.
-	NameFirst bool
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -991,7 +1154,7 @@ type agentSettings struct {
 	Project      string            `json:"project,omitempty"`
 	// ForwardRole sends the calling agent's name upstream (X-Keyring-Role).
 	ForwardRole bool `json:"forward_role,omitempty"`
-	// KeyPool uses every value of the key in turn (key_part is tried first).
+	// KeyPool uses every value of the key in turn, in the key's list order.
 	// A pointer, so an edit can tell "left out" (keep) from false (off).
 	KeyPool *bool `json:"key_pool,omitempty"`
 	// ExtraHeaders sends more secret values with each call: header name ->
@@ -1132,7 +1295,13 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		return
 	}
 	keyName := name
-	if len(row.Parts) > 0 {
+	switch {
+	case f.KeyPool && f.KeyPart != "":
+		again(http.StatusBadRequest, "Leave key_part out: a key pool uses the values of "+name+" in list order.")
+		return
+	case f.KeyPool:
+		// The pool names the key itself; its values are tried in list order.
+	case len(row.Parts) > 0:
 		has := map[string]bool{}
 		for _, p := range row.Parts {
 			has[p.Name] = true
@@ -1159,13 +1328,8 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 				f.ExtraHeaders[header] = name + "." + ref
 			}
 		}
-	} else if f.KeyPool {
-		f.NameFirst = true
-		again(http.StatusBadRequest, name+" has one value, and a key pool uses named values. Give it a name first (below), then add the other values.")
-		return
-	} else if f.KeyPart != "" {
-		f.NameFirst = true
-		again(http.StatusBadRequest, name+" has one value. Give it a name first (below), or leave key_part out.")
+	case f.KeyPart != "":
+		again(http.StatusBadRequest, name+" has one value; leave key_part out.")
 		return
 	}
 	next, err := policy.LoadAccess(b.rules().AccessFile)
@@ -1286,13 +1450,6 @@ func (b *Backend) known(name string) (bool, error) {
 	return ok, err
 }
 
-// knownValue reports whether name is one of the values the keys page lists:
-// a key with one value, or one value of a key with several (MODAL.id).
-func (b *Backend) knownValue(name string) (bool, error) {
-	names, err := b.keyChoices()
-	return slices.Contains(names, name), err
-}
-
 // row is the keys page row of name.
 func (b *Backend) row(name string) (keyRow, bool, error) {
 	rows, err := b.rows()
@@ -1337,8 +1494,22 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	svc := b.Proxy.Config().Services[sname]
+	// A pool is tested with the value it tries first.
+	names := svc.KeyNames()
+	if svc.KeyPool {
+		meta, err := b.loadMeta()
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		names = policy.PoolMembers(svc, keys, meta[svc.Key].order())
+	}
+	if len(names) == 0 {
+		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+		return
+	}
 	sent := map[string]string{}
-	for _, kn := range svc.KeyNames() {
+	for _, kn := range names {
 		v, ok := keys[kn]
 		if !ok {
 			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
@@ -1348,7 +1519,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	status, testErr := b.Proxy.TestKey(ctx, svc, sent[svc.Key])
+	status, testErr := b.Proxy.TestKey(ctx, svc, sent[names[0]])
 	m := KeyMeta{CheckedAt: b.Now().UTC()}
 	switch {
 	case testErr != nil:
@@ -1377,6 +1548,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	if err == nil {
 		m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
 		m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
+		m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
 		meta[name] = m
 		err = b.saveMeta(meta)
 	}
@@ -1414,18 +1586,14 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.unknownKey(w, r, sid, err)
 		return
 	}
-	// A key with several values replaces or adds one named part.
+	// A key with several values replaces one of them; Add a value adds one.
 	target := name
 	if part := strings.TrimSpace(r.PostFormValue("part")); part != "" || len(row.Parts) > 0 {
-		if len(row.Parts) == 0 || !store.ValidPart(part) {
+		if !slices.ContainsFunc(row.Parts, func(p keyPart) bool { return p.Name == part }) {
 			http.Redirect(w, r, "/keys/"+name+"?error=part", http.StatusSeeOther)
 			return
 		}
 		target = name + "." + part
-		if len(row.Parts) >= maxParts && !slices.ContainsFunc(row.Parts, func(p keyPart) bool { return p.Name == part }) {
-			http.Redirect(w, r, "/keys/"+name+"?error=too-many", http.StatusSeeOther)
-			return
-		}
 	}
 	keys, err := store.Load(b.StorePath)
 	if err != nil {
@@ -1442,7 +1610,7 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 	b.Proxy.Swap(b.Proxy.Config(), keys)
 	if meta, err := b.loadMeta(); err == nil {
 		now := b.Now().UTC()
-		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: meta[name].CreatedAt} // new value: not tested, no longer leaked
+		meta[name] = meta[name].renewed(now) // new value: not tested, no longer leaked
 		_ = b.saveMeta(meta)
 	}
 	b.Admin.Audit("key_replaced", sid, map[string]any{"key": target})

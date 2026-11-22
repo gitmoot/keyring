@@ -83,7 +83,7 @@ func (c *testClock) add(d time.Duration) {
 
 func poolHandler(t *testing.T, base string, up *httptest.Server, keys map[string]string) (*Handler, *bytes.Buffer, *testClock) {
 	t.Helper()
-	svc := policy.Service{Base: base, Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true}
+	svc := policy.Service{Base: base, Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true}
 	cfg := &policy.Config{
 		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
 		AccessList: policy.AccessList{
@@ -96,6 +96,7 @@ func poolHandler(t *testing.T, base string, up *httptest.Server, keys map[string
 	}
 	audit := &bytes.Buffer{}
 	h := New(cfg, keys, audit)
+	h.SetValueOrder(map[string][]string{"CLAUDE_KEYS": {"main", "backup1", "backup2"}})
 	target, _ := url.Parse(up.URL)
 	h.client.Transport = upstreamAt{target}
 	clock := &testClock{t: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)}
@@ -220,17 +221,17 @@ func TestKeyPoolValuesBelongToThePool(t *testing.T) {
 	cfg := &policy.Config{
 		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
 		AccessList: policy.AccessList{Services: map[string]policy.Service{
-			"claude-api": {Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true},
+			"claude-api": {Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true},
 			"other":      {Base: "https://example.com", Key: "CLAUDE_KEYS.backup1", Auth: policy.AuthBearer},
 		}, Roles: map[string]policy.Role{}},
 	}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "key pool") {
 		t.Fatalf("err = %v", err)
 	}
-	bad := policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEY", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true}
+	bad := policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true}
 	cfg.Services = map[string]policy.Service{"claude-api": bad}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "several values") {
-		t.Fatalf("pool on a single-value key: %v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "leave key_part out") {
+		t.Fatalf("pool naming one value: %v", err)
 	}
 }
 
@@ -270,7 +271,7 @@ func TestKeyPoolLeavesCloudflareUploadAlone(t *testing.T) {
 	cfg := &policy.Config{
 		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
 		AccessList: policy.AccessList{
-			Services: map[string]policy.Service{"api": {Base: cfBase, Key: "CF_TOKENS.main", Auth: policy.AuthBearer, KeyPool: true}},
+			Services: map[string]policy.Service{"api": {Base: cfBase, Key: "CF_TOKENS", Auth: policy.AuthBearer, KeyPool: true}},
 			Roles:    map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"api": allowAll}}},
 		},
 	}
@@ -472,8 +473,8 @@ func TestKeyPoolStatusPerServiceSendability(t *testing.T) {
 		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
 		AccessList: policy.AccessList{
 			Services: map[string]policy.Service{
-				"claude-api":   {Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true},
-				"claude-query": {Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthQuery, Param: "key", KeyPool: true},
+				"claude-api":   {Base: up.URL, Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true},
+				"claude-query": {Base: up.URL, Key: "CLAUDE_KEYS", Auth: policy.AuthQuery, Param: "key", KeyPool: true},
 			},
 			Roles: map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken), Access: map[string]policy.Access{"claude-api": allowAll, "claude-query": allowAll}}},
 		},
