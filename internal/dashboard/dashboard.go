@@ -1537,44 +1537,42 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-test", http.StatusSeeOther)
 		return
 	}
-	keys, err := store.Load(b.StorePath)
-	if err != nil {
-		b.fail(w, sid, err)
-		return
-	}
 	svc := b.Proxy.Config().Services[sname]
-	// A pool is tested as a call goes: its values in the order the proxy
-	// tries them now, on to the next only when the service refused one the
-	// way a call moves on (server.TestPool), so the key works if a call
-	// through the pool would.
-	names := svc.KeyNames()
-	if svc.KeyPool {
-		names = b.Proxy.PoolTries(svc)
-	}
-	if len(names) == 0 {
-		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
-		return
-	}
-	sent := map[string]string{}
-	for _, kn := range names {
-		v, ok := keys[kn]
-		if !ok {
-			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
-			return
-		}
-		sent[kn] = v
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	var status int
+	var sent map[string]string
 	var testErr error
 	if svc.KeyPool {
-		values := make([]string, len(names))
-		for i, kn := range names {
-			values[i] = sent[kn]
+		// A pool is tested as a call goes (server.TestPool): the proxy
+		// takes its values and their order from one snapshot and moves on
+		// only when the service refused one the way a call moves on, so
+		// the key works if a call through the pool would.
+		status, sent, testErr = b.Proxy.TestPool(ctx, sname)
+		if errors.Is(testErr, server.ErrNoPoolValue) {
+			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+			return
 		}
-		status, testErr = b.Proxy.TestPool(ctx, svc, values)
 	} else {
+		keys, err := store.Load(b.StorePath)
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		names := svc.KeyNames()
+		if len(names) == 0 {
+			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+			return
+		}
+		sent = map[string]string{}
+		for _, kn := range names {
+			v, ok := keys[kn]
+			if !ok {
+				http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+				return
+			}
+			sent[kn] = v
+		}
 		status, testErr = b.Proxy.TestKey(ctx, svc, sent[names[0]])
 	}
 	m := KeyMeta{CheckedAt: b.Now().UTC()}
