@@ -165,6 +165,26 @@ func ValueOrder(metaPath string) (map[string][]string, error) {
 	return valueOrder(meta), nil
 }
 
+// PutValuesFirst moves, for each key, the named value (key -> value name) to
+// the front of the key's list in the key notes at metaPath, so a key pool
+// tries it first. Used when a v0.14.18 pool that named one value is
+// converted to name the key (policy.ConvertNamedValuePools).
+func PutValuesFirst(metaPath string, first map[string]string) error {
+	b := &Backend{MetaPath: metaPath}
+	meta, err := b.loadMeta()
+	if err != nil {
+		return err
+	}
+	for key, part := range first {
+		m := meta[key]
+		note := ValueNote{Name: part, Label: m.label(part)}
+		rest := slices.DeleteFunc(slices.Clone(m.Values), func(n ValueNote) bool { return n.Name == part })
+		m.Values = append([]ValueNote{note}, rest...)
+		meta[key] = m
+	}
+	return b.saveMeta(meta)
+}
+
 func valueOrder(meta map[string]KeyMeta) map[string][]string {
 	out := map[string][]string{}
 	for key, m := range meta {

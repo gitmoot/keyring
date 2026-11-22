@@ -33,12 +33,12 @@ The key never leaves the keyring machine. The agent holds only a role token, whi
 
 ## What it does
 
-- **API proxy.** Bearer (or another `Authorization` scheme, such as `Key`), header or query-parameter keys, up to two extra secret headers, keys with several values, and [key pools](docs/proxy.md#key-pools-several-keys-behind-one-service) that switch to the next key when one is refused or runs out. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
+- **API proxy.** Bearer (or another `Authorization` scheme, such as `Key`), header or query-parameter keys, up to two extra secret headers, keys with up to 32 values (numbered or named, with optional labels), and [key pools](docs/proxy.md#key-pools-several-keys-behind-one-service) that try a key's values in the order you set and switch to the next when one is refused or runs out. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
 - **Request signing without handing out the private key.** Apple Ads and App Store Connect JWTs, Sign in with Apple client secrets, APNs push, raw Ed25519, and minisign release signatures. [Apple](docs/apple.md) · [Signing](docs/signing.md)
 - **OAuth with refresh.** The keyring holds the refresh token and mints access tokens, for Gmail, Drive and any OAuth 2 provider; Google accounts can also come from `gcloud`. [OAuth](docs/oauth.md) · [Google via gcloud](docs/google-gcloud.md)
 - **Per-agent access.** Each agent (a *role*) gets only the services, methods and paths it was given, with daily request and byte limits and an end date. Agents find services with `keyring services --search`, ask with `keyring request`, and the owner approves in one tap. [Finding services](docs/proxy.md#finding-services)
 - **Projects.** Group a client's services, give an agent a whole project, pause it or let it expire in one place. [Projects](docs/projects.md)
-- **Dashboard and audit.** Add, test, replace, rename and upload keys and their named values; see each key's status and use; approve agents; search the audit log of every call. [Dashboard](docs/dashboard.md)
+- **Dashboard and audit.** Add, test, replace, rename and upload keys; add, label, order, rename and remove their values; see each key's status and use; approve agents; search the audit log of every call. [Dashboard](docs/dashboard.md)
 - **Consent links.** Send a person a one-time link to connect their own account (OAuth sign-in) or paste a key, instead of sending it in a chat. [Consent links](docs/consent-links.md)
 - **Egress tunnels.** Let an agent's traffic leave through a person's own proxy, with the proxy credential kept in the keyring. [Egress proxy](docs/egress-proxy.md)
 - **One keyring per person.** Instance mode runs a small keyring per user under a supervisor, for example on Cloudflare Containers. [Instance mode](docs/instance-mode.md)

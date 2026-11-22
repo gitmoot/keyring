@@ -780,6 +780,31 @@ func LoadAccess(path string) (AccessList, error) {
 	return access, nil
 }
 
+// ConvertNamedValuePools rewrites, in access, each key_pool service that
+// names one value of its key (key "CLAUDE_KEYS.main", the only form v0.14.18
+// accepted) to name the key itself, as a pool now must. It returns, per key,
+// the value name such a pool sent first (key -> part), so the caller can
+// keep that value first in the key's list; nil when nothing changed.
+func ConvertNamedValuePools(access *AccessList) map[string]string {
+	var first map[string]string
+	for _, name := range slices.Sorted(maps.Keys(access.Services)) {
+		svc := access.Services[name]
+		key, part, named := strings.Cut(svc.Key, ".")
+		if !svc.KeyPool || !named {
+			continue
+		}
+		if first == nil {
+			first = map[string]string{}
+		}
+		if _, seen := first[key]; !seen {
+			first[key] = part
+		}
+		svc.Key = key
+		access.Services[name] = svc
+	}
+	return first
+}
+
 // SaveAccess validates access against rules, then replaces the access file
 // atomically. An invalid access list is never written.
 func SaveAccess(rules Rules, access AccessList) (*Config, error) {

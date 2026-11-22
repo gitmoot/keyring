@@ -326,7 +326,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <dt>Agents</dt><dd>{{range .Agents}}<a class="chip" href="/access/{{.}}/{{$.Name}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 {{if .F.FixedHeaders}}<dt>Fixed headers</dt><dd class="mono">{{range $k, $v := .F.FixedHeaders}}{{$k}}: {{$v}}<br>{{end}}</dd>{{end}}
 {{with .OAuth2}}<dt>OAuth client ID</dt><dd class="mono">{{.ClientID}}</dd><dt>Token URL</dt><dd class="mono">{{.TokenURL}}</dd>{{if .ClientSecretKey}}<dt>Client secret</dt><dd class="mono">{{.ClientSecretKey}}{{if not $.SecretStored}} <span class="mute">(no value stored)</span>{{end}}</dd>{{end}}{{with .Scopes}}<dt>Scopes</dt><dd class="mono">{{range .}}{{.}}<br>{{end}}</dd>{{end}}{{end}}
-{{if .F.KeyPool}}<dt>Key pool</dt><dd>every value of the key, <span class="mono">{{.F.Key}}</span> first; each value's state and use are on the <a href="/keys/{{.F.KeyBase}}">key's page</a></dd>{{end}}
+{{if .F.KeyPool}}<dt>Key pool</dt><dd>every value of <span class="mono">{{.F.Key}}</span>, in the key's list order; each value's state and use are on the <a href="/keys/{{.F.KeyBase}}">key's page</a></dd>{{end}}
 {{if .F.ForwardRole}}<dt>Agent name</dt><dd>sent as <span class="mono">X-Keyring-Role</span></dd>{{end}}
 {{if .F.ExtraHeaders}}<dt>Extra secret headers</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
 </dl></div>

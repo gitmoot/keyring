@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/policy"
@@ -96,59 +98,132 @@ func TestRenameValueAndKeyMoveEveryReference(t *testing.T) {
 	}
 }
 
-// The one value of a plain key gets a name (API_KEY becomes API_KEY.main);
-// the service that used API_KEY uses API_KEY.main and keeps working.
-func TestNamingTheOnlyValueKeepsItsServiceWorking(t *testing.T) {
+// Owner, 2026-11-22: values need no names. Values added without one are
+// numbered 1, 2, 3; a number is never given again, even after its value is
+// removed. Each value may have a label (at most 80 characters).
+func TestUnnamedValuesAreNumberedNeverReused(t *testing.T) {
 	e := newEnv(t)
-	if loc := e.request("POST", "/keys/API_KEY/rename-value", url.Values{"new_part": {"main"}, "password": {password}}).Header().Get("Location"); loc != "/keys/API_KEY?done=value-named" {
-		t.Fatalf("name the value: %s", loc)
+	if loc := e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111", "sk-ant-c-2222"},
+		"label": {"Jerry's Max", "", ""}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=added" {
+		t.Fatalf("add: %s", loc)
 	}
 	keys := mustKeys(t, e)
-	if _, plain := keys["API_KEY"]; plain || keys["API_KEY.main"] != oldValue {
+	if keys["CLAUDE_KEYS.1"] != "sk-ant-a-0000" || keys["CLAUDE_KEYS.2"] != "sk-ant-b-1111" || keys["CLAUDE_KEYS.3"] != "sk-ant-c-2222" {
 		t.Fatalf("stored names = %v", sortedNames(keys))
 	}
-	if got := e.proxy.Config().Services["api"].Key; got != "API_KEY.main" {
-		t.Fatalf("service key = %s", got)
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/remove-value", url.Values{"part": {"3"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-removed" {
+		t.Fatalf("remove 3: %s", loc)
 	}
-	if code := e.proxyCall(); code != 200 || e.seenAuth.Load() != "Bearer "+oldValue {
-		t.Fatalf("call after naming: %d", code)
+	add := func(label string) string {
+		return e.request("POST", "/keys/CLAUDE_KEYS/add-value", url.Values{"value": {"sk-ant-d-3333"}, "label": {label}, "password": {password}}).Header().Get("Location")
+	}
+	if loc := add(strings.Repeat("x", 81)); loc != "/keys/CLAUDE_KEYS?error=label" {
+		t.Fatalf("81-character label: %s", loc)
+	}
+	if loc := add("Spare"); loc != "/keys/CLAUDE_KEYS?done=value-added" {
+		t.Fatalf("add a value: %s", loc)
+	}
+	keys = mustKeys(t, e)
+	if _, reused := keys["CLAUDE_KEYS.3"]; reused || keys["CLAUDE_KEYS.4"] != "sk-ant-d-3333" {
+		t.Fatalf("stored names after remove and add = %v", sortedNames(keys))
+	}
+	page := html.UnescapeString(e.request("GET", "/keys/CLAUDE_KEYS", nil).Body.String())
+	if !strings.Contains(page, "1 · Jerry's Max") || !strings.Contains(page, "4 · Spare") || strings.Contains(page, "sk-ant-") {
+		t.Fatal("the key page does not show the numbered values with their labels")
 	}
 }
 
-// Owner, 2026-11-22: pasting key-pool settings on a key added with one plain
-// value said only "leave key_part out". It now says to name the value first;
-// once named and given a backup, the same paste makes a working pool.
-func TestPoolSettingsOnAOneValueKey(t *testing.T) {
-	e := newEnv(t)
+// recordingAPI answers 200 and records the x-api-key of each call; keys in
+// reject answer 401.
+func recordingAPI(t *testing.T, reject ...string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "sk-ant-b1-1111" {
+		key := r.Header.Get("x-api-key")
+		mu.Lock()
+		seen = append(seen, key)
+		mu.Unlock()
+		if slices.Contains(reject, key) {
 			w.WriteHeader(401)
 			io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
 			return
 		}
 		io.WriteString(w, `{"ok":true}`)
 	}))
-	defer up.Close()
-	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-main-0000"}, "password": {password}})
-	pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","key_part":"main","key_pool":true}`
-	w := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}})
-	if body := html.UnescapeString(w.Body.String()); w.Code != http.StatusBadRequest || !strings.Contains(body, "Give it a name first (below)") || !strings.Contains(body, `href="#name-value"`) || !strings.Contains(body, `id="name-value"`) {
-		t.Fatalf("paste on a one-value key: %d", w.Code)
+	t.Cleanup(up.Close)
+	return up, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
 	}
-	if loc := e.request("POST", "/keys/CLAUDE_KEYS/rename-value", url.Values{"new_part": {"main"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-named" {
-		t.Fatalf("name the value: %s", loc)
+}
+
+// Owner, 2026-11-22: the key-pool paste failed. The paste names no value: a
+// pool over a key with unnamed values tries them in list order and moves on
+// when one is refused. key_part with key_pool is refused.
+func TestPastedPoolFailsOverInListOrder(t *testing.T) {
+	e := newEnv(t)
+	up, seen := recordingAPI(t, "sk-ant-a-0000")
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+	settings := `"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","key_pool":true`
+	w := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {`{` + settings + `,"key_part":"1"}`}, "password": {password}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(html.UnescapeString(w.Body.String()), "Leave key_part out") {
+		t.Fatalf("key_part with key_pool: %d", w.Code)
 	}
-	if loc := e.request("POST", "/keys/CLAUDE_KEYS/replace", url.Values{"part": {"backup1"}, "value": {"sk-ant-b1-1111"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=replaced" {
-		t.Fatalf("add backup: %s", loc)
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {`{` + settings + `}`}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
+		t.Fatalf("paste: %s", loc)
 	}
-	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
-		t.Fatalf("paste after naming: %s", loc)
+	if got := e.proxy.Config().Services["claude-api"].Key; got != "CLAUDE_KEYS" {
+		t.Fatalf("pool key = %s", got)
 	}
-	if w := e.saveCell("phobos", "claude-api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}}); w.Header().Get("Location") != "/access?done=saved" {
-		t.Fatalf("grant: %d", w.Code)
-	}
+	grantPhobos(t, e, "claude-api")
 	if code := e.call("POST", "/claude-api/v1/messages", token); code != 200 {
 		t.Fatalf("pooled call: %d", code)
+	}
+	if got := seen(); !slices.Equal(got, []string{"sk-ant-a-0000", "sk-ant-b-1111"}) {
+		t.Fatalf("upstream saw %d calls in another order", len(got))
+	}
+}
+
+// Owner, 2026-11-22: pool order is list order. Move up puts a value before
+// the one above it, and the pool tries it first from then on.
+func TestMoveUpChangesWhichValueAPoolTriesFirst(t *testing.T) {
+	e := newEnv(t)
+	up, seen := recordingAPI(t)
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+	pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","key_pool":true}`
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
+		t.Fatalf("paste: %s", loc)
+	}
+	grantPhobos(t, e, "claude-api")
+	e.call("POST", "/claude-api/v1/messages", token)
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/move-up", url.Values{"part": {"2"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-moved" {
+		t.Fatalf("move up: %s", loc)
+	}
+	e.call("POST", "/claude-api/v1/messages", token)
+	if got := seen(); !slices.Equal(got, []string{"sk-ant-a-0000", "sk-ant-b-1111"}) {
+		t.Fatal("the pool did not try the moved-up value first")
+	}
+}
+
+// Adding a value to a key with one plain value numbers both (API_KEY becomes
+// API_KEY.1, the new one API_KEY.2); the service that sent API_KEY sends
+// API_KEY.1 and keeps working.
+func TestAddingAValueToAPlainKeyKeepsItsService(t *testing.T) {
+	e := newEnv(t)
+	if loc := e.request("POST", "/keys/API_KEY/add-value", url.Values{"value": {"sk-dash-second-0123456789"}, "password": {password}}).Header().Get("Location"); loc != "/keys/API_KEY?done=value-added" {
+		t.Fatalf("add a value: %s", loc)
+	}
+	keys := mustKeys(t, e)
+	if _, plain := keys["API_KEY"]; plain || keys["API_KEY.1"] != oldValue || keys["API_KEY.2"] != "sk-dash-second-0123456789" {
+		t.Fatalf("stored names = %v", sortedNames(keys))
+	}
+	if got := e.proxy.Config().Services["api"].Key; got != "API_KEY.1" {
+		t.Fatalf("service key = %s", got)
+	}
+	if code := e.proxyCall(); code != 200 || e.seenAuth.Load() != "Bearer "+oldValue {
+		t.Fatalf("call after adding a value: %d", code)
 	}
 }
 
@@ -156,14 +231,14 @@ func TestPoolSettingsOnAOneValueKey(t *testing.T) {
 // offers a button for more rows.
 func TestAddKeyWithOneOrManyNamedValues(t *testing.T) {
 	e := newEnv(t)
-	if !strings.Contains(e.request("GET", "/new/key", nil).Body.String(), `data-addrow="part-rows"`) {
+	if !strings.Contains(e.request("GET", "/new/key", nil).Body.String(), `data-addrow="value-rows"`) {
 		t.Fatal("the add-key form has no Add another value button")
 	}
 	form := func(name string, n int) url.Values {
-		f := url.Values{"name": {name}, "value": {""}, "password": {password}}
+		f := url.Values{"name": {name}, "password": {password}}
 		for i := range n {
 			f.Add("part", fmt.Sprintf("v%d", i))
-			f.Add("part_value", fmt.Sprintf("value-%d-0123456789", i))
+			f.Add("value", fmt.Sprintf("value-%d-0123456789", i))
 		}
 		return f
 	}
@@ -181,47 +256,47 @@ func TestAddKeyWithOneOrManyNamedValues(t *testing.T) {
 	}
 }
 
-// One value of a key can be removed, unless a service sends it: as its key,
-// as an extra header, or as the value a key pool tries first. Another pooled
-// value just leaves the pool.
+// One value of a key can be removed, unless a service sends it: as its key
+// or as an extra header. A key pool names the key, so a pooled value just
+// leaves the pool, until one value is left.
 func TestRemoveOneValue(t *testing.T) {
 	e := newEnv(t)
-	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {""},
-		"part": {"main", "backup1", "backup2"}, "part_value": {"sk-ant-main-0000", "sk-ant-b1-1111", "sk-ant-b2-2222"}, "password": {password}})
-	e.withService("claude-api", policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-main-0000", "sk-ant-b1-1111", "sk-ant-b2-2222"},
+		"part": {"main", "backup1", "backup2"}, "password": {password}})
+	e.withService("claude-api", policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
 	addModal(e)
 	e.request("POST", "/keys/MODAL/connect", url.Values{"service": {"modal-ocr"}, "base": {"https://ws.modal.run"}, "auth": {"header"},
 		"header": {"Modal-Key"}, "key_part": {"id"}, "part_header_secret": {"Modal-Secret"}, "password": {password}})
-	e.request("POST", "/keys", url.Values{"name": {"SOLO"}, "value": {""}, "part": {"only"}, "part_value": {"solo-value-0123456789"}, "password": {password}})
+	e.request("POST", "/keys", url.Values{"name": {"SOLO"}, "value": {"solo-value-0123456789"}, "part": {"only"}, "password": {password}})
 	remove := func(key, part string) string {
 		return e.request("POST", "/keys/"+key+"/remove-value", url.Values{"part": {part}, "password": {password}}).Header().Get("Location")
 	}
-	if loc := remove("CLAUDE_KEYS", "backup1"); loc != "/keys/CLAUDE_KEYS?done=value-removed" {
-		t.Fatalf("remove a pooled backup: %s", loc)
+	for _, part := range []string{"backup1", "main"} {
+		if loc := remove("CLAUDE_KEYS", part); loc != "/keys/CLAUDE_KEYS?done=value-removed" {
+			t.Fatalf("remove pooled %s: %s", part, loc)
+		}
 	}
 	for _, c := range []struct{ key, part, want string }{
-		{"CLAUDE_KEYS", "main", "/keys/CLAUDE_KEYS?error=value-pool-first&service=claude-api"},
+		{"CLAUDE_KEYS", "backup2", "/keys/CLAUDE_KEYS?error=value-only"},
 		{"MODAL", "secret", "/keys/MODAL?error=value-used&service=modal-ocr"},
 		{"MODAL", "id", "/keys/MODAL?error=value-used&service=modal-ocr"},
 		{"SOLO", "only", "/keys/SOLO?error=value-only"},
-		{"API_KEY", "", "/keys/API_KEY?error=value-plain"},
+		{"API_KEY", "", "/keys/API_KEY?error=value-only"},
 	} {
 		if loc := remove(c.key, c.part); loc != c.want {
 			t.Errorf("remove %s.%s: %s", c.key, c.part, loc)
 		}
 	}
 	keys := mustKeys(t, e)
-	if _, ok := keys["CLAUDE_KEYS.backup1"]; ok {
-		t.Fatal("backup1 is still stored")
+	for _, gone := range []string{"CLAUDE_KEYS.backup1", "CLAUDE_KEYS.main"} {
+		if _, ok := keys[gone]; ok {
+			t.Errorf("%s is still stored", gone)
+		}
 	}
-	for _, kept := range []string{"CLAUDE_KEYS.main", "CLAUDE_KEYS.backup2", "MODAL.id", "MODAL.secret", "SOLO.only", "API_KEY"} {
+	for _, kept := range []string{"CLAUDE_KEYS.backup2", "MODAL.id", "MODAL.secret", "SOLO.only", "API_KEY"} {
 		if _, ok := keys[kept]; !ok {
 			t.Errorf("%s was removed", kept)
 		}
-	}
-	page := html.UnescapeString(e.request("GET", "/keys/CLAUDE_KEYS?error=value-pool-first&service=claude-api", nil).Body.String())
-	if !strings.Contains(page, "Service claude-api is a key pool that tries this value first") {
-		t.Fatal("the refusal does not say which pool")
 	}
 }
 

@@ -29,17 +29,21 @@ to a distinct store key, not a credential value. For Cloudflare Access, use
 primary credential. Header names are case-insensitive; duplicates, primary
 collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
-**A key with several values** (dashboard): on **Add key**, open "This key has named
-values", name each value and paste it, for example `MODAL` with `id` ← `wk-…` and
-`secret` ← `ws-…` (one to 32 values; **Add another value** adds rows). They are stored
-as `MODAL.id` and `MODAL.secret` and shown as one
-key with its value names, never the values. On the key's page, **Connect to a service**
+**A key with several values** (dashboard): on **Add key**, paste one value per row (one
+to 32 values; **Add another value** adds rows). Names are optional: values without one
+are numbered `1`, `2`, `3` (stored as `CLAUDE_KEYS.1`, `CLAUDE_KEYS.2`, …), and a number
+is never given again, even after its value is removed. Name a value where a service must
+tell them apart, for example `MODAL` with `id` ← `wk-…` and `secret` ← `ws-…`, stored as
+`MODAL.id` and `MODAL.secret`. Each value may also have a label, free text up to 80
+characters ("Jerry's Max account") that is shown next to it and never routes. The key is
+shown with its value names and labels, never the values. On the key's page, **Connect to a service**
 asks which value is sent as the key and, optionally, a header for each other value
 (Modal: `id` as `Modal-Key`, `secret` as `Modal-Secret`); pasted settings say the same
-with `"key_part": "id", "extra_headers": {"Modal-Secret": "secret"}`. **Replace or add a
-value** names the value; **Remove value** deletes one that no service sends; **Delete**
-removes all of them. A key added with one plain value gets named values with **Give this
-value a name** on its page (`KEY` becomes `KEY.main`; services follow). **Rename** renames
+with `"key_part": "id", "extra_headers": {"Modal-Secret": "secret"}`. **Add a value**
+adds one (a key with one plain value becomes `KEY.1` and `KEY.2`; services that sent
+`KEY` send `KEY.1`), **Order and labels** moves a value up the list and sets its label,
+**Replace** replaces one, **Remove value** deletes one that no service sends, and
+**Delete** removes all of them. **Rename** renames
 the key or a value and changes every service that names it. Access files may name the
 values directly (`"key": "MODAL.id"`). A store holding such values cannot be read by a
 keyring older than this release, so delete them before downgrading.
@@ -123,26 +127,25 @@ A wrong name says what was meant: a call answers `403 no service named cloudflar
 
 ## Key pools: several keys behind one service
 
-A service with `"key_pool": true` uses every value of its key: one key such as `CLAUDE_KEYS` holding `main`, `backup1`, `backup2`. Agents call one service (`claude-api`) and never know which value answered.
+A service with `"key_pool": true` uses every value of its key: one key such as `CLAUDE_KEYS` holding `1`, `2`, `3` (or named values). Agents call one service (`claude-api`) and never know which value answered.
 
 ```json
-"claude-api": {"base": "https://api.anthropic.com", "key": "CLAUDE_KEYS.main", "auth": "header", "header": "x-api-key", "key_pool": true}
+"claude-api": {"base": "https://api.anthropic.com", "key": "CLAUDE_KEYS", "auth": "header", "header": "x-api-key", "key_pool": true}
 ```
 
-- `key` names the value tried first; the others follow by name. A value added to the key later joins the pool. Every value of a pooled key may be sent upstream, so no other service may use one (except another pool of the same key). Pools work with `bearer`, `header` and `query` services, without `extra_headers`.
+- `key` names the key itself, never one of its values. The values are tried in the key's list order, kept by the dashboard (**Move up** on the key's page; values the list does not know follow by number, then by name). A key with one plain value is a pool of one. A value added to the key later joins the pool, last. Every value of a pooled key may be sent upstream, so no other service may use one (except another pool of the same key). Pools work with `bearer`, `header` and `query` services, without `extra_headers`.
 - Each call goes out with the first value that is not set aside. If the provider says the value is the problem, the value is set aside and **the same request goes out again with the next value**: the agent only sees the answer that worked. If every value is refused, the agent gets the last refusal.
 - A value is set aside on 401 or 403 (rejected), 402 (billing) and 429 (rate limit), and for the Anthropic API on a 429 without `retry-after` (monthly spend cap) and on a 400 that says a spend limit or the credit balance stopped it. It is set aside for the `retry-after` time of a 429 (seconds or an HTTP date; 1 s to 1 h), otherwise for an hour (a minute for another provider's 429), counted from when the refusal came back. Other answers, such as a malformed request (other 400s) or the provider being down (5xx), are passed on without trying another value: every value would fail the same way.
 - What is known about a value lives in memory, is tied to that stored value (replacing it starts over, so does putting an earlier value back, and an answer to a value no longer stored is ignored) and starts empty after a restart. Values that are set aside are still tried, last, rather than refusing the call.
-- A value that cannot be sent in a header (a line break or control character pasted with it) is skipped by a `bearer` or `header` pool; the call is refused only when no value can be sent. The key page shows the value failing when no service pooling it can send it, and otherwise names the services that cannot. A value stored under the bare key name (`CLAUDE_KEYS`) is not a pool member.
+- A value that cannot be sent in a header (a line break or control character pasted with it) is skipped by a `bearer` or `header` pool; the call is refused only when no value can be sent. The key page shows the value failing when no service pooling it can send it, and otherwise names the services that cannot.
 - The Cloudflare asset upload carries the caller's upload token, never a pool value, and its answer says nothing about the pool.
 - To send a request again the keyring keeps its body, up to 32 MiB; a larger body goes out once, with the first value in line. A streamed answer is never retried once it has started: every refusal above comes before the answer begins.
 - The key's dashboard page shows each value's state (working, busy with when it is back, failing with the reason, ready), its calls today and over 7 days, refusals today and last use. The key's status says how many values are set aside, and turns failing when all are; a pool with any value stored is not shown as having no value. Each audit line of a pooled call names the value that answered (`"key": "CLAUDE_KEYS.backup1"`, never its value) and how many were tried (`"attempts"`).
-- Turn it on with `"key_pool": true` in pasted settings when connecting the key (with `key_part` naming the first value) or on the service's edit page; on the edit page, settings that leave `key_pool` out keep it as it is and `"key_pool": false` turns it off.
+- Turn it on with `"key_pool": true` in pasted settings when connecting the key (without `key_part`: a paste with both is refused) or on the service's edit page; on the edit page, settings that leave `key_pool` out keep it as it is and `"key_pool": false` turns it off.
+- Upgrading from v0.14.18: that release took a pool naming one value (`"key": "CLAUDE_KEYS.main"`). Such a pool keeps working: `keyring check` accepts it, and at the next start the service rewrites it to `"key": "CLAUDE_KEYS"` and puts `main` first in the key's list, so the pool tries the same value first. Nothing else changes.
 
 Setting one up in the dashboard:
 
-1. A new key: **Add key**, name it (`CLAUDE_KEYS`), open "This key has named values" and add `main` with its value, plus any backups (`backup1`, …). A key that already exists with one plain value: on its page, **Give this value a name** with `main` (services using `CLAUDE_KEYS` move to `CLAUDE_KEYS.main`).
-2. Add more values with **Replace or add a value** (a new value name adds one), up to 32.
-3. Under **Connect to a service**, paste `{"service":"claude-api","base":"https://api.anthropic.com","auth":"header","header":"x-api-key","key_part":"main","key_pool":true}`. If a service already uses the key, turn the pool on there instead, because no other service may use a pooled key's values: on that service's edit page keep the key `CLAUDE_KEYS.main` and paste the same settings without `service` and `key_part`.
-
-Pasting `key_part` or `key_pool` on a key with one plain value is refused with a pointer to **Give this value a name**.
+1. **Add key**, name it (`CLAUDE_KEYS`) and paste one Claude key per row, with an optional label each (**Add another value** for more, up to 32). They are numbered `1`, `2`, `3`. On an existing key, **Add a value** adds one.
+2. Under **Order and labels**, put the value to try first at the top with **Move up**.
+3. Under **Connect to a service**, paste `{"service":"claude-api","base":"https://api.anthropic.com","auth":"header","header":"x-api-key","key_pool":true}`, then grant the agents the service. If a service already uses the key, turn the pool on there instead, because no other service may use a pooled key's values: on that service's edit page pick the key `CLAUDE_KEYS` and paste the same settings without `service`.

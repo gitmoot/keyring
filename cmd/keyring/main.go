@@ -245,7 +245,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func check(configPath, storePath string, stdout io.Writer) error {
-	cfg, err := policy.Load(configPath)
+	cfg, err := loadConfig(configPath, "", stdout)
 	if err != nil {
 		return err
 	}
@@ -291,7 +291,7 @@ func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 }
 
 func serve(configPath, storePath string, stderr io.Writer) error {
-	cfg, err := policy.Load(configPath)
+	cfg, err := loadConfig(configPath, metaPathOf(storePath), stderr)
 	if err != nil {
 		return err
 	}
@@ -332,7 +332,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	// changes serializes the dashboard's writes, consent links and the
 	// SIGHUP reload.
 	changes := &sync.Mutex{}
-	metaPath := filepath.Join(filepath.Dir(storePath), "keymeta.json")
+	metaPath := metaPathOf(storePath)
 	// Key pools try a key's values in the list order the dashboard keeps.
 	if order, err := dashboardpkg.ValueOrder(metaPath); err != nil {
 		fmt.Fprintf(stderr, "key value order not loaded (key pools use name order): %v\n", err)
