@@ -966,21 +966,31 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 // oauth2 service, key is the refresh token: the test mints an access token
 // with it and the client secret in use.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
+	resp, err := h.testRequest(ctx, svc, key)
+	if err != nil {
+		return 0, err
+	}
+	return closeTest(resp), nil
+}
+
+// testRequest sends the service's test request with key; the caller closes
+// the answer.
+func (h *Handler) testRequest(ctx context.Context, svc policy.Service, key string) (*http.Response, error) {
 	if svc.SignOnly() {
-		return 0, errors.New("sign-only service has no upstream test")
+		return nil, errors.New("sign-only service has no upstream test")
 	}
 	if svc.TestPath == "" {
-		return 0, errors.New("the service has no test request")
+		return nil, errors.New("the service has no test request")
 	}
 	if why := h.snap.Load().config.ProjectStopped(svc, h.now()); why != "" {
-		return 0, errors.New(projectStoppedNote(svc.Project, why))
+		return nil, errors.New(projectStoppedNote(svc.Project, why))
 	}
 	snap := h.snap.Load()
 	if svc.Auth == policy.AuthOAuth2 {
 		_, secret := oauthSecrets(svc, snap.keys)
 		token, err := h.accessToken(ctx, svc, key, secret)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		key = token
 	}
@@ -993,7 +1003,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	for name, storeKey := range svc.ExtraHeaders {
 		value := snap.keys[storeKey]
 		if value == "" {
-			return 0, errors.New("key not loaded")
+			return nil, errors.New("key not loaded")
 		}
 		header.Set(name, value)
 	}
@@ -1002,7 +1012,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		googleAccount = snap.config.GoogleAccounts[svc.GoogleAccount]
 		token, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		key = token
 		if googleAccount.QuotaProject != "" {
@@ -1010,26 +1020,50 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		}
 	}
 	if name := unsendableKey(svc, key, snap.keys); name != "" {
-		return 0, errors.New("stored key " + name + " contains a line break or control character")
+		return nil, errors.New("stored key " + name + " contains a line break or control character")
 	}
 	out, err := buildOutbound(ctx, svc, key, method, path, query, header, http.NoBody, 0)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	resp, err := h.clientFor(svc).Do(out)
 	if err != nil {
 		// The error text can include the URL, and so a query-string key.
 		if errors.Is(err, errTLSPin) {
-			return 0, errors.New("service certificate does not match the pinned certificate")
+			return nil, errors.New("service certificate does not match the pinned certificate")
 		}
-		return 0, errors.New("service unreachable")
+		return nil, errors.New("service unreachable")
 	}
 	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
 		h.dropGoogleToken(googleAccount, key)
 	}
+	return resp, nil
+}
+
+// TestPool sends the test request of svc, a key pool, with values in turn
+// (the order PoolTries gives), moving on only when the service refused a
+// value the way a call moves on to the next (judge), and returns the last
+// answer's status.
+func (h *Handler) TestPool(ctx context.Context, svc policy.Service, values []string) (int, error) {
+	for i, value := range values {
+		resp, err := h.testRequest(ctx, svc, value)
+		if err != nil {
+			return 0, err
+		}
+		v := judge(svc, resp, h.now())
+		status := closeTest(resp)
+		if !v.keyProblem || i == len(values)-1 {
+			return status, nil
+		}
+	}
+	return 0, errors.New("key not loaded")
+}
+
+// closeTest drains and closes a test answer and returns its status.
+func closeTest(resp *http.Response) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
-	return resp.StatusCode, nil
+	return resp.StatusCode
 }
 
 // splitPath takes "/<service>/<rest>" and returns the service and the

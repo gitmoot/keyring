@@ -1544,8 +1544,9 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	svc := b.Proxy.Config().Services[sname]
 	// A pool is tested as a call goes: its values in the order the proxy
-	// tries them now, on to the next while one fails, so the key works if
-	// a call through the pool would.
+	// tries them now, on to the next only when the service refused one the
+	// way a call moves on (server.TestPool), so the key works if a call
+	// through the pool would.
 	names := svc.KeyNames()
 	if svc.KeyPool {
 		names = b.Proxy.PoolTries(svc)
@@ -1565,16 +1566,16 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	tries := names[:1]
-	if svc.KeyPool {
-		tries = names
-	}
 	var status int
 	var testErr error
-	for _, kn := range tries {
-		if status, testErr = b.Proxy.TestKey(ctx, svc, sent[kn]); testErr == nil && status >= 200 && status < 300 {
-			break
+	if svc.KeyPool {
+		values := make([]string, len(names))
+		for i, kn := range names {
+			values[i] = sent[kn]
 		}
+		status, testErr = b.Proxy.TestPool(ctx, svc, values)
+	} else {
+		status, testErr = b.Proxy.TestKey(ctx, svc, sent[names[0]])
 	}
 	m := KeyMeta{CheckedAt: b.Now().UTC()}
 	switch {

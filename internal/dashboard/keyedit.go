@@ -100,13 +100,15 @@ func renameRefs(access *policy.AccessList, moves map[string]string) []string {
 // (name -> value), points every service reference at the new names and
 // applies notes to the key notes, which hold each key's value order; it
 // returns the services changed. The new access list is checked before
-// anything is written. The key notes are written first, then the store
-// gets the values under their new names while keeping the old ones, then
-// the access list, and only then are the old names removed. So at every
-// step the access list names stored values: a failure before the access
-// list is written undoes what was written before it, and a failure after
-// it leaves at most a stale copy under an old name. The proxy then gets the
-// new settings, keys and order together. Callers hold b.Mu.
+// anything is written. The key notes are written first. When no service
+// reference moves, the store then changes in one atomic write. Otherwise
+// the store gets the values under their new names while keeping the old
+// ones, then the access list is written, and only then are the old names
+// removed: at every step the access list names stored values. A failure
+// before the access list is written undoes what was written before it; one
+// after it leaves at most a stale copy under an old name that no service
+// sends (a pool follows its renamed key). The proxy then gets the new
+// settings, keys and order together. Callers hold b.Mu.
 func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[string]KeyMeta)) ([]string, error) {
 	next, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
@@ -148,21 +150,30 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 			put[to] = v
 		}
 	}
+	if len(services) == 0 {
+		if len(put) > 0 {
+			if err := store.Move(b.StorePath, stored, add); err != nil {
+				return nil, undo(err)
+			}
+		}
+		for from := range stored {
+			delete(keys, from)
+		}
+		maps.Copy(keys, put)
+		b.Proxy.SwapWithOrder(b.Proxy.Config(), keys, valueOrder(meta))
+		return nil, nil
+	}
 	if len(put) > 0 {
 		if err := store.Move(b.StorePath, nil, put); err != nil {
 			return nil, undo(err)
 		}
 	}
-	cfg := b.Proxy.Config()
-	if len(services) > 0 {
-		saved, err := policy.SaveAccess(b.rules(), next)
-		if err != nil {
-			if delErr := store.DeleteAll(b.StorePath, slices.Collect(maps.Keys(put))); delErr != nil {
-				err = errors.Join(err, fmt.Errorf("removing the values under their new names failed too: %w", delErr))
-			}
-			return nil, undo(err)
+	cfg, err := policy.SaveAccess(b.rules(), next)
+	if err != nil {
+		if delErr := store.DeleteAll(b.StorePath, slices.Collect(maps.Keys(put))); delErr != nil {
+			err = errors.Join(err, fmt.Errorf("removing the values under their new names failed too: %w", delErr))
 		}
-		cfg = saved
+		return nil, undo(err)
 	}
 	maps.Copy(keys, put)
 	var oldErr error
