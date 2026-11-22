@@ -20,6 +20,8 @@ Allowed methods default to GET, HEAD and POST. A role's `"expires"` ends all its
 
 A service may name a harmless request for the dashboard's Test button: `"test_method": "GET"` (GET, HEAD or POST; default GET) and `"test_path": "/api/v1/key"` (may carry a query). The test goes out exactly like a proxied call.
 
+**Authorization schemes other than Bearer.** A `bearer` service sends `Authorization: Bearer <key>`. An API that wants another scheme names it with `"scheme"`: one HTTP token (letters, digits and ``!#$%&'*+-.^_`|~``, at most 32 characters, no spaces), allowed only with `"auth": "bearer"`. Higgsfield, for example, wants `Authorization: Key <key id>:<key secret>`: store `KEY_ID:KEY_SECRET` as one value and connect it with `{"service":"higgsfield","base":"https://api.higgsfield.ai","auth":"bearer","scheme":"Key"}`. Everything else works as for Bearer: the caller's `Authorization` is dropped, the key is masked in replies, and key pools work. On the dashboard, type the scheme in "Scheme (if not Bearer)" or paste it; the service page shows what is sent.
+
 Static `bearer`, `header`, and `query` services may add up to two secret headers:
 `"extra_headers": {"CF-Access-Client-Secret": "ACCESS_SECRET"}` maps each header
 to a distinct store key, not a credential value. For Cloudflare Access, use

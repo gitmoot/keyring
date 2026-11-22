@@ -33,7 +33,7 @@ The key never leaves the keyring machine. The agent holds only a role token, whi
 
 ## What it does
 
-- **API proxy.** Bearer, header or query-parameter keys, up to two extra secret headers, keys with several values, and [key pools](docs/proxy.md#key-pools-several-keys-behind-one-service) that switch to the next key when one is refused or runs out. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
+- **API proxy.** Bearer (or another `Authorization` scheme, such as `Key`), header or query-parameter keys, up to two extra secret headers, keys with several values, and [key pools](docs/proxy.md#key-pools-several-keys-behind-one-service) that switch to the next key when one is refused or runs out. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
 - **Request signing without handing out the private key.** Apple Ads and App Store Connect JWTs, Sign in with Apple client secrets, APNs push, raw Ed25519, and minisign release signatures. [Apple](docs/apple.md) · [Signing](docs/signing.md)
 - **OAuth with refresh.** The keyring holds the refresh token and mints access tokens, for Gmail, Drive and any OAuth 2 provider; Google accounts can also come from `gcloud`. [OAuth](docs/oauth.md) · [Google via gcloud](docs/google-gcloud.md)
 - **Per-agent access.** Each agent (a *role*) gets only the services, methods and paths it was given, with daily request and byte limits and an end date. Agents find services with `keyring services --search`, ask with `keyring request`, and the owner approves in one tap. [Finding services](docs/proxy.md#finding-services)

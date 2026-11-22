@@ -899,7 +899,9 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 	switch svc.Auth {
 	case policy.AuthAPNs:
 		header.Set("Authorization", "bearer "+key)
-	case policy.AuthBearer, policy.AuthOAuth2, policy.AuthGcloud:
+	case policy.AuthBearer:
+		header.Set("Authorization", svc.AuthorizationScheme()+" "+key)
+	case policy.AuthOAuth2, policy.AuthGcloud:
 		header.Set("Authorization", "Bearer "+key)
 	case policy.AuthHeader:
 		header.Set(svc.Header, key)

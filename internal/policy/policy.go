@@ -292,6 +292,10 @@ type Service struct {
 	Key    string `json:"key"`
 	Auth   string `json:"auth"`
 	Header string `json:"header,omitempty"`
+	// Scheme is the Authorization scheme of an auth "bearer" service: one
+	// HTTP token such as "Key" (Higgsfield: Authorization: Key <id:secret>).
+	// Empty means "Bearer".
+	Scheme string `json:"scheme,omitempty"`
 	// ExtraHeaders maps additional upstream credential headers to store key names.
 	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
 	// FixedHeaders contains literal nonsecret constants, never store key names.
@@ -1273,9 +1277,23 @@ func (s *Service) validate() error {
 	if s.OAuth2 != nil && s.Auth != AuthOAuth2 {
 		return errors.New("oauth2 settings require auth oauth2")
 	}
+	if s.Scheme != "" && (s.Auth != AuthBearer || !authScheme.MatchString(s.Scheme)) {
+		return errors.New("scheme needs auth bearer and must be one word of letters, digits or !#$%&'*+-.^_`|~, at most 32 characters, such as Key")
+	}
 	s.base = u
 	return nil
 }
+
+// AuthorizationScheme is what a bearer service puts before the key.
+func (s Service) AuthorizationScheme() string {
+	if s.Scheme == "" {
+		return "Bearer"
+	}
+	return s.Scheme
+}
+
+// authScheme is an RFC 9110 auth-scheme token.
+var authScheme = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$")
 
 // Authorization can only be the explicit primary auth=header credential.
 func safeCredentialHeader(name string, primary bool) bool {
