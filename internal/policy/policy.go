@@ -292,6 +292,10 @@ type Service struct {
 	Key    string `json:"key"`
 	Auth   string `json:"auth"`
 	Header string `json:"header,omitempty"`
+	// Scheme is the Authorization scheme of an auth "bearer" service: one
+	// HTTP token such as "Key" (Higgsfield: Authorization: Key <id:secret>).
+	// Empty means "Bearer".
+	Scheme string `json:"scheme,omitempty"`
 	// ExtraHeaders maps additional upstream credential headers to store key names.
 	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
 	// FixedHeaders contains literal nonsecret constants, never store key names.
@@ -1060,6 +1064,10 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	// An auth-scheme is an RFC 9110 token, like a header name.
+	if s.Scheme != "" && (s.Auth != AuthBearer || len(s.Scheme) > 32 || !headerName.MatchString(s.Scheme)) {
+		return errors.New("scheme needs auth bearer and must be one word of letters, digits or !#$%&'*+-.^_`|~, at most 32 characters, such as Key")
+	}
 	if s.KeyPool {
 		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
 			return errors.New("key_pool needs bearer, header or query authentication")
@@ -1275,6 +1283,14 @@ func (s *Service) validate() error {
 	}
 	s.base = u
 	return nil
+}
+
+// AuthorizationScheme is what a bearer service puts before the key.
+func (s Service) AuthorizationScheme() string {
+	if s.Scheme == "" {
+		return "Bearer"
+	}
+	return s.Scheme
 }
 
 // Authorization can only be the explicit primary auth=header credential.

@@ -747,14 +747,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var err error
 	for i, name := range tries {
-		reqBody, length, value := io.Reader(r.Body), r.ContentLength, sendKey
+		reqBody, length, value, sendSvc := io.Reader(r.Body), r.ContentLength, sendKey, svc
 		if name != "" {
 			value = snap.keys[name]
 			reqBody, length = body.body(r.ContentLength)
 			rec.Key, rec.Attempts = name, i+1
+		} else if callerUploadToken != "" {
+			sendSvc.Scheme = "" // the upload token is a Bearer token; a scheme belongs to the stored key
 		}
 		var out *http.Request
-		out, err = buildOutbound(r.Context(), svc, value, r.Method, rest, r.URL.RawQuery, header.Clone(), reqBody, length)
+		out, err = buildOutbound(r.Context(), sendSvc, value, r.Method, rest, r.URL.RawQuery, header.Clone(), reqBody, length)
 		if errors.Is(err, errBadQuery) {
 			h.refund(roleName, service, access.DailyRequests, start)
 			fail(http.StatusBadRequest, "malformed query string")
@@ -899,7 +901,9 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 	switch svc.Auth {
 	case policy.AuthAPNs:
 		header.Set("Authorization", "bearer "+key)
-	case policy.AuthBearer, policy.AuthOAuth2, policy.AuthGcloud:
+	case policy.AuthBearer:
+		header.Set("Authorization", svc.AuthorizationScheme()+" "+key)
+	case policy.AuthOAuth2, policy.AuthGcloud:
 		header.Set("Authorization", "Bearer "+key)
 	case policy.AuthHeader:
 		header.Set(svc.Header, key)

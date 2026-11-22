@@ -44,9 +44,9 @@ func editableService(svc policy.Service) bool {
 // does not change: fixed headers (changed by pasting JSON) and the names of
 // the extra credential headers (never their values).
 type serviceForm struct {
-	Name, Key, Base, Auth, Header, Param, TestPath, TLSPin, Project, Pasted string
-	FixedHeaders                                                            map[string]string
-	ExtraHeaders                                                            []string
+	Name, Key, Base, Auth, Scheme, Header, Param, TestPath, TLSPin, Project, Pasted string
+	FixedHeaders                                                                    map[string]string
+	ExtraHeaders                                                                    []string
 	// OAuth client settings of an oauth2 service (#142): the secret is a key
 	// name, never a value.
 	ClientID, TokenURL, ClientSecretKey string
@@ -59,7 +59,7 @@ type serviceForm struct {
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
-	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
+	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Scheme: svc.Scheme, Header: svc.Header, Param: svc.Param,
 		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole, KeyPool: svc.KeyPool}
 	f.KeyBase, _ = store.SplitPart(svc.Key)
 	if o := svc.OAuth2; o != nil {
@@ -126,8 +126,12 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	if method == "" {
 		method = http.MethodGet
 	}
+	sentAs := "" // from the stored service, never a refused edit
+	if svc.Auth == policy.AuthBearer {
+		sentAs = svc.AuthorizationScheme()
+	}
 	b.render(w, status, "service", sid, map[string]any{
-		"OAuth2": svc.OAuth2, "SecretStored": secretStored,
+		"OAuth2": svc.OAuth2, "SecretStored": secretStored, "SentAs": sentAs,
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
 		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
 	})
@@ -137,7 +141,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	name := r.PathValue("name")
 	f := serviceForm{
 		Name: name, Key: strings.TrimSpace(r.PostFormValue("key")), Base: strings.TrimSpace(r.PostFormValue("base")),
-		Auth: r.PostFormValue("auth"), Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
+		Auth: r.PostFormValue("auth"), Scheme: strings.TrimSpace(r.PostFormValue("scheme")), Header: strings.TrimSpace(r.PostFormValue("header")), Param: strings.TrimSpace(r.PostFormValue("param")),
 		TestPath: strings.TrimSpace(r.PostFormValue("test_path")), TLSPin: strings.TrimSpace(r.PostFormValue("tls_pin_sha256")),
 		Project:  strings.TrimSpace(r.PostFormValue("project")),
 		Pasted:   strings.TrimSpace(r.PostFormValue("pasted")),
@@ -182,8 +186,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			again(http.StatusBadRequest, "The pasted settings name another service. A service cannot be renamed here; leave \"service\" out or use "+name+".")
 			return
 		}
-		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
+		f.Base, f.Auth, f.Scheme, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Scheme, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
 		fixed, extra, oauth, forwardRole, keyPool = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole, a.KeyPool
+	} else if f.Auth != policy.AuthBearer {
+		f.Scheme = "" // the form's scheme box belongs to the bearer choice
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -222,7 +228,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	// Start from what is stored: only the fields this form owns change, so
 	// the settings it does not show (extra credential headers) survive.
 	updated := cur
-	updated.Base, updated.Key, updated.Auth, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Header, f.Param
+	updated.Base, updated.Key, updated.Auth, updated.Scheme, updated.Header, updated.Param = f.Base, f.Key, f.Auth, f.Scheme, f.Header, f.Param
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	updated.ForwardRole = f.ForwardRole
 	if pasted {
@@ -322,7 +328,7 @@ func changedFields(old, now policy.Service) []string {
 		name string
 		diff bool
 	}{
-		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
+		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth}, {"scheme", old.Scheme != now.Scheme},
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
 		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)}, {"key_pool", old.KeyPool != now.KeyPool}, {"forward_role", old.ForwardRole != now.ForwardRole},
 		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},

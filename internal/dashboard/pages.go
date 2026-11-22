@@ -130,6 +130,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <option value="bearer"{{if eq .Connect.Auth "bearer"}} selected{{end}}>Authorization: Bearer</option>
 <option value="header"{{if eq .Connect.Auth "header"}} selected{{end}}>a header</option>
 <option value="query"{{if eq .Connect.Auth "query"}} selected{{end}}>a query parameter</option></select></label>
+<label>Scheme (if not Bearer)<input name="scheme" value="{{.Connect.Scheme}}" placeholder="e.g. Key" autocapitalize="none" spellcheck="false"></label>
 <div class="two"><label>Header (if a header)<input name="header" value="{{.Connect.Header}}" placeholder="e.g. X-Api-Key" autocapitalize="none"></label>
 <label>Parameter (if a query)<input name="param" value="{{.Connect.Param}}" placeholder="e.g. api_key" autocapitalize="none"></label></div>
 <label>Test request (optional, a harmless GET)<input name="test_path" value="{{.Connect.TestPath}}" placeholder="e.g. /v1/models" autocapitalize="none" spellcheck="false"></label>
@@ -279,6 +280,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="head"><a class="back" href="/keys/{{.F.Key}}">{{.F.Key}}</a><h1 class="mono">{{.Name}}</h1></div>
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
+{{with .SentAs}}<dt>Sent as</dt><dd class="mono">Authorization: {{.}} …</dd>{{end}}
 <dt>Base URL</dt><dd class="mono">{{if .F.Base}}{{.F.Base}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Project</dt><dd>{{with .F.Project}}<a class="chip" href="/projects/{{.}}">{{.}}</a>{{if $.ProjectStopped}} <span class="pill warn">{{$.ProjectStopped}}</span>{{end}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>
@@ -305,6 +307,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <option value="bearer"{{if eq .F.Auth "bearer"}} selected{{end}}>Authorization: Bearer</option>
 <option value="header"{{if eq .F.Auth "header"}} selected{{end}}>a header</option>
 <option value="query"{{if eq .F.Auth "query"}} selected{{end}}>a query parameter</option></select></label>
+<label>Scheme (if not Bearer)<input name="scheme" value="{{.F.Scheme}}" placeholder="e.g. Key" autocapitalize="none" spellcheck="false"></label>
 <div class="two"><label>Header (if a header)<input name="header" value="{{.F.Header}}" autocapitalize="none"></label>
 <label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>{{end}}
 <label>Test request path (optional; sent with the method shown above, {{.TestMethod}})<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
