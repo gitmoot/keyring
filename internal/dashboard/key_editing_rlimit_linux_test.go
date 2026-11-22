@@ -60,10 +60,14 @@ func TestFailedRenameKeepsStoreAndAccessInStep(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			before, err := policy.LoadAccess(rules.AccessFile)
-			if err != nil {
-				t.Fatal(err)
+			refs := func(a policy.AccessList) map[string][]string {
+				out := map[string][]string{}
+				for name, svc := range a.Services {
+					out[name] = svc.KeyNames()
+				}
+				return out
 			}
+			before := refs(access) // before renameRefs moves them
 			renamed, both := map[string]string{}, map[string]string{}
 			moves := map[string]string{long: "K"}
 			for name, value := range keys {
@@ -136,15 +140,8 @@ func TestFailedRenameKeepsStoreAndAccessInStep(t *testing.T) {
 			if !maps.Equal(now, keys) {
 				t.Fatal("after the failed rename the store differs from before")
 			}
-			refs := func(a policy.AccessList) map[string][]string {
-				out := map[string][]string{}
-				for name, svc := range a.Services {
-					out[name] = svc.KeyNames()
-				}
-				return out
-			}
-			if !maps.EqualFunc(refs(after), refs(before), slices.Equal) {
-				t.Fatalf("after the failed rename the services name %v, were %v", refs(after), refs(before))
+			if !maps.EqualFunc(refs(after), before, slices.Equal) {
+				t.Fatalf("after the failed rename the services name %v, were %v", refs(after), before)
 			}
 		})
 	}

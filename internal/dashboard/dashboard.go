@@ -1481,7 +1481,7 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 			meta, _ := b.loadMeta()
 			errCode := r.URL.Query().Get("error")
 			b.render(w, status, "key", sid, map[string]any{
-				"Row": row, "Meta": meta[name], "Testable": b.testService(name) != "",
+				"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
 				"Notice": r.URL.Query().Get("done"), "Error": errCode, "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
 				"Connect": f, "Presets": presetOptions(),
 			})
@@ -1513,10 +1513,9 @@ func (b *Backend) row(name string) (keyRow, bool, error) {
 	return keyRow{}, false, nil
 }
 
-// testService is the first service (by name) that uses the key and has a
-// test request.
-func (b *Backend) testService(name string) string {
-	cfg := b.Proxy.Config()
+// testService is the first service (by name) in cfg that uses the key and
+// has a test request.
+func (b *Backend) testService(cfg *policy.Config, name string) string {
 	var names []string
 	for sname, svc := range cfg.Services {
 		if base, _ := store.SplitPart(svc.Key); base == name && !svc.SignOnly() && svc.TestPath != "" {
@@ -1532,12 +1531,13 @@ func (b *Backend) testService(name string) string {
 
 func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
-	sname := b.testService(name)
+	cfg := b.Proxy.Config()
+	sname := b.testService(cfg, name)
 	if sname == "" {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-test", http.StatusSeeOther)
 		return
 	}
-	svc := b.Proxy.Config().Services[sname]
+	svc := cfg.Services[sname]
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	var status int
@@ -1545,12 +1545,17 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	var testErr error
 	if svc.KeyPool {
 		// A pool is tested as a call goes (server.TestPool): the proxy
-		// takes its values and their order from one snapshot and moves on
-		// only when the service refused one the way a call moves on, so
-		// the key works if a call through the pool would.
-		status, sent, testErr = b.Proxy.TestPool(ctx, sname)
-		if errors.Is(testErr, server.ErrNoPoolValue) {
+		// checks the service still pools the key chosen here, takes its
+		// values and their order from one snapshot and moves on only when
+		// the service refused one the way a call moves on, so the key
+		// works if a call through the pool would.
+		status, sent, testErr = b.Proxy.TestPool(ctx, sname, svc.Key)
+		switch {
+		case errors.Is(testErr, server.ErrNoPoolValue):
 			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
+			return
+		case errors.Is(testErr, server.ErrPoolChanged):
+			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
 			return
 		}
 	} else {

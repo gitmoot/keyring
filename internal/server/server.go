@@ -1034,40 +1034,50 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 // can be sent.
 var ErrNoPoolValue = errors.New("the key pool has no value that can be sent")
 
-// TestPool sends the test request of the key pool service named service as
-// a call through it would go now, from one snapshot of the settings, keys
-// and value order: its values in the order a call tries them, moving on
-// only when the service refused a value the way a call moves on (judge). It
-// returns the last answer's status and the values it sent (key name ->
-// value), so the caller can tell whether the result still describes what
-// is stored. It never returns a reply body, which could echo a key.
-func (h *Handler) TestPool(ctx context.Context, service string) (int, map[string]string, error) {
+// ErrPoolChanged is TestPool's error when the service is no longer a key
+// pool on the key the caller chose it for.
+var ErrPoolChanged = errors.New("the service no longer pools that key")
+
+// TestPool sends the test request of the key pool service named service,
+// which the caller chose as a pool on key, as a call through it would go
+// now. One snapshot of the settings, keys and value order binds the key,
+// the service and its values: the values in the order a call tries them,
+// moving on only when the service refused a value the way a call moves on
+// (judge). It returns the last answer's status and every value that set the
+// order (key name -> value), tried or not, so the caller can tell whether
+// the result still describes what is stored: a replaced value would be
+// tried in another place. It never returns a reply body, which could echo
+// a key.
+func (h *Handler) TestPool(ctx context.Context, service, key string) (int, map[string]string, error) {
 	snap := h.snap.Load()
 	svc, ok := snap.config.Services[service]
-	if !ok || !svc.KeyPool {
-		return 0, nil, errors.New("not a key pool service")
+	if !ok || !svc.KeyPool || svc.Key != key {
+		return 0, nil, ErrPoolChanged
 	}
 	pool := sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys)
 	tries := h.pool.order(pool, snap.gens, time.Now())
 	if len(tries) == 0 {
 		return 0, nil, ErrNoPoolValue
 	}
-	sent := make(map[string]string, len(tries))
+	candidates := make(map[string]string, len(tries))
+	for _, name := range tries {
+		candidates[name] = snap.keys[name]
+	}
+	var resp *http.Response
 	for i, name := range tries {
-		sent[name] = snap.keys[name]
-		resp, err := h.testRequest(ctx, snap, svc, snap.keys[name])
+		var err error
+		resp, err = h.testRequest(ctx, snap, svc, snap.keys[name])
 		if err != nil {
-			return 0, sent, err
+			return 0, candidates, err
 		}
-		v := judge(svc, resp, h.now())
-		if !v.keyProblem || i == len(tries)-1 {
-			return closeTest(resp), sent, nil
+		if i == len(tries)-1 || !judge(svc, resp, h.now()).keyProblem {
+			break
 		}
 		// Like a call, close a refused answer unread past what judge
 		// needed: its body may be slow, and the next value is waiting.
 		resp.Body.Close()
 	}
-	return 0, sent, ErrNoPoolValue
+	return closeTest(resp), candidates, nil
 }
 
 // closeTest drains and closes a test answer and returns its status.
