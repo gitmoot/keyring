@@ -37,16 +37,29 @@ func newKey(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(k)
 }
 
-// freeAddr returns a loopback address nothing listens on right now.
+// handedOut holds every address freeAddr has returned in this test binary.
+// The probe listener is closed before the address is used, so the kernel may
+// offer the same port again; a fixture that got its admin and proxy addresses
+// from two calls would then be refused ("cannot use the admin address").
+var handedOut sync.Map
+
+// freeAddr returns a loopback address nothing listens on right now and that
+// no earlier call in this test binary returned.
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for range 100 {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		l.Close()
+		if _, seen := handedOut.LoadOrStore(addr, true); !seen {
+			return addr
+		}
 	}
-	addr := l.Addr().String()
-	l.Close()
-	return addr
+	t.Fatal("no unused loopback port after 100 tries")
+	return ""
 }
 
 type syncBuffer struct {
