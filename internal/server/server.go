@@ -186,6 +186,15 @@ func (h *Handler) SetValueOrder(order map[string][]string) {
 	h.snap.Store(&next)
 }
 
+// PoolTries are the values a key pool service would try now, in the order
+// a call tries them: its key's values in list order that can be sent, those
+// set aside after a refusal last. The dashboard's Test follows it.
+func (h *Handler) PoolTries(svc policy.Service) []string {
+	snap := h.snap.Load()
+	pool := sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys)
+	return h.pool.order(pool, snap.gens, time.Now())
+}
+
 // Swap replaces the settings and keys for every later request, keeping the
 // value order. config must be validated. Requests already running keep what
 // they started with; daily counts carry over.
@@ -736,10 +745,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		alsoRedact = append(alsoRedact, value)
 	}
 	// The account token (upstreamKey) stays masked in the reply either way;
-	// the upload call is the one request that does not send it.
-	sendKey := upstreamKey
+	// the upload call is the one request that does not send it. Its token is
+	// a Bearer token, so the stored key's scheme goes with the stored key.
+	sendKey, sendSvc := upstreamKey, svc
 	if callerUploadToken != "" {
-		sendKey = callerUploadToken
+		sendKey, sendSvc.Scheme = callerUploadToken, ""
 	}
 	if svc.ForwardRole {
 		header.Set(policy.RoleHeader, roleName)
@@ -771,13 +781,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var err error
 	for i, name := range tries {
-		reqBody, length, value, sendSvc := io.Reader(r.Body), r.ContentLength, sendKey, svc
+		reqBody, length, value := io.Reader(r.Body), r.ContentLength, sendKey
 		if name != "" {
 			value = snap.keys[name]
 			reqBody, length = body.body(r.ContentLength)
 			rec.Key, rec.Attempts = name, i+1
-		} else if callerUploadToken != "" {
-			sendSvc.Scheme = "" // the upload token is a Bearer token; a scheme belongs to the stored key
 		}
 		var out *http.Request
 		out, err = buildOutbound(r.Context(), sendSvc, value, r.Method, rest, r.URL.RawQuery, header.Clone(), reqBody, length)

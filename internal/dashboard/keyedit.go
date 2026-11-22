@@ -100,11 +100,13 @@ func renameRefs(access *policy.AccessList, moves map[string]string) []string {
 // (name -> value), points every service reference at the new names and
 // applies notes to the key notes, which hold each key's value order; it
 // returns the services changed. The new access list is checked before
-// anything is written. The key notes are written first, then the store in
-// one write, then the access list; a failure undoes what was written before
-// it, so no service is left naming a missing value and no pool loses its
-// order. The proxy then gets the new settings, keys and order together.
-// Callers hold b.Mu.
+// anything is written. The key notes are written first, then the store
+// gets the values under their new names while keeping the old ones, then
+// the access list, and only then are the old names removed. So at every
+// step the access list names stored values: a failure before the access
+// list is written undoes what was written before it, and a failure after
+// it leaves at most a stale copy under an old name. The proxy then gets the
+// new settings, keys and order together. Callers hold b.Mu.
 func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[string]KeyMeta)) ([]string, error) {
 	next, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
@@ -126,23 +128,28 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 	}
 	meta := maps.Clone(before)
 	notes(meta)
-	if err := b.writeMeta(meta); err != nil {
+	if err := writeMeta(b.MetaPath, meta); err != nil {
 		return nil, err
 	}
 	undo := func(err error) error {
-		if metaErr := b.writeMeta(before); metaErr != nil {
+		if metaErr := writeMeta(b.MetaPath, before); metaErr != nil {
 			err = errors.Join(err, fmt.Errorf("putting the key notes back failed too: %w", metaErr))
 		}
 		return err
 	}
 	stored := map[string]string{}
+	put := maps.Clone(add)
+	if put == nil {
+		put = map[string]string{}
+	}
 	for from, to := range moves {
-		if _, ok := keys[from]; ok {
+		if v, ok := keys[from]; ok {
 			stored[from] = to
+			put[to] = v
 		}
 	}
-	if len(stored) > 0 || len(add) > 0 {
-		if err := store.Move(b.StorePath, stored, add); err != nil {
+	if len(put) > 0 {
+		if err := store.Move(b.StorePath, nil, put); err != nil {
 			return nil, undo(err)
 		}
 	}
@@ -150,37 +157,26 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 	if len(services) > 0 {
 		saved, err := policy.SaveAccess(b.rules(), next)
 		if err != nil {
-			return nil, undo(errors.Join(err, b.undoMove(stored, add)))
+			if delErr := store.DeleteAll(b.StorePath, slices.Collect(maps.Keys(put))); delErr != nil {
+				err = errors.Join(err, fmt.Errorf("removing the values under their new names failed too: %w", delErr))
+			}
+			return nil, undo(err)
 		}
 		cfg = saved
 	}
-	for from, to := range stored {
-		keys[to] = keys[from]
-		delete(keys, from)
-	}
-	maps.Copy(keys, add)
-	b.Proxy.SwapWithOrder(cfg, keys, valueOrder(meta))
-	return services, nil
-}
-
-// undoMove puts the store back as it was before store.Move(stored, add).
-func (b *Backend) undoMove(stored, add map[string]string) error {
-	if len(add) > 0 {
-		if err := store.DeleteAll(b.StorePath, slices.Collect(maps.Keys(add))); err != nil {
-			return fmt.Errorf("removing the added values failed too: %w", err)
+	maps.Copy(keys, put)
+	var oldErr error
+	if len(stored) > 0 {
+		if oldErr = store.DeleteAll(b.StorePath, slices.Collect(maps.Keys(stored))); oldErr == nil {
+			for from := range stored {
+				delete(keys, from)
+			}
+		} else {
+			oldErr = fmt.Errorf("the values have their new names, but removing the old names failed: %w", oldErr)
 		}
 	}
-	if len(stored) == 0 {
-		return nil
-	}
-	back := make(map[string]string, len(stored))
-	for from, to := range stored {
-		back[to] = from
-	}
-	if err := store.Move(b.StorePath, back, nil); err != nil {
-		return fmt.Errorf("putting the values back under their old names failed too: %w", err)
-	}
-	return nil
+	b.Proxy.SwapWithOrder(cfg, keys, valueOrder(meta))
+	return services, oldErr
 }
 
 // moveNotes moves the dashboard's notes (status, dates, file kind, value

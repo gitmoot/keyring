@@ -158,31 +158,38 @@ func (m KeyMeta) label(name string) string {
 // ValueOrder reads each key's list order of its value names from the key
 // notes at metaPath, for the proxy's key pools (server.SetValueOrder).
 func ValueOrder(metaPath string) (map[string][]string, error) {
-	meta, err := (&Backend{MetaPath: metaPath}).loadMeta()
+	meta, err := readMeta(metaPath)
 	if err != nil {
 		return nil, err
 	}
 	return valueOrder(meta), nil
 }
 
-// PutValuesFirst moves, for each key, the named value (key -> value name) to
-// the front of the key's list in the key notes at metaPath, so a key pool
-// tries it first. Used when a v0.14.18 pool that named one value is
-// converted to name the key (policy.ConvertNamedValuePools).
-func PutValuesFirst(metaPath string, first map[string]string) error {
-	b := &Backend{MetaPath: metaPath}
-	meta, err := b.loadMeta()
+// PutValueOrder puts, for each key, the listed value names (key -> names)
+// at the front of the key's list in the key notes at metaPath, in that
+// order, keeping labels; values not listed follow as they were. Used when a
+// v0.14.18 pool that named one value is converted to name the key
+// (policy.ConvertNamedValuePools), so the pool keeps its whole order.
+func PutValueOrder(metaPath string, order map[string][]string) error {
+	meta, err := readMeta(metaPath)
 	if err != nil {
 		return err
 	}
-	for key, part := range first {
+	for key, names := range order {
 		m := meta[key]
-		note := ValueNote{Name: part, Label: m.label(part)}
-		rest := slices.DeleteFunc(slices.Clone(m.Values), func(n ValueNote) bool { return n.Name == part })
-		m.Values = append([]ValueNote{note}, rest...)
+		values := make([]ValueNote, 0, len(names)+len(m.Values))
+		for _, name := range names {
+			values = append(values, ValueNote{Name: name, Label: m.label(name)})
+		}
+		for _, v := range m.Values {
+			if !slices.Contains(names, v.Name) {
+				values = append(values, v)
+			}
+		}
+		m.Values = values
 		meta[key] = m
 	}
-	return b.saveMeta(meta)
+	return writeMeta(metaPath, meta)
 }
 
 func valueOrder(meta map[string]KeyMeta) map[string][]string {
@@ -358,8 +365,11 @@ func providerOf(svc policy.Service) string {
 	return strings.TrimPrefix(host, "api.")
 }
 
-func (b *Backend) loadMeta() (map[string]KeyMeta, error) {
-	raw, err := os.ReadFile(b.MetaPath)
+func (b *Backend) loadMeta() (map[string]KeyMeta, error) { return readMeta(b.MetaPath) }
+
+// readMeta reads the key notes at path; none when the file does not exist.
+func readMeta(path string) (map[string]KeyMeta, error) {
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]KeyMeta{}, nil
 	}
@@ -368,29 +378,27 @@ func (b *Backend) loadMeta() (map[string]KeyMeta, error) {
 	}
 	meta := map[string]KeyMeta{}
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, fmt.Errorf("%s: %w", b.MetaPath, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return meta, nil
 }
 
 // saveMeta writes the key notes and gives the proxy the value order in them.
 func (b *Backend) saveMeta(meta map[string]KeyMeta) error {
-	if err := b.writeMeta(meta); err != nil {
+	if err := writeMeta(b.MetaPath, meta); err != nil {
 		return err
 	}
-	if b.Proxy != nil {
-		b.Proxy.SetValueOrder(valueOrder(meta))
-	}
+	b.Proxy.SetValueOrder(valueOrder(meta))
 	return nil
 }
 
-// writeMeta writes the key notes, replacing the file atomically.
-func (b *Backend) writeMeta(meta map[string]KeyMeta) error {
+// writeMeta writes the key notes at path, replacing the file atomically.
+func writeMeta(path string, meta map[string]KeyMeta) error {
 	raw, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600)
+	return fileutil.WriteAtomic(path, append(raw, '\n'), 0o600)
 }
 
 // NoteKeyChange records in the key notes at metaPath that a key was set or
@@ -398,8 +406,7 @@ func (b *Backend) writeMeta(meta map[string]KeyMeta) error {
 // and not leaked, as after Replace; a deleted key has no notes. Callers hold
 // the lock the dashboard's changes use.
 func NoteKeyChange(metaPath, name string, deleted bool, now time.Time) error {
-	b := &Backend{MetaPath: metaPath}
-	meta, err := b.loadMeta()
+	meta, err := readMeta(metaPath)
 	if err != nil {
 		return err
 	}
@@ -412,7 +419,7 @@ func NoteKeyChange(metaPath, name string, deleted bool, now time.Time) error {
 		at := now.UTC()
 		meta[name] = meta[name].renewed(at)
 	}
-	return b.saveMeta(meta)
+	return writeMeta(metaPath, meta)
 }
 
 // rows builds the keys table: every stored key, plus any key a service names
@@ -1130,18 +1137,30 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 			return
 		}
 	}
+	// The key notes hold the value order a key pool follows: they are
+	// written before the values are stored, so a pool never sends the new
+	// values in another order, and put back if storing fails.
+	before, err := b.loadMeta()
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	meta := maps.Clone(before)
+	now := b.Now().UTC()
+	meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now, Values: notes, LastNumber: last}
+	if err := writeMeta(b.MetaPath, meta); err != nil {
+		b.fail(w, sid, err)
+		return
+	}
 	if err := store.Move(b.StorePath, nil, values); err != nil {
+		if metaErr := writeMeta(b.MetaPath, before); metaErr != nil {
+			err = errors.Join(err, fmt.Errorf("putting the key notes back failed too: %w", metaErr))
+		}
 		b.fail(w, sid, err)
 		return
 	}
 	maps.Copy(keys, values)
-	b.Proxy.Swap(b.Proxy.Config(), keys)
-	// Only notes: a failure here leaves the key stored and working.
-	if meta, err := b.loadMeta(); err == nil {
-		now := b.Now().UTC()
-		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: &now, Values: notes, LastNumber: last}
-		_ = b.saveMeta(meta)
-	}
+	b.Proxy.SwapWithOrder(b.Proxy.Config(), keys, valueOrder(meta))
 	fields := map[string]any{"key": name}
 	if _, plain := values[name]; !plain {
 		var parts []string
@@ -1524,15 +1543,12 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	svc := b.Proxy.Config().Services[sname]
-	// A pool is tested with the value it tries first.
+	// A pool is tested as a call goes: its values in the order the proxy
+	// tries them now, on to the next while one fails, so the key works if
+	// a call through the pool would.
 	names := svc.KeyNames()
 	if svc.KeyPool {
-		meta, err := b.loadMeta()
-		if err != nil {
-			b.fail(w, sid, err)
-			return
-		}
-		names = policy.PoolMembers(svc, keys, meta[svc.Key].order())
+		names = b.Proxy.PoolTries(svc)
 	}
 	if len(names) == 0 {
 		http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
@@ -1549,7 +1565,17 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	status, testErr := b.Proxy.TestKey(ctx, svc, sent[names[0]])
+	tries := names[:1]
+	if svc.KeyPool {
+		tries = names
+	}
+	var status int
+	var testErr error
+	for _, kn := range tries {
+		if status, testErr = b.Proxy.TestKey(ctx, svc, sent[kn]); testErr == nil && status >= 200 && status < 300 {
+			break
+		}
+	}
 	m := KeyMeta{CheckedAt: b.Now().UTC()}
 	switch {
 	case testErr != nil:

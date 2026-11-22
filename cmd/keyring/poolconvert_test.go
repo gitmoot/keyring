@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestUpgradeConvertsAPoolThatNamedOneValue(t *testing.T) {
 	if err := os.WriteFile(accessPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for name, value := range map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-0000", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111", "API_KEY": "sk-api-0123456789"} {
+	for name, value := range map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-0000", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111", "CLAUDE_KEYS.2": "sk-ant-two-2222", "CLAUDE_KEYS.10": "sk-ant-ten-1010", "API_KEY": "sk-api-0123456789"} {
 		if err := store.Set(keysPath, name, value); err != nil {
 			t.Fatal(err)
 		}
@@ -78,8 +79,9 @@ func TestUpgradeConvertsAPoolThatNamedOneValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	members := policy.PoolMembers(cfg.Services["claude-api"], keys, order["CLAUDE_KEYS"])
-	if len(members) != 2 || members[0] != "CLAUDE_KEYS.main" {
-		t.Fatalf("pool tries %v", members)
+	// v0.14.18 tried main, then the others by name: "10" before "2".
+	if want := []string{"CLAUDE_KEYS.main", "CLAUDE_KEYS.10", "CLAUDE_KEYS.2", "CLAUDE_KEYS.backup1"}; !slices.Equal(members, want) {
+		t.Fatalf("pool tries %v, want %v", members, want)
 	}
 	if missing := missingKeys(cfg, keys); len(missing) > 0 {
 		t.Fatalf("missing %v", missing)
@@ -114,6 +116,8 @@ func TestUpgradeRefusesPoolConversionsThatChangeWhatIsSent(t *testing.T) {
 			map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-0000", "CLAUDE_KEYS.backup": "sk-ant-b-1111"}, "alpha and beta"},
 		{"only a plain value", map[string]policy.Service{"lone": pool("LONE.main")},
 			map[string]string{"LONE": "sk-ant-lone-0000"}, "never sent the plain value LONE"},
+		{"a plain value beside named ones", map[string]policy.Service{"mix": pool("MIX.main")},
+			map[string]string{"MIX": "sk-ant-mix-0000", "MIX.main": "sk-ant-main-0000"}, "never sent the plain value MIX"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()

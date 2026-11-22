@@ -21,14 +21,16 @@ func metaPathOf(storePath string) string {
 // loadConfig is policy.Load, plus the one-time upgrade of v0.14.18 key pools:
 // such a pool named one value of its key ("key":"CLAUDE_KEYS.main"), which
 // is now refused, as a pool names the key. Each is converted to name the key,
-// and the value it named is put first in the key's list (keymeta.json next to
-// the store), so the pool still tries the same value first. Conversions that
-// would change what a pool sends are refused before anything is written: two
-// pools of one key with different first values, and a pool whose key holds
-// only a plain value (v0.14.18 never sent it; a pool now would). Without
-// write (keyring check) the conversion is checked in memory only; the
-// service writes it when it starts. The key notes are written before the
-// access file, so a failure in between is redone at the next start.
+// and the key's list (keymeta.json next to the store) gets the order v0.14.18
+// tried: the value it named first, then the key's other values by name
+// (lexically: "10" before "2"), so the pool keeps its whole failover order.
+// Conversions that would change what a pool sends are refused before
+// anything is written: two pools of one key with different first values,
+// and a pool whose key also holds a plain value (v0.14.18 never sent it; a
+// pool now would, once the key has no other values). Without write (keyring
+// check) the conversion is checked in memory only; the service writes it
+// when it starts. The key notes are written before the access file, so a
+// failure in between is redone at the next start.
 func loadConfig(configPath, storePath string, write bool, out io.Writer) (*policy.Config, error) {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
@@ -52,22 +54,27 @@ func loadConfig(configPath, storePath string, write bool, out io.Writer) (*polic
 	if len(first) == 0 {
 		return cfg, nil
 	}
+	order := map[string][]string{}
+	for key, part := range first {
+		order[key] = []string{part}
+	}
 	if storePath != "" {
 		keys, err := store.Load(storePath)
 		if err != nil {
 			return nil, err
 		}
 		for _, key := range slices.Sorted(maps.Keys(first)) {
-			if keys[key] != "" && !hasValues(keys, key) {
-				return nil, fmt.Errorf("converting v0.14.18 key pools: the pool on %s.%s never sent the plain value %s, but a pool on %s now would; store the pool's values as %s.<name>, or remove key_pool, then start again", key, first[key], key, key, key)
+			if keys[key] != "" {
+				return nil, fmt.Errorf("converting v0.14.18 key pools: the pool on %s.%s never sent the plain value %s, but a pool on %s now would once its other values are gone; store that value as %s.<name>, or delete it, or remove key_pool, then start again", key, first[key], key, key, key)
 			}
+			order[key] = append(order[key], otherValues(keys, key, first[key])...)
 		}
 	}
 	if !write {
 		fmt.Fprintf(out, "key pools naming one value (%s) are converted to name the key when the service starts\n", poolKeys(first))
 		return cfg, nil
 	}
-	if err := dashboardpkg.PutValuesFirst(metaPathOf(storePath), first); err != nil {
+	if err := dashboardpkg.PutValueOrder(metaPathOf(storePath), order); err != nil {
 		return nil, fmt.Errorf("converting key pools: %w", err)
 	}
 	cfg, err = policy.SaveAccess(rules, access)
@@ -78,14 +85,17 @@ func loadConfig(configPath, storePath string, write bool, out io.Writer) (*polic
 	return cfg, nil
 }
 
-// hasValues reports whether keys holds a value of key (key.part).
-func hasValues(keys map[string]string, key string) bool {
+// otherValues are the names of key's stored values (key.part) other than
+// skip, sorted by name as v0.14.18 tried a pool's backups.
+func otherValues(keys map[string]string, key, skip string) []string {
+	var parts []string
 	for name, value := range keys {
-		if base, part := store.SplitPart(name); base == key && part != "" && value != "" {
-			return true
+		if base, part := store.SplitPart(name); base == key && part != "" && part != skip && value != "" {
+			parts = append(parts, part)
 		}
 	}
-	return false
+	slices.Sort(parts)
+	return parts
 }
 
 func poolKeys(first map[string]string) string {
