@@ -355,7 +355,13 @@ func (b *Backend) rows() ([]keyRow, error) {
 		for _, p := range row.Parts {
 			row.AnyValue = row.AnyValue || p.HasValue
 		}
-		if len(row.Parts) > 0 {
+		pooled := poolsKey(cfg, name)
+		switch {
+		case pooled:
+			// A pool works while any of its values is stored, the one
+			// tried first or not.
+			row.HasValue = row.AnyValue
+		case len(row.Parts) > 0:
 			row.HasValue = true
 			for _, p := range row.Parts {
 				row.HasValue = row.HasValue && p.HasValue
@@ -425,25 +431,28 @@ func (b *Backend) rows() ([]keyRow, error) {
 		}
 		row.Status, row.StatusClass = describe(row.HasValue, m)
 		row.State = state(row.HasValue, m)
-		b.describePool(&row, cfg, usage)
+		if pooled {
+			b.describePool(&row, usage)
+		}
 		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
+// poolsKey reports whether a key_pool service sends the values of key.
+func poolsKey(cfg *policy.Config, key string) bool {
+	for _, svc := range cfg.Services {
+		if base, _ := store.SplitPart(svc.Key); svc.KeyPool && base == key {
+			return true
+		}
+	}
+	return false
+}
+
 // describePool fills in each pooled value of row and, when values are set
 // aside, says so in the row's status: a pool keeps working while one value
 // does, so some set aside is a warning and all set aside is a failure.
-func (b *Backend) describePool(row *keyRow, cfg *policy.Config, usage []server.Usage) {
-	pooled := false
-	for _, svc := range cfg.Services {
-		if base, _ := store.SplitPart(svc.Key); svc.KeyPool && base == row.Name {
-			pooled = true
-		}
-	}
-	if !pooled {
-		return
-	}
+func (b *Backend) describePool(row *keyRow, usage []server.Usage) {
 	now := b.Now()
 	var members, away int
 	var firstAway string
@@ -473,7 +482,10 @@ func (b *Backend) describePool(row *keyRow, cfg *policy.Config, usage []server.U
 		p.FailuresToday = st.FailuresToday
 		switch st.State {
 		case "failing":
-			p.PoolStatus, p.PoolClass = "Failing: "+st.Reason+"; set aside, tried again "+inTime(now, st.Until), "bad"
+			p.PoolStatus, p.PoolClass = "Failing: "+st.Reason, "bad"
+			if !st.Until.IsZero() {
+				p.PoolStatus += "; set aside, tried again " + inTime(now, st.Until)
+			}
 		case "cooling":
 			p.PoolStatus, p.PoolClass = "Busy: "+st.Reason+"; set aside, back "+inTime(now, st.Until), "warn"
 		case "working":
@@ -958,7 +970,8 @@ type agentSettings struct {
 	// ForwardRole sends the calling agent's name upstream (X-Keyring-Role).
 	ForwardRole bool `json:"forward_role,omitempty"`
 	// KeyPool uses every value of the key in turn (key_part is tried first).
-	KeyPool bool `json:"key_pool,omitempty"`
+	// A pointer, so an edit can tell "left out" (keep) from false (off).
+	KeyPool *bool `json:"key_pool,omitempty"`
 	// ExtraHeaders sends more secret values with each call: header name ->
 	// name of another stored key, never a value. A pointer, so an edit can
 	// tell "left out" (keep) from {} (remove).
@@ -1079,7 +1092,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			return
 		}
 		f.Service, f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin
-		f.FixedHeaders, f.Project, f.ForwardRole, f.KeyPool = a.FixedHeaders, a.Project, a.ForwardRole, a.KeyPool
+		f.FixedHeaders, f.Project, f.ForwardRole, f.KeyPool = a.FixedHeaders, a.Project, a.ForwardRole, a.KeyPool != nil && *a.KeyPool
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}

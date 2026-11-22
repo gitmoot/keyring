@@ -38,10 +38,11 @@ type verdict struct {
 	reason string
 }
 
-// judge reads an answer for a key problem. Only answers that mean the
-// request was refused because of the key count: a malformed request (other
-// 400s) or the provider being down (5xx) would fail with every key.
-func judge(svc policy.Service, resp *http.Response, peek []byte) verdict {
+// judge reads an answer, received at now, for a key problem. Only answers
+// that mean the request was refused because of the key count: a malformed
+// request (other 400s) or the provider being down (5xx) would fail with
+// every key.
+func judge(svc policy.Service, resp *http.Response, now time.Time) verdict {
 	anthropic := isAnthropic(svc)
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
@@ -51,7 +52,7 @@ func judge(svc policy.Service, resp *http.Response, peek []byte) verdict {
 	case http.StatusPaymentRequired:
 		return verdict{true, true, time.Hour, "402 billing problem"}
 	case http.StatusTooManyRequests:
-		if wait, ok := retryAfter(resp.Header.Get("Retry-After")); ok {
+		if wait, ok := retryAfter(resp.Header.Get("Retry-After"), now); ok {
 			return verdict{true, false, wait, "429 rate limit"}
 		}
 		if anthropic {
@@ -61,7 +62,9 @@ func judge(svc policy.Service, resp *http.Response, peek []byte) verdict {
 		}
 		return verdict{true, false, time.Minute, "429 rate limit"}
 	case http.StatusBadRequest:
-		if anthropic && spendLimitMessage(peek) {
+		// Only Anthropic says a spend limit with a 400; any other 400 is
+		// passed on untouched.
+		if anthropic && spendLimitMessage(peekBody(resp)) {
 			return verdict{true, true, time.Hour, "400 spend limit or credit exhausted"}
 		}
 	}
@@ -69,16 +72,27 @@ func judge(svc policy.Service, resp *http.Response, peek []byte) verdict {
 }
 
 // isAnthropic reports whether svc calls the Anthropic API, whose answers
-// have their own meanings (a variable so tests can point it at a fake).
-var isAnthropic = func(svc policy.Service) bool { return svc.Provider() == "api.anthropic.com" }
+// have their own meanings.
+func isAnthropic(svc policy.Service) bool { return svc.Provider() == "api.anthropic.com" }
 
-// retryAfter reads Retry-After in seconds, bounded to [1 s, 1 h].
-func retryAfter(v string) (time.Duration, bool) {
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || n < 0 {
+// retryAfter reads Retry-After, delay-seconds or an HTTP-date (RFC 9110
+// 10.2.3), as a wait from now bounded to [1 s, 1 h].
+func retryAfter(v string, now time.Time) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	var wait time.Duration
+	if v != "" && strings.Trim(v, "0123456789") == "" {
+		// Too many digits for a uint64 is still a long wait.
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil || n > 3600 {
+			n = 3600
+		}
+		wait = time.Duration(n) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		wait = t.Sub(now)
+	} else {
 		return 0, false
 	}
-	return min(max(time.Duration(n)*time.Second, time.Second), time.Hour), true
+	return min(max(wait, time.Second), time.Hour), true
 }
 
 // spendLimitMessage reports whether an Anthropic error body says a spend
@@ -149,10 +163,35 @@ func (b *poolBook) order(members []string, keys map[string]string, now time.Time
 	return append(ready, waiting...)
 }
 
+// sendable keeps the members whose value can go out the way svc sends it
+// (a header value may not hold a line break or control character).
+func sendable(svc policy.Service, members []string, keys map[string]string) []string {
+	var out []string
+	for _, name := range members {
+		if unsendableKey(svc, keys[name], keys) == "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// current is the entry for name if it is still about value: an answer to a
+// value that has since been replaced says nothing about the new one.
+func (b *poolBook) current(name, value string) *poolKey {
+	if k := b.keys[name]; k != nil && k.value == sha256.Sum256([]byte(value)) {
+		return k
+	}
+	return nil
+}
+
+// failed sets value aside after a refusal received at now.
 func (b *poolBook) failed(name, value string, status int, v verdict, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	k := b.entry(name, value)
+	k := b.current(name, value)
+	if k == nil {
+		return
+	}
 	k.coolUntil, k.hard, k.lastStatus, k.reason, k.lastFailure = now.Add(v.cool), v.hard, status, v.reason, now
 	day := now.UTC().Format("2006-01-02")
 	if k.failDay != day {
@@ -164,8 +203,9 @@ func (b *poolBook) failed(name, value string, status int, v verdict, now time.Ti
 func (b *poolBook) worked(name, value string, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	k := b.entry(name, value)
-	k.coolUntil, k.hard, k.lastOK = time.Time{}, false, now
+	if k := b.current(name, value); k != nil {
+		k.coolUntil, k.hard, k.lastOK = time.Time{}, false, now
+	}
 }
 
 // PoolKeyStatus is one pooled value as the dashboard shows it. No value, no
@@ -185,12 +225,18 @@ type PoolKeyStatus struct {
 // PoolKeyStatus reports what the keyring knows about the pooled store key
 // name, for its current value.
 func (h *Handler) PoolKeyStatus(name string) PoolKeyStatus {
-	value := h.snap.Load().keys[name]
+	snap := h.snap.Load()
+	value := snap.keys[name]
+	for _, svc := range snap.config.Services {
+		if slices.Contains(policy.PoolMembers(svc, snap.keys), name) && unsendableKey(svc, value, snap.keys) != "" {
+			return PoolKeyStatus{State: "failing", Reason: "the value has a line break or control character and cannot be sent; replace it"}
+		}
+	}
 	now := h.now()
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
-	k := h.pool.keys[name]
-	if k == nil || k.value != sha256.Sum256([]byte(value)) {
+	k := h.pool.current(name, value)
+	if k == nil {
 		return PoolKeyStatus{}
 	}
 	st := PoolKeyStatus{Until: k.coolUntil, Status: k.lastStatus, Reason: k.reason, LastFailure: k.lastFailure}
@@ -238,12 +284,9 @@ func (p *replayable) body(length int64) (io.Reader, int64) {
 	return bytes.NewReader(p.buf), int64(len(p.buf))
 }
 
-// peekBody reads up to poolPeek bytes of a 400 answer and puts them back in
+// peekBody reads up to poolPeek bytes of the answer and puts them back in
 // front of the rest, so the caller still gets the whole answer.
 func peekBody(resp *http.Response) []byte {
-	if resp.StatusCode != http.StatusBadRequest {
-		return nil
-	}
 	peek, _ := io.ReadAll(io.LimitReader(resp.Body, poolPeek))
 	resp.Body = struct {
 		io.Reader

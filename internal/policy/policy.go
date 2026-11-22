@@ -910,7 +910,7 @@ func (c *Config) Validate() error {
 			if name == poolName || svc.KeyPool && strings.HasPrefix(svc.Key, base+".") {
 				continue
 			}
-			for _, k := range append(svc.KeyNames(), oauthSecretName(svc)) {
+			for _, k := range svc.KeyNames() {
 				if k == base || strings.HasPrefix(k, base+".") {
 					return fmt.Errorf("service %s: the values of %s form a key pool and cannot also be used by %s", poolName, base, name)
 				}

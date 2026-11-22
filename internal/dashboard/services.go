@@ -160,7 +160,8 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	}
 	pasted := f.Pasted != ""
 	var fixed map[string]string
-	var forwardRole, keyPool bool
+	var forwardRole bool
+	var keyPool *bool            // nil: keep the stored key_pool
 	var extra *map[string]string // nil: keep the stored extra headers
 	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
 	if pasted {
@@ -225,7 +226,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated.TestPath, updated.TLSPinSHA256, updated.Project = f.TestPath, f.TLSPin, f.Project
 	updated.ForwardRole = f.ForwardRole
 	if pasted {
-		updated.FixedHeaders, updated.ForwardRole, updated.KeyPool = fixed, forwardRole, keyPool
+		updated.FixedHeaders, updated.ForwardRole = fixed, forwardRole
+		if keyPool != nil {
+			updated.KeyPool = *keyPool
+		}
 	}
 	if cur.Auth == policy.AuthOAuth2 {
 		next := *cur.OAuth2

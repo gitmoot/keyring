@@ -28,6 +28,7 @@ import (
 	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
+	"github.com/gitmoot/keyring/internal/store"
 	"github.com/gitmoot/keyring/internal/workspace"
 )
 
@@ -509,8 +510,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		key = selected.Refresh
 	}
 	members := policy.PoolMembers(svc, snap.keys)
-	if svc.KeyPool && len(members) > 0 {
+	if len(members) > 0 {
 		key = snap.keys[members[0]]
+	}
+	// A pool sends only the values that can go out; one with a line break
+	// is skipped (the key page shows it failing). The Cloudflare asset
+	// upload sends the caller's token and no pool value, so it takes no part
+	// in the pool.
+	var pool []string
+	if len(members) > 0 && !cloudflareAssetsUpload(svc, r.Method, rest) {
+		if pool = sendable(svc, members, snap.keys); len(pool) == 0 {
+			base, _ := store.SplitPart(svc.Key)
+			fail(http.StatusServiceUnavailable, "no value of stored key "+base+" can be sent: each contains a line break or control character; replace them in the dashboard")
+			return
+		}
+		key = snap.keys[pool[0]]
 	}
 	if key == "" && svc.Auth != policy.AuthGcloud {
 		fail(http.StatusServiceUnavailable, "key not loaded")
@@ -698,14 +712,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if svc.ForwardRole {
 		header.Set(policy.RoleHeader, roleName)
 	}
+	// Every value of a pooled key stays masked in the reply.
+	for _, name := range members {
+		alsoRedact = append(alsoRedact, snap.keys[name])
+	}
 	// A key pool tries its values in turn; any other service has one.
 	tries := []string{""}
 	var body *replayable
-	if svc.KeyPool {
-		tries = h.pool.order(members, snap.keys, start)
-		for _, name := range members {
-			alsoRedact = append(alsoRedact, snap.keys[name])
-		}
+	if pool != nil {
+		tries = h.pool.order(pool, snap.keys, start)
 		var readErr error
 		if body, readErr = readReplayable(r); readErr != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
@@ -745,12 +760,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil || name == "" {
 			break
 		}
-		v := judge(svc, resp, peekBody(resp))
+		got := h.now()
+		v := judge(svc, resp, got)
 		switch {
 		case v.keyProblem:
-			h.pool.failed(name, value, resp.StatusCode, v, start)
+			h.pool.failed(name, value, resp.StatusCode, v, got)
 		case resp.StatusCode < 400:
-			h.pool.worked(name, value, start)
+			h.pool.worked(name, value, got)
 		}
 		if !v.keyProblem || i == len(tries)-1 || body.once() {
 			break

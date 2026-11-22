@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // Service discovery for agents (owner, 2026-11-22): an agent can list and
@@ -120,14 +122,6 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 	return " (did you mean " + strings.Join(similar, ", ") + "?)"
 }
 
-// oauthSecretName is the store key holding svc's OAuth client secret, if any.
-func oauthSecretName(svc Service) string {
-	if svc.OAuth2 == nil {
-		return ""
-	}
-	return svc.OAuth2.ClientSecretKey
-}
-
 // PoolMembers are the store keys a key-pool service may send, in the order
 // tried: its Key first, then the other values of the same key by name. Only
 // names with a value in keys are listed.
@@ -135,10 +129,10 @@ func PoolMembers(svc Service, keys map[string]string) []string {
 	if !svc.KeyPool {
 		return nil
 	}
-	base, _ := splitKeyPart(svc.Key)
+	base, _ := store.SplitPart(svc.Key)
 	var rest []string
 	for name, value := range keys {
-		if b, part := splitKeyPart(name); b == base && part != "" && name != svc.Key && value != "" {
+		if b, part := store.SplitPart(name); b == base && part != "" && name != svc.Key && value != "" {
 			rest = append(rest, name)
 		}
 	}
@@ -147,9 +141,4 @@ func PoolMembers(svc Service, keys map[string]string) []string {
 		return append([]string{svc.Key}, rest...)
 	}
 	return rest
-}
-
-func splitKeyPart(name string) (string, string) {
-	key, part, _ := strings.Cut(name, ".")
-	return key, part
 }
