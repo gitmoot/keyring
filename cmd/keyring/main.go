@@ -53,6 +53,10 @@ const usage = `Usage:
   keyring new-token                          make a role token and its hash for the rules file
   keyring request --upstream URL --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new TOKENS_DIR]
                                              ask the owner for full access to services (approved in the dashboard)
+  keyring services --role NAME [--relay http://127.0.0.1:7700] [--search TEXT] [--json]
+                                             list or search the services (name, provider, kind, whether
+                                             the role may use them and how); without --role, --upstream URL
+                                             lists what a new agent may ask for
   keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
                                              on the agent machine: forward /<role>/<service>/... to the keyring
   keyring upgrade [--version vX.Y.Z]        on the Mac, as root (sudo keyring-upgrade): install the latest
@@ -88,6 +92,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.Var(&services, "service", "request: a service to get full access to (repeat)")
 	fs.Var(&projects, "project", "request: a whole project to get full access to, services added later included (repeat)")
 	note := fs.String("note", "", "request: why, shown to the owner")
+	relayURL := fs.String("relay", "http://127.0.0.1:7700", "services: the agent machine's relay")
+	search := fs.String("search", "", "services: words to look for in names, providers and projects")
+	asJSON := fs.Bool("json", false, "services: print the keyring's JSON answer")
 	newTokens := fs.String("new", "", "request: a new agent; make or reuse <dir>/<role>.token and send its sha256")
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
@@ -206,6 +213,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = fileRequest(*upstream, *role, services, projects, *note, *newTokens, stdout)
+	case "services":
+		if fs.NArg() != 0 {
+			fmt.Fprintln(stderr, "keyring services: takes only flags")
+			return 2
+		}
+		err = listServices(*relayURL, *upstream, *role, *search, *asJSON, stdout)
 	case "relay":
 		if *upstream == "" || *tokensDir == "" || fs.NArg() != 0 {
 			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")

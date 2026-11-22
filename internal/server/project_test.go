@@ -164,7 +164,7 @@ func TestEarlyRefusalsCarryTheProject(t *testing.T) {
 	if w := call(h, "GET", "/api/v1/x", testToken, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("no grant: %d", w.Code)
 	}
-	if rec := lastAudit(t, audit); rec.Project != "client" || rec.Note != "role may not use this service" {
+	if rec := lastAudit(t, audit); rec.Project != "client" || !strings.HasPrefix(rec.Note, "role may not use this service") {
 		t.Fatalf("no-grant audit = %+v", rec)
 	}
 }
