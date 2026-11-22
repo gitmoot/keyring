@@ -114,3 +114,21 @@ Each line shows the service, its provider host, its kind (`proxy`, `sign`, `tunn
 A service in a **client-owned** project is listed only to roles with access to it, and a call to it from any other role gets the same answer as a name that does not exist. Every other service is listed to every agent, so it can ask for it.
 
 A wrong name says what was meant: a call answers `403 no service named cloudflare-workers-ai (did you mean cloudflare-vcf?); list them with: keyring services --role my-agent`, and `keyring request` answers `unknown service "cloudflare-workers-ai" (did you mean cloudflare-vcf?)`. A service the role can see but may not use answers with the `keyring request` command to ask for it. Each listing is audited (note `services list`, with the search words).
+
+## Key pools: several keys behind one service
+
+A service with `"key_pool": true` uses every value of its key: one key such as `CLAUDE_KEYS` holding `main`, `backup1`, `backup2`. Agents call one service (`claude-api`) and never know which value answered.
+
+```json
+"claude-api": {"base": "https://api.anthropic.com", "key": "CLAUDE_KEYS.main", "auth": "header", "header": "x-api-key", "key_pool": true}
+```
+
+- `key` names the value tried first; the others follow by name. A value added to the key later joins the pool. Every value of a pooled key may be sent upstream, so no other service may use one (except another pool of the same key). Pools work with `bearer`, `header` and `query` services, without `extra_headers`.
+- Each call goes out with the first value that is not set aside. If the provider says the value is the problem, the value is set aside and **the same request goes out again with the next value**: the agent only sees the answer that worked. If every value is refused, the agent gets the last refusal.
+- A value is set aside on 401 or 403 (rejected), 402 (billing) and 429 (rate limit), and for the Anthropic API on a 429 without `retry-after` (monthly spend cap) and on a 400 that says a spend limit or the credit balance stopped it. It is set aside for the `retry-after` time of a 429 (seconds or an HTTP date; 1 s to 1 h), otherwise for an hour (a minute for another provider's 429), counted from when the refusal came back. Other answers, such as a malformed request (other 400s) or the provider being down (5xx), are passed on without trying another value: every value would fail the same way.
+- What is known about a value lives in memory, is tied to that stored value (replacing it starts over, so does putting an earlier value back, and an answer to a value no longer stored is ignored) and starts empty after a restart. Values that are set aside are still tried, last, rather than refusing the call.
+- A value that cannot be sent in a header (a line break or control character pasted with it) is skipped by a `bearer` or `header` pool; the call is refused only when no value can be sent. The key page shows the value failing when no service pooling it can send it, and otherwise names the services that cannot. A value stored under the bare key name (`CLAUDE_KEYS`) is not a pool member.
+- The Cloudflare asset upload carries the caller's upload token, never a pool value, and its answer says nothing about the pool.
+- To send a request again the keyring keeps its body, up to 32 MiB; a larger body goes out once, with the first value in line. A streamed answer is never retried once it has started: every refusal above comes before the answer begins.
+- The key's dashboard page shows each value's state (working, busy with when it is back, failing with the reason, ready), its calls today and over 7 days, refusals today and last use. The key's status says how many values are set aside, and turns failing when all are; a pool with any value stored is not shown as having no value. Each audit line of a pooled call names the value that answered (`"key": "CLAUDE_KEYS.backup1"`, never its value) and how many were tried (`"attempts"`).
+- Turn it on with `"key_pool": true` in pasted settings when connecting the key (with `key_part` naming the first value) or on the service's edit page; on the edit page, settings that leave `key_pool` out keep it as it is and `"key_pool": false` turns it off.

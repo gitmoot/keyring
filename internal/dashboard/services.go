@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // Editing a service in place (gitmoot/keyring#107). Deleting a service to fix
@@ -51,11 +52,16 @@ type serviceForm struct {
 	ClientID, TokenURL, ClientSecretKey string
 	// ForwardRole: the form's checkbox, or forward_role in pasted settings.
 	ForwardRole bool
+	// KeyPool is shown; set by pasted settings. KeyBase is the key without
+	// its value name, for the link to the key's page.
+	KeyPool bool
+	KeyBase string
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Header: svc.Header, Param: svc.Param,
-		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole}
+		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole, KeyPool: svc.KeyPool}
+	f.KeyBase, _ = store.SplitPart(svc.Key)
 	if o := svc.OAuth2; o != nil {
 		f.ClientID, f.TokenURL, f.ClientSecretKey = o.ClientID, o.TokenURL, o.ClientSecretKey
 	}
@@ -155,6 +161,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	pasted := f.Pasted != ""
 	var fixed map[string]string
 	var forwardRole bool
+	var keyPool *bool            // nil: keep the stored key_pool
 	var extra *map[string]string // nil: keep the stored extra headers
 	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
 	if pasted {
@@ -176,7 +183,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 			return
 		}
 		f.Base, f.Auth, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
-		fixed, extra, oauth, forwardRole = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole
+		fixed, extra, oauth, forwardRole, keyPool = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole, a.KeyPool
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -220,6 +227,9 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	updated.ForwardRole = f.ForwardRole
 	if pasted {
 		updated.FixedHeaders, updated.ForwardRole = fixed, forwardRole
+		if keyPool != nil {
+			updated.KeyPool = *keyPool
+		}
 	}
 	if cur.Auth == policy.AuthOAuth2 {
 		next := *cur.OAuth2
@@ -314,7 +324,7 @@ func changedFields(old, now policy.Service) []string {
 	}{
 		{"base", old.Base != now.Base}, {"key", old.Key != now.Key}, {"auth", old.Auth != now.Auth},
 		{"header", old.Header != now.Header}, {"param", old.Param != now.Param}, {"test_path", old.TestPath != now.TestPath},
-		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)}, {"forward_role", old.ForwardRole != now.ForwardRole},
+		{"tls_pin_sha256", old.TLSPinSHA256 != now.TLSPinSHA256}, {"project", old.Project != now.Project}, {"fixed_headers", !maps.Equal(old.FixedHeaders, now.FixedHeaders)}, {"key_pool", old.KeyPool != now.KeyPool}, {"forward_role", old.ForwardRole != now.ForwardRole},
 		{"extra_headers", !maps.Equal(old.ExtraHeaders, now.ExtraHeaders)},
 		{"oauth2", !old.OAuth2.Equal(now.OAuth2)},
 	} {

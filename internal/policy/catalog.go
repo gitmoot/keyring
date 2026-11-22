@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // Service discovery for agents (owner, 2026-11-22): an agent can list and
@@ -118,4 +120,35 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 		return ""
 	}
 	return " (did you mean " + strings.Join(similar, ", ") + "?)"
+}
+
+// PoolMembers are the store keys a key-pool service may send, in the order
+// tried: its Key first, then the other values of the same key by name. Only
+// names with a value in keys are listed.
+func PoolMembers(svc Service, keys map[string]string) []string {
+	if !svc.KeyPool {
+		return nil
+	}
+	var rest []string
+	for name, value := range keys {
+		if name != svc.Key && InPool(svc, name, value) {
+			rest = append(rest, name)
+		}
+	}
+	slices.Sort(rest)
+	if InPool(svc, svc.Key, keys[svc.Key]) {
+		return append([]string{svc.Key}, rest...)
+	}
+	return rest
+}
+
+// InPool reports whether svc, a key-pool service, may send the store key
+// name holding value: a named value (KEY.part) of its key, and not empty.
+func InPool(svc Service, name, value string) bool {
+	if !svc.KeyPool || value == "" {
+		return false
+	}
+	base, _ := store.SplitPart(svc.Key)
+	b, part := store.SplitPart(name)
+	return b == base && part != ""
 }
