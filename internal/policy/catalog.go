@@ -126,6 +126,9 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 // tried: its Key first, then the other values of the same key by name. Only
 // names with a value in keys are listed.
 func PoolMembers(svc Service, keys map[string]string) []string {
+	if !svc.KeyPool {
+		return nil
+	}
 	var rest []string
 	for name, value := range keys {
 		if name != svc.Key && InPool(svc, name, value) {
