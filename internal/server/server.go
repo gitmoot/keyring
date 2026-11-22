@@ -87,8 +87,11 @@ func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAc
 }
 
 type snapshot struct {
-	config             *policy.Config
-	keys               map[string]string
+	config *policy.Config
+	keys   map[string]string
+	// gens numbers each value in keys; it changes whenever the value does
+	// (poolBook.generations), so pool state is tied to one stored value.
+	gens               map[string]uint64
 	appleAdsKey        *ecdsa.PrivateKey
 	appStoreConnectKey *ecdsa.PrivateKey
 	// signInWithAppleKeys holds the parsed key of each sign-in-with-apple-sign
@@ -190,7 +193,12 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 		previous = old.apns
 	}
 	snap.apns = apnsSigners(config, keys, previous)
+	// Published with the pool locked: an answer is recorded only for the
+	// value generation stored when it is recorded (poolEntry).
+	h.pool.mu.Lock()
+	snap.gens = h.pool.generations(h.snap.Load(), keys)
 	h.snap.Store(snap)
+	h.pool.mu.Unlock()
 	h.retainOAuth(config, keys)
 	h.retainGoogle(config)
 }
@@ -720,7 +728,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tries := []string{""}
 	var body *replayable
 	if pool != nil {
-		tries = h.pool.order(pool, snap.keys, start)
+		tries = h.pool.order(pool, snap.gens, start)
 		var readErr error
 		if body, readErr = readReplayable(r); readErr != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
@@ -764,9 +772,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		v := judge(svc, resp, got)
 		switch {
 		case v.keyProblem:
-			h.poolFailed(name, value, resp.StatusCode, v, got)
+			h.poolFailed(name, snap.gens[name], resp.StatusCode, v, got)
 		case resp.StatusCode < 400:
-			h.poolWorked(name, value, got)
+			h.poolWorked(name, snap.gens[name], got)
 		}
 		if !v.keyProblem || i == len(tries)-1 || body.once() {
 			break

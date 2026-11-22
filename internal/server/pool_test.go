@@ -251,7 +251,7 @@ func TestKeyPoolSkipsUnsendableValues(t *testing.T) {
 	if rec := lastAuditRecord(t, audit); rec.Key != "CLAUDE_KEYS.backup1" || rec.Attempts != 1 {
 		t.Fatalf("audit %+v", rec)
 	}
-	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" || !strings.Contains(st.Reason, "cannot be sent") {
+	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" || !st.CannotSend || !strings.Contains(st.Reason, "cannot be sent") {
 		t.Fatalf("main status %+v", st)
 	}
 	for name, v := range keys {
@@ -410,23 +410,55 @@ func TestKeyPoolOldOrderingKeepsCurrentRefusal(t *testing.T) {
 	up := httptest.NewServer(&fakeAnthropic{})
 	defer up.Close()
 	h, _, clock := poolHandler(t, anthropicBase, up, poolKeys)
+	old := h.snap.Load()
 	members := []string{"CLAUDE_KEYS.main", "CLAUDE_KEYS.backup1", "CLAUDE_KEYS.backup2"}
 	keys := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-new0", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111", "CLAUDE_KEYS.backup2": "sk-ant-b2-2222"}
 	h.Swap(h.Config(), keys)
-	h.poolFailed("CLAUDE_KEYS.main", "sk-ant-main-new0", 401, verdict{true, true, time.Hour, "401 key rejected"}, clock.now())
-	if got := h.pool.order(members, poolKeys, clock.now()); got[0] != "CLAUDE_KEYS.main" {
+	cur := h.snap.Load()
+	h.poolFailed("CLAUDE_KEYS.main", cur.gens["CLAUDE_KEYS.main"], 401, verdict{true, true, time.Hour, "401 key rejected"}, clock.now())
+	if got := h.pool.order(members, old.gens, clock.now()); got[0] != "CLAUDE_KEYS.main" {
 		t.Fatalf("old snapshot order %v: its main value was never refused", got)
 	}
-	if got := h.pool.order(members, keys, clock.now()); got[len(got)-1] != "CLAUDE_KEYS.main" {
+	if got := h.pool.order(members, cur.gens, clock.now()); got[len(got)-1] != "CLAUDE_KEYS.main" {
 		t.Fatalf("current order %v: the refused value is not last", got)
 	}
 	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" || st.FailuresToday != 1 {
 		t.Fatalf("refusal of the current value lost: %+v", st)
 	}
 	// An answer to a value no longer stored is not recorded at all.
-	h.poolWorked("CLAUDE_KEYS.main", "sk-ant-main-0000", clock.now())
+	h.poolWorked("CLAUDE_KEYS.main", old.gens["CLAUDE_KEYS.main"], clock.now())
 	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "failing" {
 		t.Fatalf("an answer to the old value changed the current one: %+v", st)
+	}
+}
+
+// Putting a value back (rotating A to B, then back to A) starts it over:
+// A's old refusal does not come back with it, and an answer to A sent
+// before the rotation does not count for A stored again.
+func TestKeyPoolRollbackStartsOver(t *testing.T) {
+	fake := &fakeAnthropic{answer: map[string]func(http.ResponseWriter){
+		"sk-ant-main-0000": status(401, nil, `{}`),
+		"sk-ant-main-new0": status(500, nil, `{}`),
+		"sk-ant-b1-1111":   status(500, nil, `{}`),
+	}}
+	up := httptest.NewServer(fake)
+	defer up.Close()
+	h, _, clock := poolHandler(t, anthropicBase, up, poolKeys)
+	call(h, "POST", "/claude-api/v1/messages", testToken, nil) // A refused, set aside
+	first := h.snap.Load()
+	rotated := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-new0", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111", "CLAUDE_KEYS.backup2": "sk-ant-b2-2222"}
+	h.Swap(h.Config(), rotated)
+	call(h, "POST", "/claude-api/v1/messages", testToken, nil) // B: a 500, not a key problem
+	h.Swap(h.Config(), poolKeys)
+	fake.mu.Lock()
+	fake.answer["sk-ant-main-0000"] = nil // A works again
+	fake.mu.Unlock()
+	if w := call(h, "POST", "/claude-api/v1/messages", testToken, nil); w.Code != 200 || fake.seen[len(fake.seen)-1] != "sk-ant-main-0000" {
+		t.Fatalf("after the rollback: %d after %v, want A tried first", w.Code, fake.seen)
+	}
+	h.poolFailed("CLAUDE_KEYS.main", first.gens["CLAUDE_KEYS.main"], 401, verdict{true, true, time.Hour, "401 key rejected"}, clock.now())
+	if st := h.PoolKeyStatus("CLAUDE_KEYS.main"); st.State != "working" {
+		t.Fatalf("an answer to A before the rotation counted for A stored again: %+v", st)
 	}
 }
 
@@ -455,7 +487,7 @@ func TestKeyPoolStatusPerServiceSendability(t *testing.T) {
 		t.Fatalf("query call: %d %s", w.Code, w.Body)
 	}
 	st := h.PoolKeyStatus("CLAUDE_KEYS.main")
-	if st.State != "working" || strings.Join(st.Unsendable, ",") != "claude-api" {
+	if st.State != "working" || st.CannotSend || strings.Join(st.Unsendable, ",") != "claude-api" {
 		t.Fatalf("main status %+v: want working, not sendable by claude-api", st)
 	}
 }

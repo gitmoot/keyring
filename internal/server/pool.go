@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -111,9 +110,10 @@ func spendLimitMessage(body []byte) bool {
 }
 
 // poolKey is what the keyring knows about one value of a pooled key. It is
-// tied to the value: replacing the value starts over.
+// tied to the value's generation: replacing the value starts over, and so
+// does putting an old value back.
 type poolKey struct {
-	value       [sha256.Size]byte
+	gen         uint64
 	coolUntil   time.Time
 	hard        bool
 	lastStatus  int
@@ -127,12 +127,39 @@ type poolKey struct {
 type poolBook struct {
 	mu   sync.Mutex
 	keys map[string]*poolKey
+	// gen numbers each value a store key is given (snapshot.gens).
+	gen uint64
 }
 
-// current is the entry for name if it is about value, else nil. Callers
-// hold mu.
-func (b *poolBook) current(name, value string) *poolKey {
-	if k := b.keys[name]; k != nil && k.value == sha256.Sum256([]byte(value)) {
+// generations numbers the values of keys for a snapshot replacing old: a
+// value that did not change keeps its number, any other gets a new one, so
+// an answer to a value never counts for one stored later, even with the
+// same bytes. What is known about a value no longer stored is dropped.
+// Callers hold mu.
+func (b *poolBook) generations(old *snapshot, keys map[string]string) map[string]uint64 {
+	gens := make(map[string]uint64, len(keys))
+	for name, value := range keys {
+		if old != nil {
+			if prev, ok := old.keys[name]; ok && prev == value {
+				gens[name] = old.gens[name]
+				continue
+			}
+		}
+		b.gen++
+		gens[name] = b.gen
+	}
+	for name, k := range b.keys {
+		if k.gen != gens[name] {
+			delete(b.keys, name)
+		}
+	}
+	return gens
+}
+
+// current is the entry for name if it is about value generation gen, else
+// nil. Callers hold mu.
+func (b *poolBook) current(name string, gen uint64) *poolKey {
+	if k := b.keys[name]; k != nil && k.gen == gen {
 		return k
 	}
 	return nil
@@ -140,16 +167,14 @@ func (b *poolBook) current(name, value string) *poolKey {
 
 // order lists the members to try: those not set aside in pool order, then
 // those set aside, soonest back first. A call never fails locally because
-// every value is set aside: they are still tried. Ordering only reads: a
-// call holding an older value never replaces what is known about the
-// value stored now.
-func (b *poolBook) order(members []string, keys map[string]string, now time.Time) []string {
+// every value is set aside: they are still tried. Ordering only reads.
+func (b *poolBook) order(members []string, gens map[string]uint64, now time.Time) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var ready, waiting []string
 	until := map[string]time.Time{}
 	for _, name := range members {
-		if k := b.current(name, keys[name]); k != nil && now.Before(k.coolUntil) {
+		if k := b.current(name, gens[name]); k != nil && now.Before(k.coolUntil) {
 			waiting = append(waiting, name)
 			until[name] = k.coolUntil
 		} else {
@@ -172,31 +197,32 @@ func sendable(svc policy.Service, members []string, keys map[string]string) []st
 	return out
 }
 
-// poolEntry is the entry to record an answer to value under name, or nil
-// when value is no longer the one stored under name: an answer to a value
-// replaced while the call was out says nothing about its replacement. The
-// stored value is read with h.pool.mu held, so an answer to an older value
-// never overwrites one to the newer. Callers hold h.pool.mu.
-func (h *Handler) poolEntry(name, value string) *poolKey {
-	if h.snap.Load().keys[name] != value {
+// poolEntry is the entry to record an answer to generation gen of name, or
+// nil when that value is no longer the one stored: an answer to a value
+// replaced while the call was out says nothing about what is stored now.
+// Swap publishes snapshots with mu held, so the check holds while the
+// answer is recorded. Callers hold h.pool.mu.
+func (h *Handler) poolEntry(name string, gen uint64) *poolKey {
+	if h.snap.Load().gens[name] != gen {
 		return nil
 	}
-	if k := h.pool.current(name, value); k != nil {
+	if k := h.pool.current(name, gen); k != nil {
 		return k
 	}
 	if h.pool.keys == nil {
 		h.pool.keys = map[string]*poolKey{}
 	}
-	k := &poolKey{value: sha256.Sum256([]byte(value))}
+	k := &poolKey{gen: gen}
 	h.pool.keys[name] = k
 	return k
 }
 
-// poolFailed sets value aside after a refusal received at now.
-func (h *Handler) poolFailed(name, value string, status int, v verdict, now time.Time) {
+// poolFailed sets generation gen of name aside after a refusal received
+// at now.
+func (h *Handler) poolFailed(name string, gen uint64, status int, v verdict, now time.Time) {
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
-	k := h.poolEntry(name, value)
+	k := h.poolEntry(name, gen)
 	if k == nil {
 		return
 	}
@@ -208,11 +234,11 @@ func (h *Handler) poolFailed(name, value string, status int, v verdict, now time
 	k.failures++
 }
 
-// poolWorked records that value was accepted at now.
-func (h *Handler) poolWorked(name, value string, now time.Time) {
+// poolWorked records that generation gen of name was accepted at now.
+func (h *Handler) poolWorked(name string, gen uint64, now time.Time) {
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
-	if k := h.poolEntry(name, value); k != nil {
+	if k := h.poolEntry(name, gen); k != nil {
 		k.coolUntil, k.hard, k.lastOK = time.Time{}, false, now
 	}
 }
@@ -232,7 +258,9 @@ type PoolKeyStatus struct {
 	FailuresToday int
 	// Unsendable names the pooling services that cannot send the value: it
 	// has a line break or control character and they put it in a header.
+	// CannotSend: none of the services pooling it can.
 	Unsendable []string
+	CannotSend bool
 }
 
 // PoolKeyStatus reports what the keyring knows about the pooled store key
@@ -240,23 +268,24 @@ type PoolKeyStatus struct {
 func (h *Handler) PoolKeyStatus(name string) PoolKeyStatus {
 	snap := h.snap.Load()
 	value := snap.keys[name]
-	var pooling, unsendable []string
+	pooling := 0
+	var unsendable []string
 	for sname, svc := range snap.config.Services {
-		if slices.Contains(policy.PoolMembers(svc, snap.keys), name) {
-			pooling = append(pooling, sname)
+		if policy.InPool(svc, name, value) {
+			pooling++
 			if unsendableKey(svc, value, snap.keys) != "" {
 				unsendable = append(unsendable, sname)
 			}
 		}
 	}
 	slices.Sort(unsendable)
-	if len(unsendable) > 0 && len(unsendable) == len(pooling) {
-		return PoolKeyStatus{State: "failing", Reason: "the value has a line break or control character and cannot be sent; replace it", Unsendable: unsendable}
+	if len(unsendable) > 0 && len(unsendable) == pooling {
+		return PoolKeyStatus{State: "failing", Reason: "the value has a line break or control character and cannot be sent; replace it", Unsendable: unsendable, CannotSend: true}
 	}
 	now := h.now()
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
-	k := h.pool.current(name, value)
+	k := h.pool.current(name, snap.gens[name])
 	if k == nil {
 		return PoolKeyStatus{Unsendable: unsendable}
 	}

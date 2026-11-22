@@ -126,19 +126,26 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 // tried: its Key first, then the other values of the same key by name. Only
 // names with a value in keys are listed.
 func PoolMembers(svc Service, keys map[string]string) []string {
-	if !svc.KeyPool {
-		return nil
-	}
-	base, _ := store.SplitPart(svc.Key)
 	var rest []string
 	for name, value := range keys {
-		if b, part := store.SplitPart(name); b == base && part != "" && name != svc.Key && value != "" {
+		if name != svc.Key && InPool(svc, name, value) {
 			rest = append(rest, name)
 		}
 	}
 	slices.Sort(rest)
-	if keys[svc.Key] != "" {
+	if InPool(svc, svc.Key, keys[svc.Key]) {
 		return append([]string{svc.Key}, rest...)
 	}
 	return rest
+}
+
+// InPool reports whether svc, a key-pool service, may send the store key
+// name holding value: a named value (KEY.part) of its key, and not empty.
+func InPool(svc Service, name, value string) bool {
+	if !svc.KeyPool || value == "" {
+		return false
+	}
+	base, _ := store.SplitPart(svc.Key)
+	b, part := store.SplitPart(name)
+	return b == base && part != ""
 }

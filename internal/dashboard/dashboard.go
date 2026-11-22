@@ -501,7 +501,7 @@ func (b *Backend) describePool(row *keyRow, usage []server.Usage) {
 		}
 		// Another service pooling the value can still send it; the ones
 		// that cannot are named beside its health.
-		if len(st.Unsendable) > 0 && (st.State != "failing" || !st.Until.IsZero()) {
+		if len(st.Unsendable) > 0 && !st.CannotSend {
 			p.PoolStatus += "; cannot be sent by " + strings.Join(st.Unsendable, ", ") + " (line break or control character)"
 			if p.PoolClass == "" || p.PoolClass == "ok" {
 				p.PoolClass = "warn"
