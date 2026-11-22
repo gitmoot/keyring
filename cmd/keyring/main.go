@@ -245,7 +245,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func check(configPath, storePath string, stdout io.Writer) error {
-	cfg, err := policy.Load(configPath)
+	cfg, err := loadConfig(configPath, storePath, false, stdout)
 	if err != nil {
 		return err
 	}
@@ -273,6 +273,13 @@ func check(configPath, storePath string, stdout io.Writer) error {
 func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 	var missing []string
 	for _, svc := range cfg.Services {
+		if svc.KeyPool {
+			// A pool names its key; any stored value of it will do.
+			if len(policy.PoolMembers(svc, keys, nil)) == 0 {
+				missing = append(missing, svc.Key)
+			}
+			continue
+		}
 		for _, name := range svc.KeyNames() {
 			if keys[name] == "" {
 				missing = append(missing, name)
@@ -284,7 +291,7 @@ func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 }
 
 func serve(configPath, storePath string, stderr io.Writer) error {
-	cfg, err := policy.Load(configPath)
+	cfg, err := loadConfig(configPath, storePath, true, stderr)
 	if err != nil {
 		return err
 	}
@@ -325,7 +332,13 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	// changes serializes the dashboard's writes, consent links and the
 	// SIGHUP reload.
 	changes := &sync.Mutex{}
-	metaPath := filepath.Join(filepath.Dir(storePath), "keymeta.json")
+	metaPath := metaPathOf(storePath)
+	// Key pools try a key's values in the list order the dashboard keeps.
+	if order, err := dashboardpkg.ValueOrder(metaPath); err != nil {
+		fmt.Fprintf(stderr, "key value order not loaded (key pools use name order): %v\n", err)
+	} else {
+		handler.SetValueOrder(order)
+	}
 	dashboard, dashboardSrv, err := startDashboard(cfg, audit, stderr, func(a *admin.Server) {
 		reqs := requests.Open(filepath.Join(filepath.Dir(storePath), "requests.json"))
 		handler.SetRequests(reqs)

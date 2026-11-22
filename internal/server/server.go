@@ -89,6 +89,11 @@ func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAc
 type snapshot struct {
 	config *policy.Config
 	keys   map[string]string
+	// order is each key's list order of its value names (key -> parts),
+	// kept by the dashboard; a pool tries the values in this order. It is
+	// published with keys, so a request never pairs renamed values with an
+	// old order.
+	order map[string][]string
 	// gens numbers each value in keys; it changes whenever the value does
 	// (poolBook.generations), so pool state is tied to one stored value.
 	gens               map[string]uint64
@@ -171,11 +176,39 @@ func (h *Handler) clientFor(svc policy.Service) *http.Client {
 // Config returns the settings in use.
 func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 
-// Swap replaces the settings and keys for every later request. config must be
-// validated. Requests already running keep what they started with; daily
-// counts carry over.
+// SetValueOrder sets each key's list order of its value names (key ->
+// parts), which key pools try in that order from the next call on.
+func (h *Handler) SetValueOrder(order map[string][]string) {
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+	next := *h.snap.Load()
+	next.order = order
+	h.snap.Store(&next)
+}
+
+// PoolTries are the values a key pool service would try now, in the order
+// a call tries them: its key's values in list order that can be sent, those
+// set aside after a refusal last. The dashboard's Test follows it.
+func (h *Handler) PoolTries(svc policy.Service) []string {
+	snap := h.snap.Load()
+	pool := sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys)
+	return h.pool.order(pool, snap.gens, time.Now())
+}
+
+// Swap replaces the settings and keys for every later request, keeping the
+// value order. config must be validated. Requests already running keep what
+// they started with; daily counts carry over.
 func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
-	snap := &snapshot{config: config, keys: keys}
+	var order map[string][]string
+	if old := h.snap.Load(); old != nil {
+		order = old.order
+	}
+	h.SwapWithOrder(config, keys, order)
+}
+
+// SwapWithOrder is Swap with a new value order, published together.
+func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
+	snap := &snapshot{config: config, keys: keys, order: order}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}
@@ -517,7 +550,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if selected != nil {
 		key = selected.Refresh
 	}
-	members := policy.PoolMembers(svc, snap.keys)
+	members := policy.PoolMembers(svc, snap.keys, snap.order[svc.Key])
 	if len(members) > 0 {
 		key = snap.keys[members[0]]
 	}
@@ -712,10 +745,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		alsoRedact = append(alsoRedact, value)
 	}
 	// The account token (upstreamKey) stays masked in the reply either way;
-	// the upload call is the one request that does not send it.
-	sendKey := upstreamKey
+	// the upload call is the one request that does not send it. Its token is
+	// a Bearer token, so the stored key's scheme goes with the stored key.
+	sendKey, sendSvc := upstreamKey, svc
 	if callerUploadToken != "" {
-		sendKey = callerUploadToken
+		sendKey, sendSvc.Scheme = callerUploadToken, ""
 	}
 	if svc.ForwardRole {
 		header.Set(policy.RoleHeader, roleName)
@@ -747,13 +781,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var err error
 	for i, name := range tries {
-		reqBody, length, value, sendSvc := io.Reader(r.Body), r.ContentLength, sendKey, svc
+		reqBody, length, value := io.Reader(r.Body), r.ContentLength, sendKey
 		if name != "" {
 			value = snap.keys[name]
 			reqBody, length = body.body(r.ContentLength)
 			rec.Key, rec.Attempts = name, i+1
-		} else if callerUploadToken != "" {
-			sendSvc.Scheme = "" // the upload token is a Bearer token; a scheme belongs to the stored key
 		}
 		var out *http.Request
 		out, err = buildOutbound(r.Context(), sendSvc, value, r.Method, rest, r.URL.RawQuery, header.Clone(), reqBody, length)
@@ -934,21 +966,31 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 // oauth2 service, key is the refresh token: the test mints an access token
 // with it and the client secret in use.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
+	resp, err := h.testRequest(ctx, svc, key)
+	if err != nil {
+		return 0, err
+	}
+	return closeTest(resp), nil
+}
+
+// testRequest sends the service's test request with key; the caller closes
+// the answer.
+func (h *Handler) testRequest(ctx context.Context, svc policy.Service, key string) (*http.Response, error) {
 	if svc.SignOnly() {
-		return 0, errors.New("sign-only service has no upstream test")
+		return nil, errors.New("sign-only service has no upstream test")
 	}
 	if svc.TestPath == "" {
-		return 0, errors.New("the service has no test request")
+		return nil, errors.New("the service has no test request")
 	}
 	if why := h.snap.Load().config.ProjectStopped(svc, h.now()); why != "" {
-		return 0, errors.New(projectStoppedNote(svc.Project, why))
+		return nil, errors.New(projectStoppedNote(svc.Project, why))
 	}
 	snap := h.snap.Load()
 	if svc.Auth == policy.AuthOAuth2 {
 		_, secret := oauthSecrets(svc, snap.keys)
 		token, err := h.accessToken(ctx, svc, key, secret)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		key = token
 	}
@@ -961,7 +1003,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 	for name, storeKey := range svc.ExtraHeaders {
 		value := snap.keys[storeKey]
 		if value == "" {
-			return 0, errors.New("key not loaded")
+			return nil, errors.New("key not loaded")
 		}
 		header.Set(name, value)
 	}
@@ -970,7 +1012,7 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		googleAccount = snap.config.GoogleAccounts[svc.GoogleAccount]
 		token, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		key = token
 		if googleAccount.QuotaProject != "" {
@@ -978,26 +1020,50 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 		}
 	}
 	if name := unsendableKey(svc, key, snap.keys); name != "" {
-		return 0, errors.New("stored key " + name + " contains a line break or control character")
+		return nil, errors.New("stored key " + name + " contains a line break or control character")
 	}
 	out, err := buildOutbound(ctx, svc, key, method, path, query, header, http.NoBody, 0)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	resp, err := h.clientFor(svc).Do(out)
 	if err != nil {
 		// The error text can include the URL, and so a query-string key.
 		if errors.Is(err, errTLSPin) {
-			return 0, errors.New("service certificate does not match the pinned certificate")
+			return nil, errors.New("service certificate does not match the pinned certificate")
 		}
-		return 0, errors.New("service unreachable")
+		return nil, errors.New("service unreachable")
 	}
 	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
 		h.dropGoogleToken(googleAccount, key)
 	}
+	return resp, nil
+}
+
+// TestPool sends the test request of svc, a key pool, with values in turn
+// (the order PoolTries gives), moving on only when the service refused a
+// value the way a call moves on to the next (judge), and returns the last
+// answer's status.
+func (h *Handler) TestPool(ctx context.Context, svc policy.Service, values []string) (int, error) {
+	for i, value := range values {
+		resp, err := h.testRequest(ctx, svc, value)
+		if err != nil {
+			return 0, err
+		}
+		v := judge(svc, resp, h.now())
+		status := closeTest(resp)
+		if !v.keyProblem || i == len(values)-1 {
+			return status, nil
+		}
+	}
+	return 0, errors.New("key not loaded")
+}
+
+// closeTest drains and closes a test answer and returns its status.
+func closeTest(resp *http.Response) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
-	return resp.StatusCode, nil
+	return resp.StatusCode
 }
 
 // splitPath takes "/<service>/<rest>" and returns the service and the

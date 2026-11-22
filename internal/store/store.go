@@ -5,13 +5,16 @@ package store
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gitmoot/keyring/internal/fileutil"
@@ -143,6 +146,85 @@ func DeleteAll(path string, names []string) error {
 		delete(keys, name)
 	}
 	return save(path, keys)
+}
+
+// Move renames values (old name -> new name) and adds new ones (name ->
+// value) in one atomic store update. Every old name must be stored; no new or
+// added name may be (unless it is moved away in the same update): a move
+// never overwrites a value.
+func Move(path string, moves, add map[string]string) error {
+	keys, err := Load(path)
+	if err != nil {
+		return err
+	}
+	values := make(map[string]string, len(moves))
+	for from := range moves {
+		v, ok := keys[from]
+		if !ok {
+			return fmt.Errorf("no key named %q", from)
+		}
+		values[from] = v
+		delete(keys, from)
+	}
+	put := func(name, value string) error {
+		if !ValidName(name) {
+			return fmt.Errorf("invalid key name %q: use letters, digits and _", name)
+		}
+		if value == "" {
+			return errors.New("empty value")
+		}
+		if _, taken := keys[name]; taken {
+			return fmt.Errorf("a key named %q exists", name)
+		}
+		keys[name] = value
+		return nil
+	}
+	for from, to := range moves {
+		if err := put(to, values[from]); err != nil {
+			return err
+		}
+	}
+	for name, value := range add {
+		if err := put(name, value); err != nil {
+			return err
+		}
+	}
+	return save(path, keys)
+}
+
+// OrderParts sorts the value names of one key (the parts of KEY.part): those
+// in order first, as listed there, then the rest by number ("2" before "10"),
+// then by name.
+func OrderParts(parts, order []string) {
+	rank := make(map[string]int, len(order))
+	for i, p := range order {
+		if _, dup := rank[p]; !dup {
+			rank[p] = i
+		}
+	}
+	slices.SortStableFunc(parts, func(a, b string) int {
+		ra, inA := rank[a]
+		rb, inB := rank[b]
+		switch {
+		case inA && inB:
+			return ra - rb
+		case inA:
+			return -1
+		case inB:
+			return 1
+		}
+		na, errA := strconv.Atoi(a)
+		nb, errB := strconv.Atoi(b)
+		switch {
+		case errA == nil && errB == nil && na != nb:
+			return cmp.Compare(na, nb)
+		case errA == nil && errB != nil:
+			return -1
+		case errA != nil && errB == nil:
+			return 1
+		}
+		return strings.Compare(a, b)
+	})
 }
 
 func save(path string, keys map[string]string) error {

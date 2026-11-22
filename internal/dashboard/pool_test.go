@@ -25,9 +25,9 @@ func TestKeyPageShowsEachPooledValue(t *testing.T) {
 		io.WriteString(w, `{"ok":true}`)
 	}))
 	defer up.Close()
-	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {""},
-		"part": {"main", "backup1", "", ""}, "part_value": {"sk-ant-main-0000", "sk-ant-b1-1111", "", ""}, "password": {password}})
-	e.withService("claude-api", policy.Service{Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-main-0000", "sk-ant-b1-1111"},
+		"part": {"main", "backup1"}, "password": {password}})
+	e.withService("claude-api", policy.Service{Base: up.URL, Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
 	if w := e.saveCell("phobos", "claude-api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}}); w.Header().Get("Location") != "/access?done=saved" {
 		t.Fatalf("grant: %d %s", w.Code, w.Body)
 	}
@@ -48,17 +48,17 @@ func TestKeyPageShowsEachPooledValue(t *testing.T) {
 	}
 }
 
-// A pool works while any of its values is stored: one whose first value is
-// missing is not shown as having no value.
-func TestPoolWithoutItsFirstValueHasAValue(t *testing.T) {
+// A pool works while any of its key's values is stored, whatever their
+// names: it is not shown as having no value.
+func TestPoolOfNamedValuesHasAValue(t *testing.T) {
 	e := newEnv(t)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }))
 	defer up.Close()
-	if w := e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {""},
-		"part": {"backup1", "backup2", "", ""}, "part_value": {"sk-ant-b1-1111", "sk-ant-b2-2222", "", ""}, "password": {password}}); w.Code != http.StatusSeeOther {
+	if w := e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-b1-1111", "sk-ant-b2-2222"},
+		"part": {"backup1", "backup2"}, "password": {password}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("add: %d %s", w.Code, w.Body)
 	}
-	e.withService("claude-api", policy.Service{Base: up.URL, Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
+	e.withService("claude-api", policy.Service{Base: up.URL, Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
 	if w := e.saveCell("phobos", "claude-api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}}); w.Header().Get("Location") != "/access?done=saved" {
 		t.Fatalf("grant: %d %s", w.Code, w.Body)
 	}
@@ -79,23 +79,36 @@ func TestPoolWithoutItsFirstValueHasAValue(t *testing.T) {
 	}
 }
 
-// A value stored under the bare name is not a pool member: a pool with only
-// that has nothing to send and shows no value, as the proxy refuses its
-// calls.
-func TestPoolWithOnlyABareValueHasNoValue(t *testing.T) {
+// A key with one plain value is a pool of one: it has a value, and the pool
+// sends it.
+func TestPoolOverOnePlainValueHasAValue(t *testing.T) {
 	e := newEnv(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "sk-ant-bare-0000" {
+			w.WriteHeader(401)
+			return
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer up.Close()
 	if w := e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-bare-0000"}, "password": {password}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("add: %d %s", w.Code, w.Body)
 	}
-	e.withService("claude-api", policy.Service{Base: "https://api.anthropic.com", Key: "CLAUDE_KEYS.main", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
+	e.withService("claude-api", policy.Service{Base: up.URL, Key: "CLAUDE_KEYS", Auth: policy.AuthHeader, Header: "x-api-key", KeyPool: true})
 	rows, err := e.backend.rows()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
-		if row.Name == "CLAUDE_KEYS" && (row.HasValue || row.State != "novalue") {
-			t.Fatalf("pool with only a bare value shows %q (%s), HasValue %v", row.Status, row.State, row.HasValue)
+		if row.Name == "CLAUDE_KEYS" && (!row.HasValue || row.State == "novalue") {
+			t.Fatalf("pool over one plain value shows %q (%s), HasValue %v", row.Status, row.State, row.HasValue)
 		}
+	}
+	if w := e.saveCell("phobos", "claude-api", url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}}); w.Header().Get("Location") != "/access?done=saved" {
+		t.Fatalf("grant: %d %s", w.Code, w.Body)
+	}
+	if code := e.call("POST", "/claude-api/v1/messages", token); code != 200 {
+		t.Fatalf("pooled call: %d", code)
 	}
 }
 
@@ -103,10 +116,9 @@ func TestPoolWithOnlyABareValueHasNoValue(t *testing.T) {
 // an explicit false turns it off.
 func TestEditKeepsKeyPool(t *testing.T) {
 	e := newEnv(t)
-	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {""},
-		"part": {"main", "backup1", "", ""}, "part_value": {"sk-ant-main-0000", "sk-ant-b1-1111", "", ""}, "password": {password}})
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-main-0000", "sk-ant-b1-1111"}, "password": {password}})
 	base := `"base":"https://api.anthropic.com","auth":"header","header":"x-api-key"`
-	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {`{"service":"claude-api",` + base + `,"key_part":"main","key_pool":true}`}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {`{"service":"claude-api",` + base + `,"key_pool":true}`}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
 		t.Fatalf("connect: %s", loc)
 	}
 	pool := func() bool { return e.proxy.Config().Services["claude-api"].KeyPool }
@@ -116,7 +128,7 @@ func TestEditKeepsKeyPool(t *testing.T) {
 	if w := e.edit("claude-api", url.Values{"pasted": {`{` + base + `}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || !pool() {
 		t.Fatalf("paste without key_pool: %d, key_pool %v", w.Code, pool())
 	}
-	if w := e.edit("claude-api", url.Values{"pasted": {`{` + base + `,"key_pool":false}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || pool() {
+	if w := e.edit("claude-api", url.Values{"key": {"CLAUDE_KEYS.1"}, "pasted": {`{` + base + `,"key_pool":false}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || pool() {
 		t.Fatalf("paste with key_pool false: %d, key_pool %v", w.Code, pool())
 	}
 }

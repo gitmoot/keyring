@@ -183,7 +183,11 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		if created == nil || !exists {
 			created = &now
 		}
-		meta[name] = KeyMeta{UpdatedAt: &now, CreatedAt: created, Kind: info.Kind, Fingerprint: info.Fingerprint}
+		m := KeyMeta{UpdatedAt: &now, CreatedAt: created, Kind: info.Kind, Fingerprint: info.Fingerprint}
+		if exists {
+			m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
+		}
+		meta[name] = m
 		_ = b.saveMeta(meta)
 	}
 	fields := map[string]any{"key": name, "kind": info.Kind, "replaced": exists}

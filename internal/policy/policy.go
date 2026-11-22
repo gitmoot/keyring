@@ -330,11 +330,12 @@ type Service struct {
 	// 488215: macserve saw every relay caller as the same client). Off by
 	// default: a third-party API has no use for role names.
 	ForwardRole bool `json:"forward_role,omitempty"`
-	// KeyPool makes every value of Key's key a candidate (owner, 2026-11-22):
-	// Key ("CLAUDE_KEYS.main") is tried first, then the key's other values by
-	// name, and a value the provider rejects (bad or out-of-credit key, rate
-	// limit) is set aside for a while and the call is sent again with the
-	// next. A value added to the key later joins the pool. See PoolMembers.
+	// KeyPool makes every value of the key named by Key a candidate (owner,
+	// 2026-11-22): Key names the key itself ("CLAUDE_KEYS"), its values
+	// (CLAUDE_KEYS.1, CLAUDE_KEYS.2) are tried in the key's list order, and a
+	// value the provider rejects (bad or out-of-credit key, rate limit) is set
+	// aside for a while and the call is sent again with the next. A value
+	// added to the key later joins the pool. See PoolMembers.
 	KeyPool bool `json:"key_pool,omitempty"`
 
 	base *url.URL
@@ -779,6 +780,39 @@ func LoadAccess(path string) (AccessList, error) {
 	return access, nil
 }
 
+// ConvertNamedValuePools rewrites, in access, each key_pool service that
+// names one value of its key (key "CLAUDE_KEYS.main", the only form v0.14.18
+// accepted) to name the key itself, as a pool now must. It returns, per key,
+// the value name such a pool sent first (key -> part), so the caller can
+// keep that value first in the key's list; nil when nothing changed. Two
+// such pools of one key with different first values cannot both keep theirs
+// (a key has one list order): that is an error naming them, and access is
+// left as it was.
+func ConvertNamedValuePools(access *AccessList) (map[string]string, error) {
+	var first map[string]string
+	by := map[string]string{} // key -> the service whose first value it keeps
+	converted := map[string]Service{}
+	for _, name := range slices.Sorted(maps.Keys(access.Services)) {
+		svc := access.Services[name]
+		key, part, named := strings.Cut(svc.Key, ".")
+		if !svc.KeyPool || !named {
+			continue
+		}
+		if first == nil {
+			first = map[string]string{}
+		}
+		if kept, seen := first[key]; !seen {
+			first[key], by[key] = part, name
+		} else if kept != part {
+			return nil, fmt.Errorf("key pools %s and %s use %s with different first values (%s, %s); a pool now names the key and tries its values in one list order: set both to the same \"key\" (for example %q) in %s, then start again", by[key], name, key, kept, part, key+"."+kept, "access.json")
+		}
+		svc.Key = key
+		converted[name] = svc
+	}
+	maps.Copy(access.Services, converted)
+	return first, nil
+}
+
 // SaveAccess validates access against rules, then replaces the access file
 // atomically. An invalid access list is never written.
 func SaveAccess(rules Rules, access AccessList) (*Config, error) {
@@ -909,9 +943,9 @@ func (c *Config) Validate() error {
 		}
 		// Every value of a pool's key may be sent upstream: none may be
 		// another service's key, unless that service pools the same key.
-		base, _ := store.SplitPart(pool.Key)
+		base := pool.Key
 		for name, svc := range c.Services {
-			if name == poolName || svc.KeyPool && strings.HasPrefix(svc.Key, base+".") {
+			if name == poolName || svc.KeyPool && svc.Key == base {
 				continue
 			}
 			for _, k := range svc.KeyNames() {
@@ -1072,8 +1106,8 @@ func (s *Service) validate() error {
 		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
 			return errors.New("key_pool needs bearer, header or query authentication")
 		}
-		if _, part := store.SplitPart(s.Key); part == "" {
-			return errors.New("key_pool needs a key with several values; key names the one tried first (e.g. CLAUDE_KEYS.main)")
+		if _, part := store.SplitPart(s.Key); part != "" {
+			return errors.New("key_pool names the key itself (e.g. CLAUDE_KEYS), not one of its values: leave key_part out; the pool uses the key's values in list order")
 		}
 		if len(s.ExtraHeaders) != 0 {
 			return errors.New("key_pool cannot be combined with extra_headers")

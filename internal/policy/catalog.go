@@ -123,32 +123,40 @@ func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 }
 
 // PoolMembers are the store keys a key-pool service may send, in the order
-// tried: its Key first, then the other values of the same key by name. Only
+// tried: the named values of its key (CLAUDE_KEYS.1, CLAUDE_KEYS.2) in the
+// key's list order (order holds value names, kept by the dashboard; see
+// store.OrderParts), or the key itself while it has one plain value. Only
 // names with a value in keys are listed.
-func PoolMembers(svc Service, keys map[string]string) []string {
+func PoolMembers(svc Service, keys map[string]string, order []string) []string {
 	if !svc.KeyPool {
 		return nil
 	}
-	var rest []string
+	var parts []string
 	for name, value := range keys {
-		if name != svc.Key && InPool(svc, name, value) {
-			rest = append(rest, name)
+		if base, part := store.SplitPart(name); base == svc.Key && part != "" && value != "" {
+			parts = append(parts, part)
 		}
 	}
-	slices.Sort(rest)
-	if InPool(svc, svc.Key, keys[svc.Key]) {
-		return append([]string{svc.Key}, rest...)
+	if len(parts) == 0 {
+		if keys[svc.Key] != "" {
+			return []string{svc.Key}
+		}
+		return nil
 	}
-	return rest
+	store.OrderParts(parts, order)
+	out := make([]string, len(parts))
+	for i, part := range parts {
+		out[i] = svc.Key + "." + part
+	}
+	return out
 }
 
 // InPool reports whether svc, a key-pool service, may send the store key
-// name holding value: a named value (KEY.part) of its key, and not empty.
+// name holding value: its key or one of the key's values, and not empty.
 func InPool(svc Service, name, value string) bool {
 	if !svc.KeyPool || value == "" {
 		return false
 	}
-	base, _ := store.SplitPart(svc.Key)
-	b, part := store.SplitPart(name)
-	return b == base && part != ""
+	base, _ := store.SplitPart(name)
+	return base == svc.Key
 }

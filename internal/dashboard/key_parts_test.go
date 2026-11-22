@@ -11,8 +11,8 @@ import (
 )
 
 func addModal(e *env) *http.Response {
-	w := e.request("POST", "/keys", url.Values{"name": {"MODAL"}, "value": {""},
-		"part": {"id", "secret", "", ""}, "part_value": {modalID, modalSecret, "", ""}, "password": {password}})
+	w := e.request("POST", "/keys", url.Values{"name": {"MODAL"},
+		"value": {modalID, modalSecret, "", ""}, "part": {"id", "secret", "", ""}, "password": {password}})
 	return w.Result()
 }
 
@@ -85,7 +85,7 @@ func TestReplaceAndDeleteNamedValues(t *testing.T) {
 	if loc := e.request("POST", "/keys/MODAL/replace", url.Values{"part": {"secret"}, "value": {"ws-new-secret-0123456789"}, "password": {password}}).Header().Get("Location"); loc != "/keys/MODAL?done=replaced" {
 		t.Fatalf("replace: %s", loc)
 	}
-	if loc := e.request("POST", "/keys/MODAL/replace", url.Values{"part": {"region"}, "value": {"eu-west-1"}, "password": {password}}).Header().Get("Location"); loc != "/keys/MODAL?done=replaced" {
+	if loc := e.request("POST", "/keys/MODAL/add-value", url.Values{"part": {"region"}, "value": {"eu-west-1"}, "password": {password}}).Header().Get("Location"); loc != "/keys/MODAL?done=value-added" {
 		t.Fatalf("add a value: %s", loc)
 	}
 	keys := mustKeys(t, e)
@@ -108,18 +108,17 @@ func TestReplaceAndDeleteNamedValues(t *testing.T) {
 	}
 }
 
-// Bad forms store nothing: one named value only, a bad name, a duplicate,
-// a missing value, a name already used, a dotted key name.
+// Bad forms store nothing: a bad name, a duplicate, a missing value, a name
+// already used, a dotted key name.
 func TestNamedValueRefusals(t *testing.T) {
 	e := newEnv(t)
 	before := len(mustKeys(t, e))
 	for name, form := range map[string]url.Values{
-		"one value only":  {"name": {"MODAL"}, "part": {"id"}, "part_value": {modalID}},
-		"bad value name":  {"name": {"MODAL"}, "part": {"Id!", "secret"}, "part_value": {modalID, modalSecret}},
-		"duplicate name":  {"name": {"MODAL"}, "part": {"id", "id"}, "part_value": {modalID, modalSecret}},
-		"missing value":   {"name": {"MODAL"}, "part": {"id", "secret"}, "part_value": {modalID, ""}},
+		"bad value name":  {"name": {"MODAL"}, "part": {"Id!", "secret"}, "value": {modalID, modalSecret}},
+		"duplicate name":  {"name": {"MODAL"}, "part": {"id", "id"}, "value": {modalID, modalSecret}},
+		"missing value":   {"name": {"MODAL"}, "part": {"id", "secret"}, "value": {modalID, ""}},
 		"dotted key name": {"name": {"MODAL.id"}, "value": {modalID}},
-		"name in use":     {"name": {"API_KEY"}, "part": {"id", "secret"}, "part_value": {modalID, modalSecret}},
+		"name in use":     {"name": {"API_KEY"}, "part": {"id", "secret"}, "value": {modalID, modalSecret}},
 	} {
 		form.Set("password", password)
 		if w := e.request("POST", "/keys", form); w.Code == http.StatusSeeOther || strings.Contains(w.Body.String(), modalSecret) {
