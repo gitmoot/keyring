@@ -102,3 +102,20 @@ func TestFileDedupesBoundsAndTakes(t *testing.T) {
 		t.Fatalf("after put back: %d, first %s", len(list), list[0].ID)
 	}
 }
+
+// Owner, 2026-11-22: asking for a wrong service name suggests the real one,
+// but never a client-owned project's service (the asker has no role yet).
+func TestUnknownServiceSuggestsVisibleOnes(t *testing.T) {
+	access := policy.AccessList{
+		Services: map[string]policy.Service{
+			"cloudflare-vcf":  {Key: "CF", Auth: policy.AuthBearer},
+			"cloudflare-acme": {Key: "CA", Auth: policy.AuthBearer, Project: "acme"},
+		},
+		Projects: map[string]policy.Project{"acme": {ClientOwned: true}},
+		Roles:    map[string]policy.Role{},
+	}
+	err := Check(Request{Role: "newbot", Services: []string{"cloudflare-workers-ai"}, Fingerprint: strings.Repeat("a", 64)}, access)
+	if err == nil || !strings.Contains(err.Error(), `unknown service "cloudflare-workers-ai" (did you mean cloudflare-vcf?)`) || strings.Contains(err.Error(), "cloudflare-acme") {
+		t.Fatalf("err = %v", err)
+	}
+}

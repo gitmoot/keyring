@@ -98,3 +98,19 @@ account revocation does not block saving or disconnecting a static bundle;
 changes to an account's own refresh or client secret still respect its gate.
 
 A service with its own self-signed certificate (such as a build server you run) can be trusted by pinning that certificate: `"tls_pin_sha256": "<64 lowercase hex>"`, the SHA-256 of the leaf certificate's DER bytes (`openssl x509 -in cert.pem -outform der | shasum -a 256`). The keyring then accepts exactly that certificate for that service, on every handshake including resumed sessions, and skips the system CA roots, hostname and expiry checks for it; a different certificate is refused with 502 "upstream certificate does not match the pinned certificate". Only `https` bases may carry a pin, and a malformed pin is refused when the file loads. Services without a pin keep using the system CA roots. When the upstream's certificate is renewed, update the pin.
+
+## Finding services
+
+An agent lists and searches the services instead of guessing a name:
+
+```sh
+keyring services --role my-agent                         # through the relay at 127.0.0.1:7700
+keyring services --role my-agent --search cloudflare     # words in the name, provider host or project
+keyring services --upstream http://<keyring>:7701        # a new agent, before it has a role
+```
+
+Each line shows the service, its provider host, its kind (`proxy`, `sign`, `tunnel` or `login`), its project, whether this role may use it (methods and paths) and the path to call. `--json` prints the keyring's answer (`GET /_keyring/services?search=`, through the relay `/<role>/_keyring/services`). Results are ranked by how many search words match; words shorter than 3 letters are ignored unless they are all short. Key names and other settings are never shown.
+
+A service in a **client-owned** project is listed only to roles with access to it, and a call to it from any other role gets the same answer as a name that does not exist. Every other service is listed to every agent, so it can ask for it.
+
+A wrong name says what was meant: a call answers `403 no service named cloudflare-workers-ai (did you mean cloudflare-vcf?); list them with: keyring services --role my-agent`, and `keyring request` answers `unknown service "cloudflare-workers-ai" (did you mean cloudflare-vcf?)`. A service the role can see but may not use answers with the `keyring request` command to ask for it. Each listing is audited (note `services list`, with the search words).

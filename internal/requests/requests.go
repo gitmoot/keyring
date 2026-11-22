@@ -117,7 +117,7 @@ func Check(r Request, access policy.AccessList) error {
 	seen := map[string]bool{}
 	for _, svc := range r.Services {
 		if _, ok := access.Services[svc]; !ok {
-			return fmt.Errorf("unknown service %q", svc)
+			return fmt.Errorf("unknown service %q%s", svc, access.DidYouMean(nil, svc, time.Time{}))
 		}
 		if seen[svc] {
 			return fmt.Errorf("service %q listed twice", svc)

@@ -271,6 +271,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fileRequest(w, r, snap, addr.String(), start)
 		return
 	}
+	if r.URL.Path == ServicesPath {
+		h.listServices(w, r, snap, addr.String(), start)
+		return
+	}
 	rec := auditRecord{Time: start.UTC().Format(time.RFC3339), Source: addr.String(), Method: r.Method}
 	defer func() {
 		rec.Ms = h.now().Sub(start).Milliseconds()
@@ -353,8 +357,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// refusals below included (#111).
 		rec.Project = svc.Project
 	}
-	if !known || !allowed {
-		fail(http.StatusForbidden, "role may not use this service")
+	// A service this role may not even see (a client-owned project's) gets
+	// the same answer as a name that is not a service.
+	if !known || !snap.config.ServiceVisible(&role, service, start) {
+		fail(http.StatusForbidden, "no service named "+truncate(service, 64)+snap.config.DidYouMean(&role, service, start)+"; list them with: keyring services --role "+roleName+" [--search WORDS]")
+		return
+	}
+	if !allowed {
+		fail(http.StatusForbidden, "role may not use this service; "+askHint(roleName, service))
 		return
 	}
 	if access.Expired(start) {

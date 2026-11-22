@@ -1403,10 +1403,21 @@ func NewToken() (token, sha string, err error) {
 // ValidRoleName reports whether name may name a role (an agent).
 func ValidRoleName(name string) bool { return roleName.MatchString(name) }
 
+// defaultMethods are the methods a grant without "methods" allows.
+var defaultMethods = []string{"GET", "HEAD", "POST"}
+
+// EffectiveMethods lists the methods the grant allows.
+func (a Access) EffectiveMethods() []string {
+	if len(a.Methods) == 0 {
+		return slices.Clone(defaultMethods)
+	}
+	return slices.Clone(a.Methods)
+}
+
 // AllowsMethod reports whether method is allowed.
 func (a Access) AllowsMethod(method string) bool {
 	if len(a.Methods) == 0 {
-		return method == "GET" || method == "HEAD" || method == "POST"
+		return slices.Contains(defaultMethods, method)
 	}
 	for _, m := range a.Methods {
 		if m == method {
