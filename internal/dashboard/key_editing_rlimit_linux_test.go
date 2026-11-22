@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -57,6 +60,10 @@ func TestFailedRenameKeepsStoreAndAccessInStep(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			before, err := policy.LoadAccess(rules.AccessFile)
+			if err != nil {
+				t.Fatal(err)
+			}
 			renamed, both := map[string]string{}, map[string]string{}
 			moves := map[string]string{long: "K"}
 			for name, value := range keys {
@@ -101,12 +108,14 @@ func TestFailedRenameKeepsStoreAndAccessInStep(t *testing.T) {
 			if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: uint64(limit), Max: old.Max}); err != nil {
 				t.Skipf("cannot set a file-size limit: %v", err)
 			}
-			loc := e.request("POST", "/keys/"+long+"/rename", url.Values{"new_name": {"K"}, "password": {password}}).Header().Get("Location")
+			res := e.request("POST", "/keys/"+long+"/rename", url.Values{"new_name": {"K"}, "password": {password}})
 			if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
 				t.Fatal(err)
 			}
-			if loc == "/keys/K?done=renamed" {
-				t.Fatal("the rename succeeded although a write failed")
+			// The intended write failed, and the rename said so.
+			intended := map[string]string{"store": e.backend.StorePath, "access": rules.AccessFile}[c.name]
+			if body := res.Body.String(); res.Code != http.StatusInternalServerError || !strings.Contains(body, "file too large") || !strings.Contains(body, filepath.Base(intended)) {
+				t.Fatalf("rename answered %d %q, want 500 for the failed %s write", res.Code, res.Header().Get("Location"), c.name)
 			}
 			// What the next start loads: every key a service names is
 			// stored, and the store is as it was.
@@ -124,8 +133,18 @@ func TestFailedRenameKeepsStoreAndAccessInStep(t *testing.T) {
 			if members := policy.PoolMembers(after.Services["claude-0"], now, nil); len(members) != len(values) {
 				t.Fatalf("after the failed rename the pool on %s has %d of %d values stored", after.Services["claude-0"].Key, len(members), len(values))
 			}
-			if len(now) != len(keys) {
-				t.Fatalf("the store holds %d keys, was %d", len(now), len(keys))
+			if !maps.Equal(now, keys) {
+				t.Fatal("after the failed rename the store differs from before")
+			}
+			refs := func(a policy.AccessList) map[string][]string {
+				out := map[string][]string{}
+				for name, svc := range a.Services {
+					out[name] = svc.KeyNames()
+				}
+				return out
+			}
+			if !maps.EqualFunc(refs(after), refs(before), slices.Equal) {
+				t.Fatalf("after the failed rename the services name %v, were %v", refs(after), refs(before))
 			}
 		})
 	}

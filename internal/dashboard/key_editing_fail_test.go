@@ -44,6 +44,39 @@ func TestPoolTestMovesOnOnlyWhenACallWould(t *testing.T) {
 	}
 }
 
+// Test closes a refused answer, like a call, instead of reading it to the
+// end: a 403 whose body never finishes does not use up Test's time limit,
+// and the next value is tried and works.
+func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
+	e := newEnv(t)
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") == "sk-ant-a-0000" {
+			w.WriteHeader(http.StatusForbidden)
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}
+	}))
+	t.Cleanup(up.Close)
+	t.Cleanup(func() { close(release) })
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+	pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","test_path":"/v1/models","key_pool":true}`
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
+		t.Fatalf("connect: %s", loc)
+	}
+	e.request("POST", "/keys/CLAUDE_KEYS/test", url.Values{})
+	meta, err := e.backend.loadMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := meta["CLAUDE_KEYS"]; m.Status != "working" {
+		t.Fatalf("Test recorded %q (%s); the second value works", m.Status, m.Reason)
+	}
+}
+
 // Add key writes the key's value order (what a key pool follows) before it
 // stores the values: when the order cannot be saved, Add fails and stores
 // nothing, instead of reporting the key added with its order lost.
