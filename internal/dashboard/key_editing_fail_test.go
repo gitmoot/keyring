@@ -50,14 +50,24 @@ func TestPoolTestMovesOnOnlyWhenACallWould(t *testing.T) {
 func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
 	e := newEnv(t)
 	release := make(chan struct{})
+	var mu sync.Mutex
+	var seen []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") == "sk-ant-a-0000" {
+		key := r.Header.Get("x-api-key")
+		mu.Lock()
+		seen = append(seen, key)
+		mu.Unlock()
+		switch key {
+		case "sk-ant-a-0000":
 			w.WriteHeader(http.StatusForbidden)
 			w.(http.Flusher).Flush()
 			select {
 			case <-r.Context().Done():
 			case <-release:
 			}
+		case "sk-ant-b-1111":
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
 	t.Cleanup(up.Close)
@@ -72,8 +82,61 @@ func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := meta["CLAUDE_KEYS"]; m.Status != "working" {
-		t.Fatalf("Test recorded %q (%s); the second value works", m.Status, m.Reason)
+	mu.Lock()
+	defer mu.Unlock()
+	if m := meta["CLAUDE_KEYS"]; m.Status != "working" || !slices.Equal(seen, []string{"sk-ant-a-0000", "sk-ant-b-1111"}) {
+		t.Fatalf("Test recorded %q (%s) after %d calls; it tries the stalled primary, then the backup that works", m.Status, m.Reason, len(seen))
+	}
+}
+
+// A pool Test result describes every value that set its order, tried or
+// not. The primary is set aside after a refusal, so Test starts with the
+// backup; replacing the primary meanwhile puts the replacement first. The
+// backup's late 200 says nothing about the pool now, so it is not recorded.
+func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
+	e := newEnv(t)
+	started, proceed := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("x-api-key") {
+		case "sk-ant-a-0000":
+			w.WriteHeader(http.StatusForbidden)
+		case "sk-ant-b-1111":
+			if r.Header.Get("User-Agent") == "keyring-test" {
+				once.Do(func() { close(started) })
+				<-proceed
+			}
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	t.Cleanup(up.Close)
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+	pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","test_path":"/v1/models","key_pool":true}`
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
+		t.Fatalf("connect: %s", loc)
+	}
+	grantPhobos(t, e, "claude-api")
+	if code := e.call("POST", "/claude-api/v1/messages", token); code != http.StatusOK {
+		t.Fatalf("call: %d", code)
+	}
+	done := make(chan string)
+	go func() {
+		done <- e.request("POST", "/keys/CLAUDE_KEYS/test", url.Values{}).Header().Get("Location")
+	}()
+	<-started
+	replaced := e.request("POST", "/keys/CLAUDE_KEYS/replace", url.Values{"part": {"1"}, "value": {"sk-ant-c-2222"}, "password": {password}}).Header().Get("Location")
+	close(proceed)
+	loc := <-done
+	if replaced != "/keys/CLAUDE_KEYS?done=replaced" {
+		t.Fatalf("replace: %s", replaced)
+	}
+	meta, err := e.backend.loadMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := meta["CLAUDE_KEYS"]; m.Status == "working" || loc != "/keys/CLAUDE_KEYS?error=changed" {
+		t.Fatalf("Test answered %s and recorded %q although the primary was replaced while it ran", loc, m.Status)
 	}
 }
 
