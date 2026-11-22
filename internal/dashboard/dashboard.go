@@ -134,6 +134,10 @@ func Register(b *Backend) {
 	a.Handle("POST /keys/{name}/leaked", b.markLeaked)
 	a.Handle("POST /keys/{name}/delete", b.deleteKey)
 	a.Handle("POST /keys/{name}/connect", b.connectKey)
+	a.Handle("GET /keys/{name}/connect", b.connectRedirect)
+	a.Handle("POST /keys/{name}/rename", b.renameKey)
+	a.Handle("POST /keys/{name}/rename-value", b.renameValue)
+	a.Handle("POST /keys/{name}/remove-value", b.removeValue)
 	registerServices(b)
 	registerProjects(b)
 	registerActivity(b)
@@ -799,16 +803,17 @@ func (b *Backend) newKeyPage(w http.ResponseWriter, r *http.Request, sid string)
 	b.renderNewKey(w, sid, http.StatusOK, "", "")
 }
 
-// newKeyPartRows are the empty named-value rows of the add-key form.
-var newKeyPartRows = make([]string, maxParts)
+// newKeyPartRows are the empty named-value rows the add-key form starts with;
+// its "Add another value" button adds more, up to maxParts.
+var newKeyPartRows = make([]string, 4)
 
 // renderNewKeyUpload shows the add-key page with an upload error.
 func (b *Backend) renderNewKeyUpload(w http.ResponseWriter, sid string, status int, name, msg string) {
-	b.render(w, status, "newkey", sid, map[string]any{"UploadName": name, "UploadError": msg, "PartRows": newKeyPartRows})
+	b.render(w, status, "newkey", sid, map[string]any{"UploadName": name, "UploadError": msg, "PartRows": newKeyPartRows, "MaxParts": maxParts})
 }
 
 func (b *Backend) renderNewKey(w http.ResponseWriter, sid string, status int, name, msg string) {
-	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": newKeyPartRows})
+	b.render(w, status, "newkey", sid, map[string]any{"Name": name, "Error": msg, "PartRows": newKeyPartRows, "MaxParts": maxParts})
 }
 
 // errValueControl: the value has a line break or control character inside it.
@@ -834,12 +839,13 @@ func checkValue(raw string) (string, error) {
 	return v, nil
 }
 
-// maxParts bounds the values of one key.
-const maxParts = 4
+// maxParts bounds the values of one key on the add-key form (owner,
+// 2026-11-22: four was too few for a key pool).
+const maxParts = 32
 
 // readParts reads the "part" / "part_value" rows of the add-key form: the
-// named values of a key with several (MODAL: id, secret). None when the form
-// has a single value.
+// named values of a key (MODAL: id, secret; CLAUDE_KEYS: main). None when the
+// form has only the single unnamed value.
 func readParts(r *http.Request) (map[string]string, string) {
 	names, values := r.PostForm["part"], r.PostForm["part_value"]
 	parts := map[string]string{}
@@ -870,9 +876,6 @@ func readParts(r *http.Request) (map[string]string, string) {
 	if len(parts) == 0 {
 		return nil, ""
 	}
-	if len(parts) == 1 {
-		return nil, "A key with named values needs at least two. For one value, leave the names empty."
-	}
 	if len(parts) > maxParts {
 		return nil, fmt.Sprintf("At most %d values per key.", maxParts)
 	}
@@ -893,6 +896,10 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		return
 	}
 	parts, msg := readParts(r)
+	if msg == "" && parts != nil && strings.TrimSpace(r.PostFormValue("value")) != "" {
+		// A key is plain or has named values, never both.
+		msg = "Fill in either the single Value or the named values, not both."
+	}
 	if msg != "" {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, msg)
 		return
@@ -964,6 +971,9 @@ type connectForm struct {
 	OAuth2      *policy.OAuth2
 	ForwardRole bool
 	KeyPool     bool
+	// NameFirst: the error asks to give the key's one value a name first,
+	// so the page links to that form.
+	NameFirst bool
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -1149,8 +1159,13 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 				f.ExtraHeaders[header] = name + "." + ref
 			}
 		}
+	} else if f.KeyPool {
+		f.NameFirst = true
+		again(http.StatusBadRequest, name+" has one value, and a key pool uses named values. Give it a name first (below), then add the other values.")
+		return
 	} else if f.KeyPart != "" {
-		again(http.StatusBadRequest, name+" has one value; leave key_part out.")
+		f.NameFirst = true
+		again(http.StatusBadRequest, name+" has one value. Give it a name first (below), or leave key_part out.")
 		return
 	}
 	next, err := policy.LoadAccess(b.rules().AccessFile)
@@ -1254,7 +1269,7 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 			errCode := r.URL.Query().Get("error")
 			b.render(w, status, "key", sid, map[string]any{
 				"Row": row, "Meta": meta[name], "Testable": b.testService(name) != "",
-				"Notice": r.URL.Query().Get("done"), "Error": errCode, "ConnectError": msg,
+				"Notice": r.URL.Query().Get("done"), "Error": errCode, "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
 				"Connect": f, "Presets": presetOptions(),
 			})
 			return
@@ -1407,6 +1422,10 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 			return
 		}
 		target = name + "." + part
+		if len(row.Parts) >= maxParts && !slices.ContainsFunc(row.Parts, func(p keyPart) bool { return p.Name == part }) {
+			http.Redirect(w, r, "/keys/"+name+"?error=too-many", http.StatusSeeOther)
+			return
+		}
 	}
 	keys, err := store.Load(b.StorePath)
 	if err != nil {

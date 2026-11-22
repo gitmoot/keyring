@@ -29,14 +29,18 @@ to a distinct store key, not a credential value. For Cloudflare Access, use
 primary credential. Header names are case-insensitive; duplicates, primary
 collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
-**A key with several values** (dashboard): on **Add key**, open "This key has several
+**A key with several values** (dashboard): on **Add key**, open "This key has named
 values", name each value and paste it, for example `MODAL` with `id` ← `wk-…` and
-`secret` ← `ws-…`. They are stored as `MODAL.id` and `MODAL.secret` and shown as one
+`secret` ← `ws-…` (one to 32 values; **Add another value** adds rows). They are stored
+as `MODAL.id` and `MODAL.secret` and shown as one
 key with its value names, never the values. On the key's page, **Connect to a service**
 asks which value is sent as the key and, optionally, a header for each other value
 (Modal: `id` as `Modal-Key`, `secret` as `Modal-Secret`); pasted settings say the same
 with `"key_part": "id", "extra_headers": {"Modal-Secret": "secret"}`. **Replace or add a
-value** names the value; **Delete** removes all of them. Access files may name the
+value** names the value; **Remove value** deletes one that no service sends; **Delete**
+removes all of them. A key added with one plain value gets named values with **Give this
+value a name** on its page (`KEY` becomes `KEY.main`; services follow). **Rename** renames
+the key or a value and changes every service that names it. Access files may name the
 values directly (`"key": "MODAL.id"`). A store holding such values cannot be read by a
 keyring older than this release, so delete them before downgrading.
 
@@ -134,3 +138,11 @@ A service with `"key_pool": true` uses every value of its key: one key such as `
 - To send a request again the keyring keeps its body, up to 32 MiB; a larger body goes out once, with the first value in line. A streamed answer is never retried once it has started: every refusal above comes before the answer begins.
 - The key's dashboard page shows each value's state (working, busy with when it is back, failing with the reason, ready), its calls today and over 7 days, refusals today and last use. The key's status says how many values are set aside, and turns failing when all are; a pool with any value stored is not shown as having no value. Each audit line of a pooled call names the value that answered (`"key": "CLAUDE_KEYS.backup1"`, never its value) and how many were tried (`"attempts"`).
 - Turn it on with `"key_pool": true` in pasted settings when connecting the key (with `key_part` naming the first value) or on the service's edit page; on the edit page, settings that leave `key_pool` out keep it as it is and `"key_pool": false` turns it off.
+
+Setting one up in the dashboard:
+
+1. A new key: **Add key**, name it (`CLAUDE_KEYS`), open "This key has named values" and add `main` with its value, plus any backups (`backup1`, …). A key that already exists with one plain value: on its page, **Give this value a name** with `main` (services using `CLAUDE_KEYS` move to `CLAUDE_KEYS.main`).
+2. Add more values with **Replace or add a value** (a new value name adds one), up to 32.
+3. Under **Connect to a service**, paste `{"service":"claude-api","base":"https://api.anthropic.com","auth":"header","header":"x-api-key","key_part":"main","key_pool":true}`. If a service already uses the key, turn the pool on there instead, because no other service may use a pooled key's values: on that service's edit page keep the key `CLAUDE_KEYS.main` and paste the same settings without `service` and `key_part`.
+
+Pasting `key_part` or `key_pool` on a key with one plain value is refused with a pointer to **Give this value a name**.

@@ -145,6 +145,36 @@ func DeleteAll(path string, names []string) error {
 	return save(path, keys)
 }
 
+// Rename moves values to new names (old name -> new name) in one atomic store
+// update. Every old name must be stored and no new name may be: a rename never
+// overwrites a value.
+func Rename(path string, moves map[string]string) error {
+	keys, err := Load(path)
+	if err != nil {
+		return err
+	}
+	for from, to := range moves {
+		if !ValidName(to) {
+			return fmt.Errorf("invalid key name %q: use letters, digits and _", to)
+		}
+		if _, ok := keys[from]; !ok {
+			return fmt.Errorf("no key named %q", from)
+		}
+		if _, taken := keys[to]; taken {
+			return fmt.Errorf("a key named %q exists", to)
+		}
+	}
+	values := make(map[string]string, len(moves))
+	for from := range moves {
+		values[from] = keys[from]
+		delete(keys, from)
+	}
+	for from, to := range moves {
+		keys[to] = values[from]
+	}
+	return save(path, keys)
+}
+
 func save(path string, keys map[string]string) error {
 	raw, err := json.MarshalIndent(keys, "", "  ")
 	if err != nil {

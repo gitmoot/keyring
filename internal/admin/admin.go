@@ -384,10 +384,23 @@ func randomToken() string {
 }
 
 // js is the dashboard's only script, and the pages work without it: a copy
-// button for a token shown once (data-copy="ID"), and selects that act when
+// button for a token shown once (data-copy="ID"), a button that adds one more
+// row of form fields (data-addrow="ID" copies the last row of that element, up
+// to data-max rows; hidden without the script), and selects that act when
 // changed (data-autosubmit submits the form; a form with data-pathpick opens
 // its action with the chosen value in place of the final "-").
-const js = `document.addEventListener("click", function (e) {
+const js = `document.querySelectorAll("[data-addrow]").forEach(function (b) { b.hidden = false; });
+document.addEventListener("click", function (e) {
+  var add = e.target.closest("[data-addrow]");
+  if (add) {
+    var box = document.getElementById(add.dataset.addrow), max = Number(add.dataset.max) || 0;
+    var row = box.lastElementChild.cloneNode(true);
+    row.querySelectorAll("input").forEach(function (i) { i.value = ""; });
+    box.appendChild(row);
+    row.querySelector("input").focus();
+    if (max && box.children.length >= max) add.hidden = true;
+    return;
+  }
   var b = e.target.closest("[data-copy]");
   if (!b) return;
   var el = document.getElementById(b.dataset.copy);
@@ -434,7 +447,7 @@ var pages = template.Must(template.New("pages").Parse(`
 
 const css = `:root{--bg:#f5f6f8;--card:#fff;--text:#111418;--mute:#667085;--line:#e4e7ec;--brand:#4f46e5;--brand-text:#fff;--ok:#067647;--bad:#b42318;--warn:#b54708;--chip:#f2f4f7;--radius:14px;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bg:#0c0e12;--card:#161a21;--text:#eceef2;--mute:#98a2b3;--line:#262b35;--brand:#7c74ff;--chip:#222833;--ok:#47cd89;--bad:#f97066;--warn:#fdb022}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 a{color:inherit}
 header.top{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line)}header.top h1{margin-right:auto}

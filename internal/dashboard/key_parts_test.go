@@ -108,13 +108,13 @@ func TestReplaceAndDeleteNamedValues(t *testing.T) {
 	}
 }
 
-// Bad forms store nothing: one named value only, a bad name, a duplicate,
-// a missing value, a name already used, a dotted key name.
+// Bad forms store nothing: a plain value next to named ones, a bad name, a
+// duplicate, a missing value, a name already used, a dotted key name.
 func TestNamedValueRefusals(t *testing.T) {
 	e := newEnv(t)
 	before := len(mustKeys(t, e))
 	for name, form := range map[string]url.Values{
-		"one value only":  {"name": {"MODAL"}, "part": {"id"}, "part_value": {modalID}},
+		"plain and named": {"name": {"MODAL"}, "value": {modalID}, "part": {"id"}, "part_value": {modalSecret}},
 		"bad value name":  {"name": {"MODAL"}, "part": {"Id!", "secret"}, "part_value": {modalID, modalSecret}},
 		"duplicate name":  {"name": {"MODAL"}, "part": {"id", "id"}, "part_value": {modalID, modalSecret}},
 		"missing value":   {"name": {"MODAL"}, "part": {"id", "secret"}, "part_value": {modalID, ""}},

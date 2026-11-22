@@ -38,7 +38,7 @@ The key never leaves the keyring machine. The agent holds only a role token, whi
 - **OAuth with refresh.** The keyring holds the refresh token and mints access tokens, for Gmail, Drive and any OAuth 2 provider; Google accounts can also come from `gcloud`. [OAuth](docs/oauth.md) · [Google via gcloud](docs/google-gcloud.md)
 - **Per-agent access.** Each agent (a *role*) gets only the services, methods and paths it was given, with daily request and byte limits and an end date. Agents find services with `keyring services --search`, ask with `keyring request`, and the owner approves in one tap. [Finding services](docs/proxy.md#finding-services)
 - **Projects.** Group a client's services, give an agent a whole project, pause it or let it expire in one place. [Projects](docs/projects.md)
-- **Dashboard and audit.** Add, test, replace and upload keys; see each key's status and use; approve agents; search the audit log of every call. [Dashboard](docs/dashboard.md)
+- **Dashboard and audit.** Add, test, replace, rename and upload keys and their named values; see each key's status and use; approve agents; search the audit log of every call. [Dashboard](docs/dashboard.md)
 - **Consent links.** Send a person a one-time link to connect their own account (OAuth sign-in) or paste a key, instead of sending it in a chat. [Consent links](docs/consent-links.md)
 - **Egress tunnels.** Let an agent's traffic leave through a person's own proxy, with the proxy credential kept in the keyring. [Egress proxy](docs/egress-proxy.md)
 - **One keyring per person.** Instance mode runs a small keyring per user under a supervisor, for example on Cloudflare Containers. [Instance mode](docs/instance-mode.md)
