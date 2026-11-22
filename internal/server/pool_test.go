@@ -279,6 +279,7 @@ func TestKeyPoolLeavesCloudflareUploadAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := New(cfg, map[string]string{"CF_TOKENS.main": "cf-main-0000", "CF_TOKENS.backup": "cf-backup-1111"}, &bytes.Buffer{})
+	h.SetValueOrder(map[string][]string{"CF_TOKENS": {"main", "backup"}})
 	rec := &cfRecorder{}
 	h.client = &http.Client{Transport: rec}
 	if w := call(h, "POST", "/api"+cfUploadPath, testToken, map[string]string{"Authorization": "Bearer " + cfUploadJWT}); w.Code != 200 {
@@ -484,6 +485,7 @@ func TestKeyPoolStatusPerServiceSendability(t *testing.T) {
 	}
 	keys := map[string]string{"CLAUDE_KEYS.main": "sk-ant-main\n0000", "CLAUDE_KEYS.backup1": "sk-ant-b1-1111"}
 	h := New(cfg, keys, &bytes.Buffer{})
+	h.SetValueOrder(map[string][]string{"CLAUDE_KEYS": {"main", "backup1"}})
 	if w := call(h, "GET", "/claude-query/v1/models", testToken, nil); w.Code != 200 {
 		t.Fatalf("query call: %d %s", w.Code, w.Body)
 	}
