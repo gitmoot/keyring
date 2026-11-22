@@ -69,4 +69,10 @@ func TestConnectAndEditBearerScheme(t *testing.T) {
 	if !strings.Contains(e.audit.String(), `"changed":["scheme"]`) {
 		t.Error("edit audit does not list scheme as changed")
 	}
+	// A refused edit shows the stored scheme in the summary, not the refused one.
+	w = e.request("POST", "/services/higgsfield", url.Values{"password": {password}, "key": {"HIGGSFIELD_KEY"},
+		"base": {up.URL}, "auth": {"bearer"}, "scheme": {"Bad Scheme"}, "test_path": {"/v1/ping"}})
+	if body := w.Body.String(); w.Code != http.StatusBadRequest || !strings.Contains(body, "Authorization: Bearer …") || strings.Contains(body, "Authorization: Bad Scheme") {
+		t.Fatalf("refused edit: %d, summary does not show the stored scheme", w.Code)
+	}
 }

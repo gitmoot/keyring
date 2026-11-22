@@ -30,3 +30,22 @@ func TestBearerServiceSendsItsAuthorizationScheme(t *testing.T) {
 		}
 	}
 }
+
+// The Cloudflare asset upload sends the caller's own Bearer upload token; a
+// scheme set for the stored account token does not apply to it.
+func TestAssetUploadKeepsBearerWithAScheme(t *testing.T) {
+	h, _ := newHandler(t, cfBase, policy.Service{Auth: policy.AuthBearer, Scheme: "Key"}, allowAll)
+	rec := &cfRecorder{}
+	h.client = &http.Client{Transport: rec}
+	w := call(h, "POST", "/api"+cfUploadPath, testToken, map[string]string{"Authorization": "Bearer " + cfUploadJWT})
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
+	}
+	if out, _ := rec.last(t); out.Header.Get("Authorization") != "Bearer "+cfUploadJWT {
+		t.Fatalf("upload sent Authorization %q", out.Header.Get("Authorization"))
+	}
+	call(h, "GET", "/api/zones", testToken, nil)
+	if out, _ := rec.last(t); out.Header.Get("Authorization") != "Key "+testKey {
+		t.Fatal("other calls do not send the stored key with its scheme")
+	}
+}

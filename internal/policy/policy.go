@@ -1064,6 +1064,10 @@ func (k *Consent) validate(c *Config, proxy netip.AddrPort) error {
 var tlsPin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) validate() error {
+	// An auth-scheme is an RFC 9110 token, like a header name.
+	if s.Scheme != "" && (s.Auth != AuthBearer || len(s.Scheme) > 32 || !headerName.MatchString(s.Scheme)) {
+		return errors.New("scheme needs auth bearer and must be one word of letters, digits or !#$%&'*+-.^_`|~, at most 32 characters, such as Key")
+	}
 	if s.KeyPool {
 		if s.Auth != AuthBearer && s.Auth != AuthHeader && s.Auth != AuthQuery {
 			return errors.New("key_pool needs bearer, header or query authentication")
@@ -1277,9 +1281,6 @@ func (s *Service) validate() error {
 	if s.OAuth2 != nil && s.Auth != AuthOAuth2 {
 		return errors.New("oauth2 settings require auth oauth2")
 	}
-	if s.Scheme != "" && (s.Auth != AuthBearer || !authScheme.MatchString(s.Scheme)) {
-		return errors.New("scheme needs auth bearer and must be one word of letters, digits or !#$%&'*+-.^_`|~, at most 32 characters, such as Key")
-	}
 	s.base = u
 	return nil
 }
@@ -1291,9 +1292,6 @@ func (s Service) AuthorizationScheme() string {
 	}
 	return s.Scheme
 }
-
-// authScheme is an RFC 9110 auth-scheme token.
-var authScheme = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,32}$")
 
 // Authorization can only be the explicit primary auth=header credential.
 func safeCredentialHeader(name string, primary bool) bool {

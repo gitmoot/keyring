@@ -126,8 +126,12 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	if method == "" {
 		method = http.MethodGet
 	}
+	sentAs := "" // from the stored service, never a refused edit
+	if svc.Auth == policy.AuthBearer {
+		sentAs = svc.AuthorizationScheme()
+	}
 	b.render(w, status, "service", sid, map[string]any{
-		"OAuth2": svc.OAuth2, "SecretStored": secretStored,
+		"OAuth2": svc.OAuth2, "SecretStored": secretStored, "SentAs": sentAs,
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
 		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
 	})

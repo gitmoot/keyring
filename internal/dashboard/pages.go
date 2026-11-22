@@ -280,7 +280,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="head"><a class="back" href="/keys/{{.F.Key}}">{{.F.Key}}</a><h1 class="mono">{{.Name}}</h1></div>
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
-{{if eq .F.Auth "bearer"}}<dt>Sent as</dt><dd class="mono">Authorization: {{or .F.Scheme "Bearer"}} …</dd>{{end}}
+{{with .SentAs}}<dt>Sent as</dt><dd class="mono">Authorization: {{.}} …</dd>{{end}}
 <dt>Base URL</dt><dd class="mono">{{if .F.Base}}{{.F.Base}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Project</dt><dd>{{with .F.Project}}<a class="chip" href="/projects/{{.}}">{{.}}</a>{{if $.ProjectStopped}} <span class="pill warn">{{$.ProjectStopped}}</span>{{end}}{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Test request</dt><dd class="mono">{{if .F.TestPath}}{{.TestMethod}} {{.F.TestPath}}{{else}}<span class="mute">none</span>{{end}}</dd>

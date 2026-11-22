@@ -23,6 +23,8 @@ func TestValidateAuthScheme(t *testing.T) {
 		"query auth":   func(s *Service) { s.Auth, s.Param, s.Scheme = AuthQuery, "key", "Key" },
 		"non-ascii":    func(s *Service) { s.Scheme = "Kéy" },
 		"trailing tab": func(s *Service) { s.Scheme = "Key\t" },
+		"sign-only":    func(s *Service) { s.Auth, s.Scheme = AuthEd25519Sign, "Key" },
+		"egress-proxy": func(s *Service) { s.Auth, s.Scheme = AuthEgressProxy, "Key" },
 	} {
 		c := validConfig()
 		s := c.Services["openrouter"]
