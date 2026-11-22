@@ -1406,26 +1406,20 @@ func ValidRoleName(name string) bool { return roleName.MatchString(name) }
 // defaultMethods are the methods a grant without "methods" allows.
 var defaultMethods = []string{"GET", "HEAD", "POST"}
 
-// EffectiveMethods lists the methods the grant allows.
-func (a Access) EffectiveMethods() []string {
+// methods is the grant's effective method list, not to be modified: its
+// own, or defaultMethods when it names none.
+func (a Access) methods() []string {
 	if len(a.Methods) == 0 {
-		return slices.Clone(defaultMethods)
+		return defaultMethods
 	}
-	return slices.Clone(a.Methods)
+	return a.Methods
 }
 
+// EffectiveMethods lists the methods the grant allows.
+func (a Access) EffectiveMethods() []string { return slices.Clone(a.methods()) }
+
 // AllowsMethod reports whether method is allowed.
-func (a Access) AllowsMethod(method string) bool {
-	if len(a.Methods) == 0 {
-		return slices.Contains(defaultMethods, method)
-	}
-	for _, m := range a.Methods {
-		if m == method {
-			return true
-		}
-	}
-	return false
-}
+func (a Access) AllowsMethod(method string) bool { return slices.Contains(a.methods(), method) }
 
 // AllowsPath reports whether p (a decoded path below the service base) falls
 // under an allowed prefix. A prefix matches whole path segments only, so
