@@ -72,23 +72,25 @@ func formOf(name string, svc policy.Service) serviceForm {
 	return f
 }
 
-// keyChoices are the key names the service may use: those the keys page
-// lists. A key pool names a key itself (CLAUDE_KEYS); any other service one
-// value (API_KEY, MODAL.id).
-func (b *Backend) keyChoices(pool bool) ([]string, error) {
+// keyChoices are the key names a service may use, in the keys page's order:
+// pools, the keys a key pool may name (CLAUDE_KEYS), and values, the names
+// any other service may send (API_KEY, MODAL.id). menu is both, for the
+// edit form, so a paste that turns key_pool on or off can pick its key too.
+func (b *Backend) keyChoices() (pools, values, menu []string, err error) {
 	rows, err := b.rows()
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	names := make([]string, 0, len(rows))
 	for _, row := range rows {
-		if pool {
-			names = append(names, row.Name)
-		} else {
-			names = append(names, row.valueNames()...)
+		names := row.valueNames()
+		pools = append(pools, row.Name)
+		values = append(values, names...)
+		if !slices.Contains(names, row.Name) {
+			menu = append(menu, row.Name)
 		}
+		menu = append(menu, names...)
 	}
-	return names, nil
+	return pools, values, menu, nil
 }
 
 func (b *Backend) servicePage(w http.ResponseWriter, r *http.Request, sid string) {
@@ -104,7 +106,7 @@ func (b *Backend) servicePage(w http.ResponseWriter, r *http.Request, sid string
 func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f serviceForm, notice, msg string) {
 	cfg := b.Proxy.Config()
 	svc := cfg.Services[f.Name]
-	keys, err := b.keyChoices(f.KeyPool)
+	_, _, keys, err := b.keyChoices()
 	if err != nil {
 		b.fail(w, sid, err)
 		return
@@ -226,12 +228,23 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	if keyPool != nil {
 		pool = *keyPool
 	}
-	if f.Key != cur.Key {
-		if choices, err := b.keyChoices(pool); err != nil {
+	if pool {
+		// A pool names the key itself; one of its values offered by the
+		// menu stands for its key.
+		f.Key, _ = store.SplitPart(f.Key)
+	}
+	if f.Key != cur.Key || pool != cur.KeyPool {
+		pools, values, _, err := b.keyChoices()
+		if err != nil {
 			b.fail(w, sid, err)
 			return
-		} else if !slices.Contains(choices, f.Key) {
+		}
+		switch {
+		case pool && !slices.Contains(pools, f.Key), !pool && !slices.Contains(pools, f.Key) && !slices.Contains(values, f.Key):
 			again(http.StatusBadRequest, "There is no key named "+f.Key+". Add it under Keys first.")
+			return
+		case !pool && !slices.Contains(values, f.Key):
+			again(http.StatusBadRequest, f.Key+" has several values, and a service that is not a key pool sends one of them: pick it under Key (for example "+f.Key+".1), or keep key_pool on.")
 			return
 		}
 	}

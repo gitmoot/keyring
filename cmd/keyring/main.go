@@ -245,7 +245,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func check(configPath, storePath string, stdout io.Writer) error {
-	cfg, err := loadConfig(configPath, "", stdout)
+	cfg, err := loadConfig(configPath, storePath, false, stdout)
 	if err != nil {
 		return err
 	}
@@ -291,7 +291,7 @@ func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 }
 
 func serve(configPath, storePath string, stderr io.Writer) error {
-	cfg, err := loadConfig(configPath, metaPathOf(storePath), stderr)
+	cfg, err := loadConfig(configPath, storePath, true, stderr)
 	if err != nil {
 		return err
 	}

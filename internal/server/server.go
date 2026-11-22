@@ -51,9 +51,6 @@ type Handler struct {
 	requests *requests.Store
 	// pool is what is known about each value of a pooled key.
 	pool poolBook
-	// order is each key's list order of its value names (key -> parts), set
-	// by the dashboard; a pool tries the values in this order.
-	order atomic.Pointer[map[string][]string]
 	// auditSearch lets one audit search (AuditPath) run at a time.
 	auditSearch sync.Mutex
 	audit       io.Writer
@@ -92,6 +89,11 @@ func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAc
 type snapshot struct {
 	config *policy.Config
 	keys   map[string]string
+	// order is each key's list order of its value names (key -> parts),
+	// kept by the dashboard; a pool tries the values in this order. It is
+	// published with keys, so a request never pairs renamed values with an
+	// old order.
+	order map[string][]string
 	// gens numbers each value in keys; it changes whenever the value does
 	// (poolBook.generations), so pool state is tied to one stored value.
 	gens               map[string]uint64
@@ -177,22 +179,27 @@ func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 // SetValueOrder sets each key's list order of its value names (key ->
 // parts), which key pools try in that order from the next call on.
 func (h *Handler) SetValueOrder(order map[string][]string) {
-	h.order.Store(&order)
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+	next := *h.snap.Load()
+	next.order = order
+	h.snap.Store(&next)
 }
 
-// valueOrder is the list order of key's value names, or nil.
-func (h *Handler) valueOrder(key string) []string {
-	if order := h.order.Load(); order != nil {
-		return (*order)[key]
-	}
-	return nil
-}
-
-// Swap replaces the settings and keys for every later request. config must be
-// validated. Requests already running keep what they started with; daily
-// counts carry over.
+// Swap replaces the settings and keys for every later request, keeping the
+// value order. config must be validated. Requests already running keep what
+// they started with; daily counts carry over.
 func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
-	snap := &snapshot{config: config, keys: keys}
+	var order map[string][]string
+	if old := h.snap.Load(); old != nil {
+		order = old.order
+	}
+	h.SwapWithOrder(config, keys, order)
+}
+
+// SwapWithOrder is Swap with a new value order, published together.
+func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
+	snap := &snapshot{config: config, keys: keys, order: order}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}
@@ -534,7 +541,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if selected != nil {
 		key = selected.Refresh
 	}
-	members := policy.PoolMembers(svc, snap.keys, h.valueOrder(svc.Key))
+	members := policy.PoolMembers(svc, snap.keys, snap.order[svc.Key])
 	if len(members) > 0 {
 		key = snap.keys[members[0]]
 	}

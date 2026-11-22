@@ -784,9 +784,14 @@ func LoadAccess(path string) (AccessList, error) {
 // names one value of its key (key "CLAUDE_KEYS.main", the only form v0.14.18
 // accepted) to name the key itself, as a pool now must. It returns, per key,
 // the value name such a pool sent first (key -> part), so the caller can
-// keep that value first in the key's list; nil when nothing changed.
-func ConvertNamedValuePools(access *AccessList) map[string]string {
+// keep that value first in the key's list; nil when nothing changed. Two
+// such pools of one key with different first values cannot both keep theirs
+// (a key has one list order): that is an error naming them, and access is
+// left as it was.
+func ConvertNamedValuePools(access *AccessList) (map[string]string, error) {
 	var first map[string]string
+	by := map[string]string{} // key -> the service whose first value it keeps
+	converted := map[string]Service{}
 	for _, name := range slices.Sorted(maps.Keys(access.Services)) {
 		svc := access.Services[name]
 		key, part, named := strings.Cut(svc.Key, ".")
@@ -796,13 +801,16 @@ func ConvertNamedValuePools(access *AccessList) map[string]string {
 		if first == nil {
 			first = map[string]string{}
 		}
-		if _, seen := first[key]; !seen {
-			first[key] = part
+		if kept, seen := first[key]; !seen {
+			first[key], by[key] = part, name
+		} else if kept != part {
+			return nil, fmt.Errorf("key pools %s and %s use %s with different first values (%s, %s); a pool now names the key and tries its values in one list order: set both to the same \"key\" (for example %q) in %s, then start again", by[key], name, key, kept, part, key+"."+kept, "access.json")
 		}
 		svc.Key = key
-		access.Services[name] = svc
+		converted[name] = svc
 	}
-	return first
+	maps.Copy(access.Services, converted)
+	return first, nil
 }
 
 // SaveAccess validates access against rules, then replaces the access file

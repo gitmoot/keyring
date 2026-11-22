@@ -97,12 +97,15 @@ func renameRefs(access *policy.AccessList, moves map[string]string) []string {
 }
 
 // moveValues renames stored values (old name -> new name), adds new ones
-// (name -> value) and points every service reference at the new names, and
+// (name -> value), points every service reference at the new names and
+// applies notes to the key notes, which hold each key's value order; it
 // returns the services changed. The new access list is checked before
-// anything is written, and the store changes in one write; if saving the
-// access list then fails, the store change is undone, so no service is left
-// naming a missing value. Callers hold b.Mu.
-func (b *Backend) moveValues(moves, add map[string]string) ([]string, error) {
+// anything is written. The key notes are written first, then the store in
+// one write, then the access list; a failure undoes what was written before
+// it, so no service is left naming a missing value and no pool loses its
+// order. The proxy then gets the new settings, keys and order together.
+// Callers hold b.Mu.
+func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[string]KeyMeta)) ([]string, error) {
 	next, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
 		return nil, err
@@ -117,6 +120,21 @@ func (b *Backend) moveValues(moves, add map[string]string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	before, err := b.loadMeta()
+	if err != nil {
+		return nil, err
+	}
+	meta := maps.Clone(before)
+	notes(meta)
+	if err := b.writeMeta(meta); err != nil {
+		return nil, err
+	}
+	undo := func(err error) error {
+		if metaErr := b.writeMeta(before); metaErr != nil {
+			err = errors.Join(err, fmt.Errorf("putting the key notes back failed too: %w", metaErr))
+		}
+		return err
+	}
 	stored := map[string]string{}
 	for from, to := range moves {
 		if _, ok := keys[from]; ok {
@@ -125,14 +143,14 @@ func (b *Backend) moveValues(moves, add map[string]string) ([]string, error) {
 	}
 	if len(stored) > 0 || len(add) > 0 {
 		if err := store.Move(b.StorePath, stored, add); err != nil {
-			return nil, err
+			return nil, undo(err)
 		}
 	}
 	cfg := b.Proxy.Config()
 	if len(services) > 0 {
 		saved, err := policy.SaveAccess(b.rules(), next)
 		if err != nil {
-			return nil, errors.Join(err, b.undoMove(stored, add))
+			return nil, undo(errors.Join(err, b.undoMove(stored, add)))
 		}
 		cfg = saved
 	}
@@ -141,7 +159,7 @@ func (b *Backend) moveValues(moves, add map[string]string) ([]string, error) {
 		delete(keys, from)
 	}
 	maps.Copy(keys, add)
-	b.Proxy.Swap(cfg, keys)
+	b.Proxy.SwapWithOrder(cfg, keys, valueOrder(meta))
 	return services, nil
 }
 
@@ -165,25 +183,25 @@ func (b *Backend) undoMove(stored, add map[string]string) error {
 	return nil
 }
 
-// moveMeta moves the dashboard's notes (status, dates, file kind, value list)
-// with renamed names. A failure here leaves the rename done; only notes are
-// lost.
-func (b *Backend) moveMeta(moves map[string]string) {
-	meta, err := b.loadMeta()
-	if err != nil {
-		return
-	}
-	changed := false
+// moveNotes moves the dashboard's notes (status, dates, file kind, value
+// list) in meta with renamed names.
+func moveNotes(meta map[string]KeyMeta, moves map[string]string) {
+	moved := map[string]KeyMeta{}
 	for from, to := range moves {
 		if m, ok := meta[from]; ok {
 			delete(meta, from)
-			meta[to] = m
-			changed = true
+			moved[to] = m
 		}
 	}
-	if changed {
-		_ = b.saveMeta(meta)
-	}
+	maps.Copy(meta, moved)
+}
+
+// setNotes sets the key's value list (and highest number) in meta.
+func setNotes(meta map[string]KeyMeta, key string, notes []ValueNote, last int) {
+	m := meta[key]
+	m.Values = notes
+	m.LastNumber = max(m.LastNumber, last)
+	meta[key] = m
 }
 
 // saveNotes stores the key's value list (and highest number) in its notes.
@@ -192,15 +210,12 @@ func (b *Backend) saveNotes(key string, notes []ValueNote, last int) error {
 	if err != nil {
 		return err
 	}
-	m := meta[key]
-	m.Values = notes
-	m.LastNumber = max(m.LastNumber, last)
-	meta[key] = m
+	setNotes(meta, key, notes, last)
 	return b.saveMeta(meta)
 }
 
-// editStart is the common start of these forms: the password, then the
-// lock and the key's row. ok is false when a response was written.
+// editStart is the common start of these forms, called with b.Mu held: the
+// password, then the key's row. ok is false when a response was written.
 func (b *Backend) editStart(w http.ResponseWriter, r *http.Request, sid string) (row keyRow, back func(code string), ok bool) {
 	name := r.PathValue("name")
 	back = func(code string) { http.Redirect(w, r, "/keys/"+name+"?error="+code, http.StatusSeeOther) }
@@ -208,10 +223,8 @@ func (b *Backend) editStart(w http.ResponseWriter, r *http.Request, sid string) 
 		back("password")
 		return row, back, false
 	}
-	b.Mu.Lock()
 	row, found, err := b.row(name)
 	if err != nil || !found {
-		b.Mu.Unlock()
 		b.unknownKey(w, r, sid, err)
 		return row, back, false
 	}
@@ -232,11 +245,12 @@ func (b *Backend) addValue(w http.ResponseWriter, r *http.Request, sid string) {
 	value, err := readValue(r)
 	part := strings.ToLower(strings.TrimSpace(r.PostFormValue("part")))
 	label, labelMsg := checkLabel(r.PostFormValue("label"))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	switch {
 	case errors.Is(err, errValueControl):
 		back("value-control")
@@ -291,13 +305,11 @@ func (b *Backend) addValue(w http.ResponseWriter, r *http.Request, sid string) {
 		target = name + "." + part
 	}
 	notes = append(notes, ValueNote{Name: part, Label: label})
-	services, err := b.moveValues(moves, map[string]string{target: value})
+	services, err := b.moveValues(moves, map[string]string{target: value}, func(meta map[string]KeyMeta) { setNotes(meta, name, notes, last) })
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	// Only notes: a failure here leaves the value stored and working.
-	_ = b.saveNotes(name, notes, last)
 	b.Admin.Audit("key_value_added", sid, map[string]any{"key": target, "moved": moves, "services": services})
 	http.Redirect(w, r, "/keys/"+name+"?done=value-added", http.StatusSeeOther)
 }
@@ -307,11 +319,12 @@ func (b *Backend) labelValue(w http.ResponseWriter, r *http.Request, sid string)
 	name := r.PathValue("name")
 	part := strings.TrimSpace(r.PostFormValue("part"))
 	label, msg := checkLabel(r.PostFormValue("label"))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	if msg != "" {
 		back("label")
 		return
@@ -340,11 +353,12 @@ func (b *Backend) labelValue(w http.ResponseWriter, r *http.Request, sid string)
 func (b *Backend) moveValueUp(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
 	part := strings.TrimSpace(r.PostFormValue("part"))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	i := partIndex(row, part)
 	switch {
 	case len(row.Parts) == 0:
@@ -371,11 +385,12 @@ func (b *Backend) moveValueUp(w http.ResponseWriter, r *http.Request, sid string
 func (b *Backend) renameKey(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
 	newName := strings.TrimSpace(r.PostFormValue("new_name"))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	if base, part := store.SplitPart(newName); part != "" || !store.ValidName(base) {
 		back("name")
 		return
@@ -391,12 +406,11 @@ func (b *Backend) renameKey(w http.ResponseWriter, r *http.Request, sid string) 
 	for _, p := range row.Parts {
 		moves[p.Full] = newName + "." + p.Name
 	}
-	services, err := b.moveValues(moves, nil)
+	services, err := b.moveValues(moves, nil, func(meta map[string]KeyMeta) { moveNotes(meta, moves) })
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	b.moveMeta(moves)
 	b.Admin.Audit("key_renamed", sid, map[string]any{"key": name, "new_name": newName, "services": services})
 	http.Redirect(w, r, "/keys/"+newName+"?done=renamed", http.StatusSeeOther)
 }
@@ -407,11 +421,12 @@ func (b *Backend) renameValue(w http.ResponseWriter, r *http.Request, sid string
 	name := r.PathValue("name")
 	part := strings.TrimSpace(r.PostFormValue("part"))
 	newPart := strings.ToLower(strings.TrimSpace(r.PostFormValue("new_part")))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	i := partIndex(row, part)
 	switch {
 	case len(row.Parts) == 0:
@@ -429,17 +444,18 @@ func (b *Backend) renameValue(w http.ResponseWriter, r *http.Request, sid string
 	}
 	from := name + "." + part
 	moves := map[string]string{from: name + "." + newPart}
-	services, err := b.moveValues(moves, nil)
-	if err != nil {
-		b.fail(w, sid, err)
-		return
-	}
-	b.moveMeta(moves)
 	notes := row.notes()
 	notes[i].Name = newPart
 	last := 0
 	noteNumber(&last, newPart)
-	_ = b.saveNotes(name, notes, last)
+	services, err := b.moveValues(moves, nil, func(meta map[string]KeyMeta) {
+		moveNotes(meta, moves)
+		setNotes(meta, name, notes, last)
+	})
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
 	b.Admin.Audit("key_value_renamed", sid, map[string]any{"key": from, "new_name": moves[from], "services": services})
 	http.Redirect(w, r, "/keys/"+name+"?done=value-renamed", http.StatusSeeOther)
 }
@@ -451,11 +467,12 @@ func (b *Backend) renameValue(w http.ResponseWriter, r *http.Request, sid string
 func (b *Backend) removeValue(w http.ResponseWriter, r *http.Request, sid string) {
 	name := r.PathValue("name")
 	part := strings.TrimSpace(r.PostFormValue("part"))
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
 		return
 	}
-	defer b.Mu.Unlock()
 	if len(row.Parts) == 0 {
 		back("value-only")
 		return

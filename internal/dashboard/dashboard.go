@@ -375,17 +375,22 @@ func (b *Backend) loadMeta() (map[string]KeyMeta, error) {
 
 // saveMeta writes the key notes and gives the proxy the value order in them.
 func (b *Backend) saveMeta(meta map[string]KeyMeta) error {
-	raw, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600); err != nil {
+	if err := b.writeMeta(meta); err != nil {
 		return err
 	}
 	if b.Proxy != nil {
 		b.Proxy.SetValueOrder(valueOrder(meta))
 	}
 	return nil
+}
+
+// writeMeta writes the key notes, replacing the file atomically.
+func (b *Backend) writeMeta(meta map[string]KeyMeta) error {
+	raw, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.WriteAtomic(b.MetaPath, append(raw, '\n'), 0o600)
 }
 
 // NoteKeyChange records in the key notes at metaPath that a key was set or
@@ -1053,10 +1058,15 @@ func nextNumber(last *int, taken map[string]bool) string {
 	}
 }
 
+// maxNumber bounds automatic numbering: a value named with a larger number
+// (a valid name of up to 32 digits) is just a name and does not move the
+// counter, so the next number never overflows. nextNumber skips taken names.
+const maxNumber = 1_000_000
+
 // noteNumber raises *last to a value name that is a number, so that number
 // is not given again.
 func noteNumber(last *int, name string) {
-	if n, err := strconv.Atoi(name); err == nil && n > *last {
+	if n, err := strconv.Atoi(name); err == nil && n < maxNumber && n > *last {
 		*last = n
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	dashboardpkg "github.com/gitmoot/keyring/internal/dashboard"
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // metaPathOf is the dashboard's key notes file next to the key store.
@@ -20,12 +21,15 @@ func metaPathOf(storePath string) string {
 // loadConfig is policy.Load, plus the one-time upgrade of v0.14.18 key pools:
 // such a pool named one value of its key ("key":"CLAUDE_KEYS.main"), which
 // is now refused, as a pool names the key. Each is converted to name the key,
-// and the value it named is put first in the key's list (keymeta.json at
-// metaPath), so the pool still tries the same value first. With metaPath ""
-// (keyring check) the conversion is checked in memory only; the service
-// writes it when it starts. The key notes are written before the access
-// file, so a failure in between is redone at the next start.
-func loadConfig(configPath, metaPath string, out io.Writer) (*policy.Config, error) {
+// and the value it named is put first in the key's list (keymeta.json next to
+// the store), so the pool still tries the same value first. Conversions that
+// would change what a pool sends are refused before anything is written: two
+// pools of one key with different first values, and a pool whose key holds
+// only a plain value (v0.14.18 never sent it; a pool now would). Without
+// write (keyring check) the conversion is checked in memory only; the
+// service writes it when it starts. The key notes are written before the
+// access file, so a failure in between is redone at the next start.
+func loadConfig(configPath, storePath string, write bool, out io.Writer) (*policy.Config, error) {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
 		return nil, err
@@ -34,19 +38,36 @@ func loadConfig(configPath, metaPath string, out io.Writer) (*policy.Config, err
 	if err != nil {
 		return nil, err
 	}
-	first := policy.ConvertNamedValuePools(&access)
+	first, err := policy.ConvertNamedValuePools(&access)
+	if err != nil {
+		return nil, fmt.Errorf("converting v0.14.18 key pools: %w", err)
+	}
 	cfg := &policy.Config{Rules: rules, AccessList: access}
 	if err := cfg.Validate(); err != nil {
+		if len(first) > 0 {
+			return nil, fmt.Errorf("converting v0.14.18 key pools (%s): %w", poolKeys(first), err)
+		}
 		return nil, err
 	}
 	if len(first) == 0 {
 		return cfg, nil
 	}
-	if metaPath == "" {
+	if storePath != "" {
+		keys, err := store.Load(storePath)
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range slices.Sorted(maps.Keys(first)) {
+			if keys[key] != "" && !hasValues(keys, key) {
+				return nil, fmt.Errorf("converting v0.14.18 key pools: the pool on %s.%s never sent the plain value %s, but a pool on %s now would; store the pool's values as %s.<name>, or remove key_pool, then start again", key, first[key], key, key, key)
+			}
+		}
+	}
+	if !write {
 		fmt.Fprintf(out, "key pools naming one value (%s) are converted to name the key when the service starts\n", poolKeys(first))
 		return cfg, nil
 	}
-	if err := dashboardpkg.PutValuesFirst(metaPath, first); err != nil {
+	if err := dashboardpkg.PutValuesFirst(metaPathOf(storePath), first); err != nil {
 		return nil, fmt.Errorf("converting key pools: %w", err)
 	}
 	cfg, err = policy.SaveAccess(rules, access)
@@ -55,6 +76,16 @@ func loadConfig(configPath, metaPath string, out io.Writer) (*policy.Config, err
 	}
 	fmt.Fprintf(out, "converted key pools to name the key, each first value kept first: %s\n", poolKeys(first))
 	return cfg, nil
+}
+
+// hasValues reports whether keys holds a value of key (key.part).
+func hasValues(keys map[string]string, key string) bool {
+	for name, value := range keys {
+		if base, part := store.SplitPart(name); base == key && part != "" && value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func poolKeys(first map[string]string) string {

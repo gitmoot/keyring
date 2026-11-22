@@ -128,7 +128,7 @@ func TestEditKeepsKeyPool(t *testing.T) {
 	if w := e.edit("claude-api", url.Values{"pasted": {`{` + base + `}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || !pool() {
 		t.Fatalf("paste without key_pool: %d, key_pool %v", w.Code, pool())
 	}
-	if w := e.edit("claude-api", url.Values{"pasted": {`{` + base + `,"key_pool":false}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || pool() {
+	if w := e.edit("claude-api", url.Values{"key": {"CLAUDE_KEYS.1"}, "pasted": {`{` + base + `,"key_pool":false}`}}); w.Header().Get("Location") != "/services/claude-api?done=saved" || pool() {
 		t.Fatalf("paste with key_pool false: %d, key_pool %v", w.Code, pool())
 	}
 }

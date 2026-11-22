@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -321,5 +322,83 @@ func TestConnectSettingsAreClosedUntilAnError(t *testing.T) {
 	w := e.request("POST", "/keys/PLAIN_THING/connect", url.Values{"pasted": {"{not json"}, "password": {password}})
 	if !strings.Contains(w.Body.String(), "<details open><summary>Settings") {
 		t.Fatal("Settings stay closed after a failed connect")
+	}
+}
+
+// The list order is routing: a rename whose key notes cannot be written
+// fails and changes nothing, and a pool keeps trying the moved-up value
+// first, before and after a rename that succeeds.
+func TestRenameKeepsThePoolOrderOrChangesNothing(t *testing.T) {
+	e := newEnv(t)
+	up, seen := recordingAPI(t)
+	e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+	pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","key_pool":true}`
+	e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}})
+	grantPhobos(t, e, "claude-api")
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/move-up", url.Values{"part": {"2"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-moved" {
+		t.Fatalf("move up: %s", loc)
+	}
+	metaPath := e.backend.MetaPath
+	e.backend.MetaPath = filepath.Join(t.TempDir(), "missing", "keymeta.json")
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/rename", url.Values{"new_name": {"CLAUDE_POOL"}, "password": {password}}).Header().Get("Location"); loc == "/keys/CLAUDE_POOL?done=renamed" {
+		t.Fatal("rename succeeded without its key notes")
+	}
+	e.backend.MetaPath = metaPath
+	if got := e.proxy.Config().Services["claude-api"].Key; got != "CLAUDE_KEYS" {
+		t.Fatalf("after the failed rename the pool names %s", got)
+	}
+	e.call("POST", "/claude-api/v1/messages", token)
+	if loc := e.request("POST", "/keys/CLAUDE_KEYS/rename", url.Values{"new_name": {"CLAUDE_POOL"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_POOL?done=renamed" {
+		t.Fatalf("rename: %s", loc)
+	}
+	e.call("POST", "/claude-api/v1/messages", token)
+	if got := seen(); !slices.Equal(got, []string{"sk-ant-b-1111", "sk-ant-b-1111"}) {
+		t.Fatal("the pool lost its order")
+	}
+}
+
+// A value may be named with a large number; numbering the next value
+// without a name still works.
+func TestALargeNumberNameKeepsNumberingWorking(t *testing.T) {
+	e := newEnv(t)
+	e.request("POST", "/keys", url.Values{"name": {"BIG"}, "value": {"big-value-0123456789"}, "part": {"9223372036854775807"}, "password": {password}})
+	if loc := e.request("POST", "/keys/BIG/add-value", url.Values{"value": {"next-value-0123456789"}, "password": {password}}).Header().Get("Location"); loc != "/keys/BIG?done=value-added" {
+		t.Fatalf("add a value: %s", loc)
+	}
+	if mustKeys(t, e)["BIG.1"] != "next-value-0123456789" {
+		t.Fatalf("stored names = %v", sortedNames(mustKeys(t, e)))
+	}
+}
+
+// The service editor turns a key pool on and off with the key in the same
+// paste: on, the value picked stands for its key; off, a key with several
+// values is refused until one value is picked.
+func TestServiceEditorTurnsAPoolOnAndOff(t *testing.T) {
+	e := newEnv(t)
+	addModal(e)
+	if loc := e.request("POST", "/keys/MODAL/connect", url.Values{"service": {"modal-ocr"}, "base": {"https://ws.modal.run"}, "auth": {"header"},
+		"header": {"Modal-Key"}, "key_part": {"id"}, "password": {password}}).Header().Get("Location"); loc != "/keys/MODAL?done=connected" {
+		t.Fatalf("connect: %s", loc)
+	}
+	settings := `"base":"https://ws.modal.run","auth":"header","header":"Modal-Key"`
+	page := e.request("GET", "/services/modal-ocr", nil).Body.String()
+	if !strings.Contains(page, "<option>MODAL</option>") || !strings.Contains(page, "MODAL.id</option>") {
+		t.Fatal("the editor does not offer both the key and its values")
+	}
+	if w := e.edit("modal-ocr", url.Values{"key": {"MODAL.id"}, "pasted": {`{` + settings + `,"key_pool":true}`}}); w.Header().Get("Location") != "/services/modal-ocr?done=saved" {
+		t.Fatalf("pool on: %d %s", w.Code, w.Body)
+	}
+	if svc := e.proxy.Config().Services["modal-ocr"]; !svc.KeyPool || svc.Key != "MODAL" {
+		t.Fatalf("pool on: key %s pool %v", svc.Key, svc.KeyPool)
+	}
+	w := e.edit("modal-ocr", url.Values{"key": {"MODAL"}, "pasted": {`{` + settings + `,"key_pool":false}`}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(html.UnescapeString(w.Body.String()), "MODAL has several values") {
+		t.Fatalf("pool off on the bare key: %d", w.Code)
+	}
+	if w := e.edit("modal-ocr", url.Values{"key": {"MODAL.secret"}, "pasted": {`{` + settings + `,"key_pool":false}`}}); w.Header().Get("Location") != "/services/modal-ocr?done=saved" {
+		t.Fatalf("pool off: %d %s", w.Code, w.Body)
+	}
+	if svc := e.proxy.Config().Services["modal-ocr"]; svc.KeyPool || svc.Key != "MODAL.secret" {
+		t.Fatalf("pool off: key %s pool %v", svc.Key, svc.KeyPool)
 	}
 }
