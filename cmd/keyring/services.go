@@ -50,13 +50,16 @@ func listServices(relayURL, upstream, role, search string, asJSON bool, stdout i
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	const limit = 4 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("reading the keyring's answer: %w", err)
+	}
+	if len(raw) > limit {
+		return fmt.Errorf("the keyring's answer is over %d MiB; narrow it with --search", limit>>20)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("keyring answered %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	if asJSON {
-		_, err := stdout.Write(raw)
-		return err
 	}
 	var answer struct {
 		Services []server.ServiceEntry `json:"services"`
@@ -64,6 +67,10 @@ func listServices(relayURL, upstream, role, search string, asJSON bool, stdout i
 	}
 	if err := json.Unmarshal(raw, &answer); err != nil {
 		return fmt.Errorf("keyring answered something that is not a service list: %v", err)
+	}
+	if asJSON {
+		_, err := stdout.Write(raw)
+		return err
 	}
 	if len(answer.Services) == 0 {
 		if search != "" {
@@ -80,11 +87,7 @@ func listServices(relayURL, upstream, role, search string, asJSON bool, stdout i
 		if role != "" {
 			access = "not granted"
 			if s.Granted {
-				methods := "any method"
-				if len(s.Methods) > 0 {
-					methods = strings.Join(s.Methods, ",")
-				}
-				access = methods + " " + strings.Join(s.Paths, ",")
+				access = strings.Join(s.Methods, ",") + " " + strings.Join(s.Paths, ",")
 			}
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Name, dash(s.Provider), s.Kind, dash(s.Project), access, dash(s.Call))
@@ -92,7 +95,9 @@ func listServices(relayURL, upstream, role, search string, asJSON bool, stdout i
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, "\n"+strings.ToUpper(answer.Ask[:1])+answer.Ask[1:])
+	if answer.Ask != "" {
+		fmt.Fprintln(stdout, "\n"+strings.ToUpper(answer.Ask[:1])+answer.Ask[1:])
+	}
 	return nil
 }
 

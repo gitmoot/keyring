@@ -359,12 +359,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A service this role may not even see (a client-owned project's) gets
 	// the same answer as a name that is not a service.
-	if !known || !snap.config.ServiceVisible(&role, service) {
-		fail(http.StatusForbidden, "no service named "+truncate(service, 64)+snap.config.DidYouMean(&role, service)+"; list them with: keyring services --role "+roleName+" [--search WORDS]")
+	if !known || !snap.config.ServiceVisible(&role, service, start) {
+		fail(http.StatusForbidden, "no service named "+truncate(service, 64)+snap.config.DidYouMean(&role, service, start)+"; list them with: keyring services --role "+roleName+" [--search WORDS]")
 		return
 	}
 	if !allowed {
-		fail(http.StatusForbidden, "role may not use this service; ask the owner with: keyring request --role "+roleName+" --service "+service)
+		fail(http.StatusForbidden, "role may not use this service; "+askHint(roleName, service))
 		return
 	}
 	if access.Expired(start) {

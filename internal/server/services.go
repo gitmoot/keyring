@@ -33,8 +33,20 @@ type ServiceEntry struct {
 	Granted bool     `json:"granted"`
 	Methods []string `json:"methods,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
-	// Call is the path to call after the relay's /<role>, when granted.
+	// Call is the path to call after the relay's /<role>, when granted. A
+	// tunnel has none: its WebSocket upgrade does not pass the relay.
 	Call string `json:"call,omitempty"`
+}
+
+// askHint is how an agent asks the owner for a service it may not use.
+func askHint(role, service string) string {
+	if role == "" {
+		role = "<role>"
+	}
+	if service == "" {
+		service = "<name>"
+	}
+	return "ask the owner with: keyring request --upstream <keyring URL> --role " + role + " --service " + service
 }
 
 func serviceKind(s policy.Service) string {
@@ -59,9 +71,7 @@ func serviceCall(name string, s policy.Service) string {
 		return "POST " + ed25519SignPrefix + name
 	case policy.AuthMinisignSign:
 		return "POST " + minisignPrefix + name
-	case policy.AuthEgressProxy:
-		return "/" + name + TunnelPath + " (WebSocket)"
-	case policy.AuthGcloudLogin:
+	case policy.AuthEgressProxy, policy.AuthGcloudLogin:
 		return ""
 	}
 	return "/" + name + "/<path>"
@@ -95,12 +105,12 @@ func (h *Handler) listServices(w http.ResponseWriter, r *http.Request, snap *sna
 	search := r.URL.Query().Get("search")
 	cfg := snap.config
 	entries := []ServiceEntry{}
-	for _, name := range cfg.SearchServices(role, search) {
+	for _, name := range cfg.SearchServices(role, search, now) {
 		svc := cfg.Services[name]
 		e := ServiceEntry{Name: name, Provider: svc.Provider(), Auth: svc.Auth, Kind: serviceKind(svc), Project: svc.Project}
 		if role != nil {
 			if acc, ok := cfg.AccessFor(*role, name); ok && !acc.Expired(now) && cfg.ProjectStopped(svc, now) == "" {
-				e.Granted, e.Methods, e.Paths, e.Call = true, slices.Clone(acc.Methods), slices.Clone(acc.Paths), serviceCall(name, svc)
+				e.Granted, e.Methods, e.Paths, e.Call = true, acc.EffectiveMethods(), slices.Clone(acc.Paths), serviceCall(name, svc)
 			}
 		}
 		entries = append(entries, e)
@@ -110,15 +120,11 @@ func (h *Handler) listServices(w http.ResponseWriter, r *http.Request, snap *sna
 	if search != "" {
 		rec.Note += ": " + strings.TrimSpace(truncate(search, 80))
 	}
-	ask := "keyring request --upstream <keyring> --role <role> --service <name>"
-	if rec.Role != "" {
-		ask = "keyring request --upstream <keyring> --role " + rec.Role + " --service <name>"
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"role": rec.Role, "search": search, "services": entries,
-		"ask": "a service you may not use yet: " + ask,
+		"ask": "for a service you may not use yet, " + askHint(rec.Role, ""),
 	})
 }
 

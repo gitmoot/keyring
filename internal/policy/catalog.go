@@ -3,6 +3,7 @@ package policy
 import (
 	"slices"
 	"strings"
+	"time"
 )
 
 // Service discovery for agents (owner, 2026-11-22): an agent can list and
@@ -11,9 +12,9 @@ import (
 
 // ServiceVisible reports whether role may learn that the named service exists.
 // role is nil for a caller without a role token (a new agent filing a
-// request). A service in a client-owned project is shown only to roles with
-// access to it; every other service is shown to everyone.
-func (a AccessList) ServiceVisible(role *Role, name string) bool {
+// request). A service in a client-owned project is shown only to roles whose
+// grant for it has not expired at now; every other service to everyone.
+func (a AccessList) ServiceVisible(role *Role, name string, now time.Time) bool {
 	svc, ok := a.Services[name]
 	if !ok {
 		return false
@@ -24,8 +25,8 @@ func (a AccessList) ServiceVisible(role *Role, name string) bool {
 	if role == nil {
 		return false
 	}
-	_, granted := a.AccessFor(*role, name)
-	return granted
+	acc, granted := a.AccessFor(*role, name)
+	return granted && !acc.Expired(now)
 }
 
 // Provider is the host a service calls ("" for a service that calls nothing,
@@ -65,7 +66,7 @@ func queryWords(q string) []string {
 // SearchServices returns the services role may see that match query, best
 // first: by how many of the query's words they contain, then by name. An
 // empty query returns every visible service, by name.
-func (a AccessList) SearchServices(role *Role, query string) []string {
+func (a AccessList) SearchServices(role *Role, query string, now time.Time) []string {
 	words := queryWords(query)
 	type hit struct {
 		name  string
@@ -73,7 +74,7 @@ func (a AccessList) SearchServices(role *Role, query string) []string {
 	}
 	var hits []hit
 	for name, svc := range a.Services {
-		if !a.ServiceVisible(role, name) {
+		if !a.ServiceVisible(role, name, now) {
 			continue
 		}
 		score := 0
@@ -103,23 +104,16 @@ func (a AccessList) SearchServices(role *Role, query string) []string {
 	return out
 }
 
-// SimilarServices suggests at most max visible services for a name that is
-// not a service: those sharing a word with it, best first.
-func (a AccessList) SimilarServices(role *Role, name string, max int) []string {
+// DidYouMean is the hint added to an "unknown service" answer: up to three
+// visible services sharing a word with name, best first; "" when none.
+func (a AccessList) DidYouMean(role *Role, name string, now time.Time) string {
 	if strings.TrimSpace(name) == "" {
-		return nil
+		return ""
 	}
-	out := a.SearchServices(role, name)
-	if len(out) > max {
-		out = out[:max]
+	similar := a.SearchServices(role, name, now)
+	if len(similar) > 3 {
+		similar = similar[:3]
 	}
-	return out
-}
-
-// DidYouMean is the hint added to an "unknown service" answer: "" when
-// nothing is similar.
-func (a AccessList) DidYouMean(role *Role, name string) string {
-	similar := a.SimilarServices(role, name, 3)
 	if len(similar) == 0 {
 		return ""
 	}

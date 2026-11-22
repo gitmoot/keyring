@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/policy"
 )
@@ -111,7 +112,46 @@ func TestWrongServiceNameSuggestsWithoutLeaking(t *testing.T) {
 		t.Fatalf("hidden and absent answers differ:\n%s\n%s", hidden, absent)
 	}
 	// A visible service the role may not use says how to ask for it.
-	if body := call(h, "GET", "/gmail-send/x", testToken, nil).Body.String(); !strings.Contains(body, "keyring request --role phobos --service gmail-send") {
+	if body := call(h, "GET", "/gmail-send/x", testToken, nil).Body.String(); !strings.Contains(body, "keyring request --upstream <keyring URL> --role phobos --service gmail-send") {
 		t.Fatalf("not-granted answer: %s", body)
+	}
+}
+
+// #161 review: an expired grant for a client-owned project shows nothing of
+// it; a grant without methods lists the methods it really allows; a tunnel
+// has no relay call path.
+func TestCatalogExpiredGrantsDefaultsAndTunnels(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	cfg := &policy.Config{
+		Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller}, AuditLog: "audit.log"},
+		AccessList: policy.AccessList{
+			Services: map[string]policy.Service{
+				"acme-stripe": {Base: "https://api.stripe.com", Key: "ST", Auth: policy.AuthBearer, Project: "acme"},
+				"openrouter":  {Base: "https://openrouter.ai/api/v1", Key: "OR", Auth: policy.AuthBearer},
+			},
+			Projects: map[string]policy.Project{"acme": {ClientOwned: true}},
+			Roles: map[string]policy.Role{"phobos": {TokenSHA256: tokenHash(testToken),
+				Access:   map[string]policy.Access{"openrouter": {Paths: []string{"/"}}},
+				Projects: map[string]policy.Access{"acme": {Paths: []string{"/"}, Expires: &past}}}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h := New(cfg, map[string]string{"ST": "k", "OR": "k"}, &bytes.Buffer{})
+	got := list(t, h, "", testToken)
+	if n := strings.Join(names(got), ","); n != "openrouter" {
+		t.Fatalf("expired project grant still lists: %s", n)
+	}
+	if m := strings.Join(got.Services[0].Methods, ","); m != "GET,HEAD,POST" {
+		t.Fatalf("methods of a grant without methods = %q", m)
+	}
+	hidden := call(h, "GET", "/acme-stripe/v1", testToken, nil).Body.String()
+	absent := call(h, "GET", "/acme-stripx/v1", testToken, nil).Body.String()
+	if strings.Contains(absent, "acme-stripe") || strings.Replace(hidden, "acme-stripe", "X", 1) != strings.Replace(absent, "acme-stripx", "X", 1) {
+		t.Fatalf("expired grant leaks the private service:\n%s\n%s", hidden, absent)
+	}
+	if c := serviceCall("t", policy.Service{Auth: policy.AuthEgressProxy}); c != "" {
+		t.Fatalf("tunnel call hint %q: a WebSocket upgrade does not pass the relay", c)
 	}
 }
