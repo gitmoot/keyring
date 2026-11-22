@@ -27,7 +27,9 @@ func TestServicesCLIRejectsBadAnswers(t *testing.T) {
 		err := listServices("", srv.URL, "", "", asJSON, &out)
 		return out.String(), err
 	}
-	if out, err := run(`{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]`, 1000, true); err == nil || out != "" {
+	// Complete, valid JSON with an overstated Content-Length: only the read
+	// error can make this fail, so ignoring it would print the list (#162-f1).
+	if out, err := run(`{"services":[{"name":"a","auth":"bearer","kind":"proxy"}]}`, 1000, true); err == nil || out != "" || !strings.Contains(err.Error(), "reading the keyring's answer") {
 		t.Fatalf("cut-off answer: err %v, printed %q", err, out)
 	}
 	if out, err := run(`{"services":[],"x":"`+strings.Repeat("a", 4<<20)+`"}`, 0, true); err == nil || out != "" {
