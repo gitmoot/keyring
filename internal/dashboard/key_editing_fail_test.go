@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/store"
 )
 
 // Test on a pooled key moves on to the next value only when a call would:
@@ -91,26 +93,55 @@ func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
 }
 
 // A pool Test result describes every value that set its order, tried or
-// not, at the generation it had. The primary is set aside after a refusal,
-// so Test starts with the backup; replacing the primary meanwhile puts the
-// replacement first, and setting the original back clears its refusal, so
-// it is first again. Either way the backup's late 200 says nothing about
-// the pool now, so it is not recorded.
+// not: its credential, its generation and its place in the list. The
+// primary is set aside after a refusal, so Test sends only the backup.
+// Replacing the primary meanwhile puts the replacement first; setting the
+// original back clears its refusal, so it is first again; keyring set
+// changes it on disk before the proxy reloads; Move up reorders the list.
+// In each case the backup's late 200 says nothing about the pool now, so it
+// is not recorded.
 func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
+	replace := func(values ...string) func(t *testing.T, e *env) {
+		return func(t *testing.T, e *env) {
+			for _, v := range values {
+				if loc := e.request("POST", "/keys/CLAUDE_KEYS/replace", url.Values{"part": {"1"}, "value": {v}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=replaced" {
+					t.Fatalf("replace: %s", loc)
+				}
+			}
+		}
+	}
 	for _, c := range []struct {
 		name   string
-		values []string // what the primary is set to, in turn, during the test
+		change func(t *testing.T, e *env) // made while Test waits for the backup
 	}{
-		{"replaced", []string{"sk-ant-c-2222"}},
-		{"replaced and set back", []string{"sk-ant-c-2222", "sk-ant-a-0000"}},
+		{"replaced", replace("sk-ant-c-2222")},
+		{"replaced and set back", replace("sk-ant-c-2222", "sk-ant-a-0000")},
+		{"set on disk before a reload", func(t *testing.T, e *env) {
+			if err := store.Set(e.backend.StorePath, "CLAUDE_KEYS.1", "sk-ant-c-2222"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"moved", func(t *testing.T, e *env) {
+			if loc := e.request("POST", "/keys/CLAUDE_KEYS/move-up", url.Values{"part": {"2"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-moved" {
+				t.Fatalf("move up: %s", loc)
+			}
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
 			started, proceed := make(chan struct{}), make(chan struct{})
 			var startOnce, proceedOnce sync.Once
 			release := func() { proceedOnce.Do(func() { close(proceed) }) }
+			var mu sync.Mutex
+			var tested []string
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Header.Get("x-api-key") {
+				key := r.Header.Get("x-api-key")
+				if r.Header.Get("User-Agent") == "keyring-test" {
+					mu.Lock()
+					tested = append(tested, key)
+					mu.Unlock()
+				}
+				switch key {
 				case "sk-ant-a-0000":
 					w.WriteHeader(http.StatusForbidden)
 				case "sk-ant-b-1111":
@@ -140,15 +171,11 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			select {
 			case <-started:
 			case loc := <-done:
-				t.Fatalf("Test answered %s without trying the backup first", loc)
+				t.Fatalf("Test answered %s without trying the backup", loc)
 			case <-time.After(10 * time.Second):
 				t.Fatal("Test never reached the backup")
 			}
-			for _, v := range c.values {
-				if loc := e.request("POST", "/keys/CLAUDE_KEYS/replace", url.Values{"part": {"1"}, "value": {v}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=replaced" {
-					t.Fatalf("replace: %s", loc)
-				}
-			}
+			c.change(t, e)
 			release()
 			var loc string
 			select {
@@ -160,8 +187,13 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(tested, []string{"sk-ant-b-1111"}) {
+				t.Fatalf("Test sent %d values; the primary was set aside, so only the backup", len(tested))
+			}
 			if m := meta["CLAUDE_KEYS"]; m.Status == "working" || loc != "/keys/CLAUDE_KEYS?error=changed" {
-				t.Fatalf("Test answered %s and recorded %q although the primary changed while it ran", loc, m.Status)
+				t.Fatalf("Test answered %s and recorded %q although the pool changed while it ran", loc, m.Status)
 			}
 		})
 	}

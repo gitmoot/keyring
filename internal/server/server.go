@@ -1039,10 +1039,28 @@ var ErrNoPoolValue = errors.New("the key pool has no value that can be sent")
 var ErrPoolChanged = errors.New("the key's values or the service changed during the test")
 
 // PoolValues are the values a pool test was ordered by: the service, its
-// key and the generation of every value that could be sent (snapshot.gens).
+// key and every value that could be sent, in list order, with its
+// generation (snapshot.gens) and the credential it held.
 type PoolValues struct {
 	service, key string
-	gens         map[string]uint64
+	values       []poolValue
+}
+
+type poolValue struct {
+	name  string
+	gen   uint64
+	value string
+}
+
+// Values are the credentials the test was ordered by (key name -> value),
+// for the caller to check against the store on disk, which can change
+// before the proxy reloads it.
+func (v PoolValues) Values() map[string]string {
+	out := make(map[string]string, len(v.values))
+	for _, pv := range v.values {
+		out[pv.name] = pv.value
+	}
+	return out
 }
 
 // poolValues are the values of the key pool service named service, chosen
@@ -1073,9 +1091,9 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 	if len(tries) == 0 {
 		return 0, PoolValues{}, ErrNoPoolValue
 	}
-	values := PoolValues{service, key, make(map[string]uint64, len(pool))}
-	for _, name := range pool {
-		values.gens[name] = snap.gens[name]
+	values := PoolValues{service, key, make([]poolValue, len(pool))}
+	for i, name := range pool {
+		values.values[i] = poolValue{name, snap.gens[name], snap.keys[name]}
 	}
 	var resp *http.Response
 	for i, name := range tries {
@@ -1094,17 +1112,18 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 }
 
 // PoolCurrent reports whether the pool a test ran on still has exactly the
-// values it had, each at the same generation. A value replaced since, even
-// if later set back to the same bytes, has a new generation and may be
-// tried in another place, so the test says nothing about the pool now.
+// values it had, in the same list order, each at the same generation. A
+// value replaced since, even if later set back to the same bytes, has a new
+// generation, and a moved value is tried in another place, so the test says
+// nothing about the pool now.
 func (h *Handler) PoolCurrent(v PoolValues) bool {
 	snap := h.snap.Load()
 	_, pool, err := poolValues(snap, v.service, v.key)
-	if err != nil || len(pool) != len(v.gens) {
+	if err != nil || len(pool) != len(v.values) {
 		return false
 	}
-	for _, name := range pool {
-		if gen, ok := v.gens[name]; !ok || gen != snap.gens[name] {
+	for i, name := range pool {
+		if v.values[i].name != name || v.values[i].gen != snap.gens[name] {
 			return false
 		}
 	}

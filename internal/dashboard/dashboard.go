@@ -1594,25 +1594,28 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	defer b.Mu.Unlock()
 	// The result belongs to the values that were tested: if a replace or
 	// delete happened meanwhile, it says nothing about the key now stored.
-	// A pool is checked by value generation in the proxy, which every edit
-	// updates with the store under b.Mu: a value replaced and set back has
-	// the same bytes but may be tried in another place.
+	// The store on disk can change without the dashboard (keyring set)
+	// before the proxy reloads it, so the tested values must still be what
+	// it holds. A pool is also checked in the proxy, which every dashboard
+	// edit updates under b.Mu: by value generation, since a value replaced
+	// and set back has the same bytes but may be tried in another place,
+	// and by list order, since a moved value is tried in another place.
 	if svc.KeyPool {
 		if !b.Proxy.PoolCurrent(pool) {
 			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
 			return
 		}
-	} else {
-		now, err := store.Load(b.StorePath)
-		if err != nil {
-			b.fail(w, sid, err)
+		sent = pool.Values()
+	}
+	now, err := store.Load(b.StorePath)
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	for kn, v := range sent {
+		if cur, ok := now[kn]; !ok || cur != v {
+			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
 			return
-		}
-		for kn, v := range sent {
-			if cur, ok := now[kn]; !ok || cur != v {
-				http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
-				return
-			}
 		}
 	}
 	meta, err := b.loadMeta()
