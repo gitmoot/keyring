@@ -1542,6 +1542,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	defer cancel()
 	var status int
 	var sent map[string]string
+	var pool server.PoolValues
 	var testErr error
 	if svc.KeyPool {
 		// A pool is tested as a call goes (server.TestPool): the proxy
@@ -1549,7 +1550,7 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		// values and their order from one snapshot and moves on only when
 		// the service refused one the way a call moves on, so the key
 		// works if a call through the pool would.
-		status, sent, testErr = b.Proxy.TestPool(ctx, sname, svc.Key)
+		status, pool, testErr = b.Proxy.TestPool(ctx, sname, svc.Key)
 		switch {
 		case errors.Is(testErr, server.ErrNoPoolValue):
 			http.Redirect(w, r, "/keys/"+name+"?error=no-value", http.StatusSeeOther)
@@ -1591,17 +1592,27 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	// The result belongs to the value that was sent: if a replace or delete
-	// happened meanwhile, it says nothing about the key now stored.
-	now, err := store.Load(b.StorePath)
-	if err != nil {
-		b.fail(w, sid, err)
-		return
-	}
-	for kn, v := range sent {
-		if cur, ok := now[kn]; !ok || cur != v {
+	// The result belongs to the values that were tested: if a replace or
+	// delete happened meanwhile, it says nothing about the key now stored.
+	// A pool is checked by value generation in the proxy, which every edit
+	// updates with the store under b.Mu: a value replaced and set back has
+	// the same bytes but may be tried in another place.
+	if svc.KeyPool {
+		if !b.Proxy.PoolCurrent(pool) {
 			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
 			return
+		}
+	} else {
+		now, err := store.Load(b.StorePath)
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		for kn, v := range sent {
+			if cur, ok := now[kn]; !ok || cur != v {
+				http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+				return
+			}
 		}
 	}
 	meta, err := b.loadMeta()
