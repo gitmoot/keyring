@@ -1592,31 +1592,41 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	// The result belongs to the values that were tested: if a replace or
-	// delete happened meanwhile, it says nothing about the key now stored.
-	// The store on disk can change without the dashboard (keyring set)
-	// before the proxy reloads it, so the tested values must still be what
-	// it holds. A pool is also checked in the proxy, which every dashboard
-	// edit updates under b.Mu: by value generation, since a value replaced
-	// and set back has the same bytes but may be tried in another place,
-	// and by list order, since a moved value is tried in another place.
-	if svc.KeyPool {
-		if !b.Proxy.PoolCurrent(pool) {
-			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
-			return
-		}
-		sent = pool.Values()
-	}
+	// The result belongs to the values that were tested: if one was
+	// replaced, deleted, added or moved meanwhile, it says nothing about the
+	// key now. The store on disk can change without the dashboard (keyring
+	// set) before the proxy reloads it. A pool is checked once, by
+	// PoolCurrent, against the settings, store and value order on disk and
+	// against the proxy's pool now.
 	now, err := store.Load(b.StorePath)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	for kn, v := range sent {
-		if cur, ok := now[kn]; !ok || cur != v {
-			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+	fresh := true
+	if svc.KeyPool {
+		notes, err := b.loadMeta()
+		if err != nil {
+			b.fail(w, sid, err)
 			return
 		}
+		access, err := policy.LoadAccess(b.rules().AccessFile)
+		if err != nil {
+			b.fail(w, sid, err)
+			return
+		}
+		disk := &policy.Config{Rules: b.rules(), AccessList: access}
+		fresh = disk.Validate() == nil && b.Proxy.PoolCurrent(pool, disk, now, valueOrder(notes))
+	} else {
+		for kn, v := range sent {
+			if cur, ok := now[kn]; !ok || cur != v {
+				fresh = false
+			}
+		}
+	}
+	if !fresh {
+		http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+		return
 	}
 	meta, err := b.loadMeta()
 	if err == nil {

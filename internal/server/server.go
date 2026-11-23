@@ -1052,17 +1052,6 @@ type poolValue struct {
 	value string
 }
 
-// Values are the credentials the test was ordered by (key name -> value),
-// for the caller to check against the store on disk, which can change
-// before the proxy reloads it.
-func (v PoolValues) Values() map[string]string {
-	out := make(map[string]string, len(v.values))
-	for _, pv := range v.values {
-		out[pv.name] = pv.value
-	}
-	return out
-}
-
 // poolValues are the values of the key pool service named service, chosen
 // as a pool on key, that snap can send.
 func poolValues(snap *snapshot, service, key string) (policy.Service, []string, error) {
@@ -1111,18 +1100,34 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 	return closeTest(resp), values, nil
 }
 
-// PoolCurrent reports whether the pool a test ran on still has exactly the
-// values it had, in the same list order, each at the same generation. A
-// value replaced since, even if later set back to the same bytes, has a new
-// generation, and a moved value is tried in another place, so the test says
-// nothing about the pool now.
-func (h *Handler) PoolCurrent(v PoolValues) bool {
-	snap := h.snap.Load()
-	_, pool, err := poolValues(snap, v.service, v.key)
-	if err != nil || len(pool) != len(v.values) {
+// PoolCurrent reports whether a pool test still describes the pool, the
+// one freshness check for a result. Two pools must equal the tested one,
+// value by value in list order:
+//   - the pool built from config, keys and order, the settings, store and
+//     value order as on disk, which the proxy loads at its next reload
+//     (keyring set can change the store before then): the same names with
+//     the same credentials;
+//   - the proxy's pool now: the same names at the same generations. A value
+//     replaced since, even if set back to the same bytes, has a new
+//     generation and may be tried in another place.
+//
+// A value added, removed, replaced or moved, or a service changed, fails it.
+func (h *Handler) PoolCurrent(v PoolValues, config *policy.Config, keys map[string]string, order map[string][]string) bool {
+	_, disk, err := poolValues(&snapshot{config: config, keys: keys, order: order}, v.service, v.key)
+	if err != nil || len(disk) != len(v.values) {
 		return false
 	}
-	for i, name := range pool {
+	for i, name := range disk {
+		if v.values[i].name != name || v.values[i].value != keys[name] {
+			return false
+		}
+	}
+	snap := h.snap.Load()
+	_, live, err := poolValues(snap, v.service, v.key)
+	if err != nil || len(live) != len(v.values) {
+		return false
+	}
+	for i, name := range live {
 		if v.values[i].name != name || v.values[i].gen != snap.gens[name] {
 			return false
 		}

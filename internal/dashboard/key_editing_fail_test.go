@@ -98,8 +98,9 @@ func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
 // Replacing the primary meanwhile puts the replacement first; setting the
 // original back clears its refusal, so it is first again; keyring set
 // changes it on disk before the proxy reloads; Move up reorders the list.
-// In each case the backup's late 200 says nothing about the pool now, so it
-// is not recorded.
+// A pool over one plain value gets its first named value on disk, which
+// replaces the plain value at the next reload. In each case the late 200
+// says nothing about the pool now, so it is not recorded.
 func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 	replace := func(values ...string) func(t *testing.T, e *env) {
 		return func(t *testing.T, e *env) {
@@ -110,20 +111,27 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			}
 		}
 	}
+	pair := []string{"sk-ant-a-0000", "sk-ant-b-1111"}
 	for _, c := range []struct {
 		name   string
+		values []string                   // the key's values; the primary is refused
 		change func(t *testing.T, e *env) // made while Test waits for the backup
 	}{
-		{"replaced", replace("sk-ant-c-2222")},
-		{"replaced and set back", replace("sk-ant-c-2222", "sk-ant-a-0000")},
-		{"set on disk before a reload", func(t *testing.T, e *env) {
+		{"replaced", pair, replace("sk-ant-c-2222")},
+		{"replaced and set back", pair, replace("sk-ant-c-2222", "sk-ant-a-0000")},
+		{"set on disk before a reload", pair, func(t *testing.T, e *env) {
 			if err := store.Set(e.backend.StorePath, "CLAUDE_KEYS.1", "sk-ant-c-2222"); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"moved", func(t *testing.T, e *env) {
+		{"moved", pair, func(t *testing.T, e *env) {
 			if loc := e.request("POST", "/keys/CLAUDE_KEYS/move-up", url.Values{"part": {"2"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-moved" {
 				t.Fatalf("move up: %s", loc)
+			}
+		}},
+		{"first named value added on disk", []string{"sk-ant-b-1111"}, func(t *testing.T, e *env) {
+			if err := store.Set(e.backend.StorePath, "CLAUDE_KEYS.1", "sk-ant-c-2222"); err != nil {
+				t.Fatal(err)
 			}
 		}},
 	} {
@@ -136,7 +144,8 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			var tested []string
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				key := r.Header.Get("x-api-key")
-				if r.Header.Get("User-Agent") == "keyring-test" {
+				test := r.URL.Path == "/v1/models" // the test path; the warm-up call uses /v1/messages
+				if test {
 					mu.Lock()
 					tested = append(tested, key)
 					mu.Unlock()
@@ -145,7 +154,7 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 				case "sk-ant-a-0000":
 					w.WriteHeader(http.StatusForbidden)
 				case "sk-ant-b-1111":
-					if r.Header.Get("User-Agent") == "keyring-test" {
+					if test {
 						startOnce.Do(func() { close(started) })
 						<-proceed
 					}
@@ -155,7 +164,7 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			}))
 			t.Cleanup(up.Close)
 			t.Cleanup(release)
-			e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": {"sk-ant-a-0000", "sk-ant-b-1111"}, "password": {password}})
+			e.request("POST", "/keys", url.Values{"name": {"CLAUDE_KEYS"}, "value": c.values, "password": {password}})
 			pasted := `{"service":"claude-api","base":"` + up.URL + `","auth":"header","header":"x-api-key","test_path":"/v1/models","key_pool":true}`
 			if loc := e.request("POST", "/keys/CLAUDE_KEYS/connect", url.Values{"pasted": {pasted}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=connected" {
 				t.Fatalf("connect: %s", loc)
