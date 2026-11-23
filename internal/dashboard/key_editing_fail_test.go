@@ -1,15 +1,19 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/store"
 )
 
@@ -99,8 +103,10 @@ func TestPoolTestMovesOnPastASlowRefusal(t *testing.T) {
 // original back clears its refusal, so it is first again; keyring set
 // changes it on disk before the proxy reloads; Move up reorders the list.
 // A pool over one plain value gets its first named value on disk, which
-// replaces the plain value at the next reload. In each case the late 200
-// says nothing about the pool now, so it is not recorded.
+// replaces the plain value at the next reload; the service's base URL
+// changes in the access file on disk. In each case the late 200 says
+// nothing about the pool now, so it is not recorded. An access file a
+// reload would refuse is reported as the error it is.
 func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 	replace := func(values ...string) func(t *testing.T, e *env) {
 		return func(t *testing.T, e *env) {
@@ -111,29 +117,57 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			}
 		}
 	}
+	// editAccess changes the access file on disk, as an editor would,
+	// without a reload.
+	editAccess := func(edit func(a *policy.AccessList)) func(t *testing.T, e *env) {
+		return func(t *testing.T, e *env) {
+			path := e.proxy.Config().Rules.AccessFile
+			access, err := policy.LoadAccess(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edit(&access)
+			raw, err := json.MarshalIndent(access, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	pair := []string{"sk-ant-a-0000", "sk-ant-b-1111"}
 	for _, c := range []struct {
 		name   string
 		values []string                   // the key's values; the primary is refused
 		change func(t *testing.T, e *env) // made while Test waits for the backup
+		fails  string                     // the error Test reports, if not error=changed
 	}{
-		{"replaced", pair, replace("sk-ant-c-2222")},
-		{"replaced and set back", pair, replace("sk-ant-c-2222", "sk-ant-a-0000")},
+		{"replaced", pair, replace("sk-ant-c-2222"), ""},
+		{"replaced and set back", pair, replace("sk-ant-c-2222", "sk-ant-a-0000"), ""},
 		{"set on disk before a reload", pair, func(t *testing.T, e *env) {
 			if err := store.Set(e.backend.StorePath, "CLAUDE_KEYS.1", "sk-ant-c-2222"); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, ""},
 		{"moved", pair, func(t *testing.T, e *env) {
 			if loc := e.request("POST", "/keys/CLAUDE_KEYS/move-up", url.Values{"part": {"2"}, "password": {password}}).Header().Get("Location"); loc != "/keys/CLAUDE_KEYS?done=value-moved" {
 				t.Fatalf("move up: %s", loc)
 			}
-		}},
+		}, ""},
 		{"first named value added on disk", []string{"sk-ant-b-1111"}, func(t *testing.T, e *env) {
 			if err := store.Set(e.backend.StorePath, "CLAUDE_KEYS.1", "sk-ant-c-2222"); err != nil {
 				t.Fatal(err)
 			}
-		}},
+		}, ""},
+		{"service base changed on disk", pair, editAccess(func(a *policy.AccessList) {
+			svc := a.Services["claude-api"]
+			svc.Base = "https://api.anthropic.com"
+			a.Services["claude-api"] = svc
+		}), ""},
+		{"access file invalid on disk", pair, editAccess(func(a *policy.AccessList) {
+			a.Services["Not A Name"] = policy.Service{Base: "https://example.com", Key: "OTHER", Auth: policy.AuthHeader, Header: "x-api-key"}
+		}), "use lowercase letters"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
@@ -173,25 +207,26 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			if code := e.call("POST", "/claude-api/v1/messages", token); code != http.StatusOK {
 				t.Fatalf("call: %d", code)
 			}
-			done := make(chan string, 1)
+			done := make(chan *httptest.ResponseRecorder, 1)
 			go func() {
-				done <- e.request("POST", "/keys/CLAUDE_KEYS/test", url.Values{}).Header().Get("Location")
+				done <- e.request("POST", "/keys/CLAUDE_KEYS/test", url.Values{})
 			}()
 			select {
 			case <-started:
-			case loc := <-done:
-				t.Fatalf("Test answered %s without trying the backup", loc)
+			case res := <-done:
+				t.Fatalf("Test answered %d %s without trying the backup", res.Code, res.Header().Get("Location"))
 			case <-time.After(10 * time.Second):
 				t.Fatal("Test never reached the backup")
 			}
 			c.change(t, e)
 			release()
-			var loc string
+			var res *httptest.ResponseRecorder
 			select {
-			case loc = <-done:
+			case res = <-done:
 			case <-time.After(10 * time.Second):
 				t.Fatal("Test did not finish")
 			}
+			loc := res.Header().Get("Location")
 			meta, err := e.backend.loadMeta()
 			if err != nil {
 				t.Fatal(err)
@@ -200,6 +235,12 @@ func TestPoolTestIgnoresAnAnswerOrderedByAReplacedValue(t *testing.T) {
 			defer mu.Unlock()
 			if !slices.Equal(tested, []string{"sk-ant-b-1111"}) {
 				t.Fatalf("Test sent %d values; the primary was set aside, so only the backup", len(tested))
+			}
+			if c.fails != "" {
+				if m := meta["CLAUDE_KEYS"]; m.Status == "working" || res.Code != http.StatusInternalServerError || !strings.Contains(res.Body.String(), c.fails) {
+					t.Fatalf("Test answered %d %s and recorded %q; want the access file's error", res.Code, loc, m.Status)
+				}
+				return
 			}
 			if m := meta["CLAUDE_KEYS"]; m.Status == "working" || loc != "/keys/CLAUDE_KEYS?error=changed" {
 				t.Fatalf("Test answered %s and recorded %q although the pool changed while it ran", loc, m.Status)

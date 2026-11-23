@@ -208,6 +208,27 @@ func valueOrder(meta map[string]KeyMeta) map[string][]string {
 // the start, and a dashboard change must not roll that back.
 func (b *Backend) rules() policy.Rules { return b.Proxy.Config().Rules }
 
+// diskConfig is the settings a reload would load: the running rules and the
+// access file on disk, validated. Validate stores parsed forms in the
+// consent settings, so they get their own copy: the running ones are read
+// by consent requests without b.Mu.
+func (b *Backend) diskConfig() (*policy.Config, error) {
+	access, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		return nil, err
+	}
+	rules := b.rules()
+	if rules.Consent != nil {
+		consent := *rules.Consent
+		rules.Consent = &consent
+	}
+	cfg := &policy.Config{Rules: rules, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // Register adds the pages to the admin server.
 func Register(b *Backend) {
 	if b.Now == nil {
@@ -1603,20 +1624,19 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
+	meta, err := b.loadMeta()
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
 	fresh := true
 	if svc.KeyPool {
-		notes, err := b.loadMeta()
+		disk, err := b.diskConfig()
 		if err != nil {
 			b.fail(w, sid, err)
 			return
 		}
-		access, err := policy.LoadAccess(b.rules().AccessFile)
-		if err != nil {
-			b.fail(w, sid, err)
-			return
-		}
-		disk := &policy.Config{Rules: b.rules(), AccessList: access}
-		fresh = disk.Validate() == nil && b.Proxy.PoolCurrent(pool, disk, now, valueOrder(notes))
+		fresh = b.Proxy.PoolCurrent(pool, disk, now, valueOrder(meta))
 	} else {
 		for kn, v := range sent {
 			if cur, ok := now[kn]; !ok || cur != v {
@@ -1628,14 +1648,11 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 		http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
 		return
 	}
-	meta, err := b.loadMeta()
-	if err == nil {
-		m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
-		m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
-		m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
-		meta[name] = m
-		err = b.saveMeta(meta)
-	}
+	m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
+	m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
+	m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
+	meta[name] = m
+	err = b.saveMeta(meta)
 	if err != nil {
 		b.fail(w, sid, err)
 		return

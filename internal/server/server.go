@@ -1038,11 +1038,12 @@ var ErrNoPoolValue = errors.New("the key pool has no value that can be sent")
 // pool on the key the caller chose it for.
 var ErrPoolChanged = errors.New("the key's values or the service changed during the test")
 
-// PoolValues are the values a pool test was ordered by: the service, its
-// key and every value that could be sent, in list order, with its
-// generation (snapshot.gens) and the credential it held.
+// PoolValues are what a pool test was ordered and sent by: the service, its
+// key, its settings, and every value that could be sent, in list order,
+// with its generation (snapshot.gens) and the credential it held.
 type PoolValues struct {
 	service, key string
+	settings     string
 	values       []poolValue
 }
 
@@ -1053,13 +1054,18 @@ type poolValue struct {
 }
 
 // poolValues are the values of the key pool service named service, chosen
-// as a pool on key, that snap can send.
-func poolValues(snap *snapshot, service, key string) (policy.Service, []string, error) {
+// as a pool on key, that snap can send, with the service's settings: what
+// it sends, where and how (base URL, auth, test request, TLS pin, egress).
+func poolValues(snap *snapshot, service, key string) (policy.Service, string, []string, error) {
 	svc, ok := snap.config.Services[service]
 	if !ok || !svc.KeyPool || svc.Key != key {
-		return svc, nil, ErrPoolChanged
+		return svc, "", nil, ErrPoolChanged
 	}
-	return svc, sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys), nil
+	settings, err := json.Marshal(svc)
+	if err != nil {
+		return svc, "", nil, err
+	}
+	return svc, string(settings), sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys), nil
 }
 
 // TestPool sends the test request of the key pool service named service,
@@ -1072,7 +1078,7 @@ func poolValues(snap *snapshot, service, key string) (policy.Service, []string, 
 // returns a reply body, which could echo a key.
 func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolValues, error) {
 	snap := h.snap.Load()
-	svc, pool, err := poolValues(snap, service, key)
+	svc, settings, pool, err := poolValues(snap, service, key)
 	if err != nil {
 		return 0, PoolValues{}, err
 	}
@@ -1080,7 +1086,7 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 	if len(tries) == 0 {
 		return 0, PoolValues{}, ErrNoPoolValue
 	}
-	values := PoolValues{service, key, make([]poolValue, len(pool))}
+	values := PoolValues{service, key, settings, make([]poolValue, len(pool))}
 	for i, name := range pool {
 		values.values[i] = poolValue{name, snap.gens[name], snap.keys[name]}
 	}
@@ -1101,8 +1107,8 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 }
 
 // PoolCurrent reports whether a pool test still describes the pool, the
-// one freshness check for a result. Two pools must equal the tested one,
-// value by value in list order:
+// one freshness check for a result. Two pools must equal the tested one:
+// the same service settings, and value by value in list order:
 //   - the pool built from config, keys and order, the settings, store and
 //     value order as on disk, which the proxy loads at its next reload
 //     (keyring set can change the store before then): the same names with
@@ -1113,8 +1119,8 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolV
 //
 // A value added, removed, replaced or moved, or a service changed, fails it.
 func (h *Handler) PoolCurrent(v PoolValues, config *policy.Config, keys map[string]string, order map[string][]string) bool {
-	_, disk, err := poolValues(&snapshot{config: config, keys: keys, order: order}, v.service, v.key)
-	if err != nil || len(disk) != len(v.values) {
+	_, settings, disk, err := poolValues(&snapshot{config: config, keys: keys, order: order}, v.service, v.key)
+	if err != nil || settings != v.settings || len(disk) != len(v.values) {
 		return false
 	}
 	for i, name := range disk {
@@ -1123,8 +1129,8 @@ func (h *Handler) PoolCurrent(v PoolValues, config *policy.Config, keys map[stri
 		}
 	}
 	snap := h.snap.Load()
-	_, live, err := poolValues(snap, v.service, v.key)
-	if err != nil || len(live) != len(v.values) {
+	_, settings, live, err := poolValues(snap, v.service, v.key)
+	if err != nil || settings != v.settings || len(live) != len(v.values) {
 		return false
 	}
 	for i, name := range live {
