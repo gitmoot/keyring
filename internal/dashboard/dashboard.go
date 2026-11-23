@@ -208,6 +208,27 @@ func valueOrder(meta map[string]KeyMeta) map[string][]string {
 // the start, and a dashboard change must not roll that back.
 func (b *Backend) rules() policy.Rules { return b.Proxy.Config().Rules }
 
+// diskConfig is the settings a reload would load: the running rules and the
+// access file on disk, validated. Validate stores parsed forms in the
+// consent settings, so they get their own copy: the running ones are read
+// by consent requests without b.Mu.
+func (b *Backend) diskConfig() (*policy.Config, error) {
+	access, err := policy.LoadAccess(b.rules().AccessFile)
+	if err != nil {
+		return nil, err
+	}
+	rules := b.rules()
+	if rules.Consent != nil {
+		consent := *rules.Consent
+		rules.Consent = &consent
+	}
+	cfg := &policy.Config{Rules: rules, AccessList: access}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // Register adds the pages to the admin server.
 func Register(b *Backend) {
 	if b.Now == nil {
@@ -1592,40 +1613,46 @@ func (b *Backend) testKey(w http.ResponseWriter, r *http.Request, sid string) {
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	// The result belongs to the values that were tested: if a replace or
-	// delete happened meanwhile, it says nothing about the key now stored.
-	// The store on disk can change without the dashboard (keyring set)
-	// before the proxy reloads it, so the tested values must still be what
-	// it holds. A pool is also checked in the proxy, which every dashboard
-	// edit updates under b.Mu: by value generation, since a value replaced
-	// and set back has the same bytes but may be tried in another place,
-	// and by list order, since a moved value is tried in another place.
-	if svc.KeyPool {
-		if !b.Proxy.PoolCurrent(pool) {
-			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
-			return
-		}
-		sent = pool.Values()
-	}
+	// The result belongs to the values that were tested: if one was
+	// replaced, deleted, added or moved meanwhile, it says nothing about the
+	// key now. The store on disk can change without the dashboard (keyring
+	// set) before the proxy reloads it. A pool is checked once, by
+	// PoolCurrent, against the settings, store and value order on disk and
+	// against the proxy's pool now.
 	now, err := store.Load(b.StorePath)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	for kn, v := range sent {
-		if cur, ok := now[kn]; !ok || cur != v {
-			http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+	meta, err := b.loadMeta()
+	if err != nil {
+		b.fail(w, sid, err)
+		return
+	}
+	fresh := true
+	if svc.KeyPool {
+		disk, err := b.diskConfig()
+		if err != nil {
+			b.fail(w, sid, err)
 			return
 		}
+		fresh = b.Proxy.PoolCurrent(pool, disk, now, valueOrder(meta))
+	} else {
+		for kn, v := range sent {
+			if cur, ok := now[kn]; !ok || cur != v {
+				fresh = false
+			}
+		}
 	}
-	meta, err := b.loadMeta()
-	if err == nil {
-		m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
-		m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
-		m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
-		meta[name] = m
-		err = b.saveMeta(meta)
+	if !fresh {
+		http.Redirect(w, r, "/keys/"+name+"?error=changed", http.StatusSeeOther)
+		return
 	}
+	m.LeakedAt, m.UpdatedAt, m.CreatedAt = meta[name].LeakedAt, meta[name].UpdatedAt, meta[name].CreatedAt
+	m.Kind, m.Fingerprint = meta[name].Kind, meta[name].Fingerprint
+	m.Values, m.LastNumber = meta[name].Values, meta[name].LastNumber
+	meta[name] = m
+	err = b.saveMeta(meta)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
