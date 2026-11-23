@@ -1036,39 +1036,52 @@ var ErrNoPoolValue = errors.New("the key pool has no value that can be sent")
 
 // ErrPoolChanged is TestPool's error when the service is no longer a key
 // pool on the key the caller chose it for.
-var ErrPoolChanged = errors.New("the service no longer pools that key")
+var ErrPoolChanged = errors.New("the key's values or the service changed during the test")
+
+// PoolValues are the values a pool test was ordered by: the service, its
+// key and the generation of every value that could be sent (snapshot.gens).
+type PoolValues struct {
+	service, key string
+	gens         map[string]uint64
+}
+
+// poolValues are the values of the key pool service named service, chosen
+// as a pool on key, that snap can send.
+func poolValues(snap *snapshot, service, key string) (policy.Service, []string, error) {
+	svc, ok := snap.config.Services[service]
+	if !ok || !svc.KeyPool || svc.Key != key {
+		return svc, nil, ErrPoolChanged
+	}
+	return svc, sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys), nil
+}
 
 // TestPool sends the test request of the key pool service named service,
 // which the caller chose as a pool on key, as a call through it would go
 // now. One snapshot of the settings, keys and value order binds the key,
 // the service and its values: the values in the order a call tries them,
 // moving on only when the service refused a value the way a call moves on
-// (judge). It returns the last answer's status and every value that set the
-// order (key name -> value), tried or not, so the caller can tell whether
-// the result still describes what is stored: a replaced value would be
-// tried in another place. It never returns a reply body, which could echo
-// a key.
-func (h *Handler) TestPool(ctx context.Context, service, key string) (int, map[string]string, error) {
+// (judge). It returns the last answer's status and the values that set the
+// order, which PoolCurrent checks before the result is kept. It never
+// returns a reply body, which could echo a key.
+func (h *Handler) TestPool(ctx context.Context, service, key string) (int, PoolValues, error) {
 	snap := h.snap.Load()
-	svc, ok := snap.config.Services[service]
-	if !ok || !svc.KeyPool || svc.Key != key {
-		return 0, nil, ErrPoolChanged
+	svc, pool, err := poolValues(snap, service, key)
+	if err != nil {
+		return 0, PoolValues{}, err
 	}
-	pool := sendable(svc, policy.PoolMembers(svc, snap.keys, snap.order[svc.Key]), snap.keys)
 	tries := h.pool.order(pool, snap.gens, time.Now())
 	if len(tries) == 0 {
-		return 0, nil, ErrNoPoolValue
+		return 0, PoolValues{}, ErrNoPoolValue
 	}
-	candidates := make(map[string]string, len(tries))
-	for _, name := range tries {
-		candidates[name] = snap.keys[name]
+	values := PoolValues{service, key, make(map[string]uint64, len(pool))}
+	for _, name := range pool {
+		values.gens[name] = snap.gens[name]
 	}
 	var resp *http.Response
 	for i, name := range tries {
-		var err error
 		resp, err = h.testRequest(ctx, snap, svc, snap.keys[name])
 		if err != nil {
-			return 0, candidates, err
+			return 0, values, err
 		}
 		if i == len(tries)-1 || !judge(svc, resp, h.now()).keyProblem {
 			break
@@ -1077,7 +1090,25 @@ func (h *Handler) TestPool(ctx context.Context, service, key string) (int, map[s
 		// needed: its body may be slow, and the next value is waiting.
 		resp.Body.Close()
 	}
-	return closeTest(resp), candidates, nil
+	return closeTest(resp), values, nil
+}
+
+// PoolCurrent reports whether the pool a test ran on still has exactly the
+// values it had, each at the same generation. A value replaced since, even
+// if later set back to the same bytes, has a new generation and may be
+// tried in another place, so the test says nothing about the pool now.
+func (h *Handler) PoolCurrent(v PoolValues) bool {
+	snap := h.snap.Load()
+	_, pool, err := poolValues(snap, v.service, v.key)
+	if err != nil || len(pool) != len(v.gens) {
+		return false
+	}
+	for _, name := range pool {
+		if gen, ok := v.gens[name]; !ok || gen != snap.gens[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // closeTest drains and closes a test answer and returns its status.
