@@ -138,7 +138,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{template "bitcoinfields" .BitcoinForm}}
 <details><summary>Or paste settings</summary>
 <label>JSON like {"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest",{{if .BitcoinForm.WIF}}"script":"p2tr"{{else}}"paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"]{{end}}}}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
-<p class="hint">The service as access.json writes it works too: {"btc-ord":{"auth":"bitcoin-psbt-sign","key":"{{.Row.Name}}","bitcoin":{…}}}. A "key" in it must be {{.Row.Name}}. Pasted settings replace the fields above.</p>
+<p class="hint">The service as access.json writes it works too: {"btc-ord":{"auth":"bitcoin-psbt-sign","key":"{{.Row.Name}}{{with .BitcoinKeyPart}}.{{.}}{{end}}","bitcoin":{…}}}. A "key" in it must be {{.Row.Name}}{{with .BitcoinKeyPart}}.{{.}}{{end}}. Pasted settings replace the fields above.</p>
 </details>
 {{template "password" .}}
 <div class="actions"><button>Connect</button></div>

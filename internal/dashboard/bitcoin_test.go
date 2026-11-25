@@ -313,6 +313,7 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		{"key as sighash", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"],"sighash":["` + bitcointest.WIF + `"]}}`, "sighash 1: want default"},
 		{"a test method", `{"btc-ord":{"auth":"bitcoin-psbt-sign","test_method":"POST","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}}`, "test method is set in access.json"},
 		{"a service named auth with a bad field", `{"auth":{"auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","pathz":["m/86'/1'/0'/0/*"]}}}`, "unknown field &#34;pathz&#34;"},
+		{"a service named auth with AUTH and a bad field", `{"auth":{"AUTH":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","pathz":["m/86'/1'/0'/0/*"]}}}`, "unknown field &#34;pathz&#34;"},
 	} {
 		w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {tc.pasted}, "password": {password}})
 		body := w.Body.String()
@@ -338,6 +339,12 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 	if body := w.Body.String(); w.Code != http.StatusBadRequest || strings.Contains(body, `value="btc-pasted"`) || strings.Contains(body, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") {
 		t.Fatalf("a refused paste fills the form: %d", w.Code)
 	}
+	// Sending what that form shows saves nothing: it names no service.
+	w = e.request("POST", "/keys/BTC_ORD/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "service": {""}, "network": {"regtest"},
+		"paths": {"m/86'/1'/0'/0/*\nm/86'/1'/0'/1/*"}, "sighash": {"default", "all"}, "password": {password}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Name the service.") || !bytes.Equal(e.accessBytes(), before) {
+		t.Fatalf("the form after a refused paste saved: %d", w.Code)
+	}
 }
 
 // A key with several values keeps the API form, whatever its values are
@@ -354,17 +361,46 @@ func TestBitcoinFormOnlyForAOneValueKey(t *testing.T) {
 		t.Fatal("a key with several values got the Bitcoin form")
 	}
 	assertNoBitcoinKey(t, page)
-	// One named value is still one value: the form sends its name.
+	// A refused paste leaves no preset behind: what the form shows then
+	// saves nothing (review of #204).
+	before := e.accessBytes()
+	w := e.request("POST", "/keys/MIXED/connect", url.Values{"preset": {"anthropic"}, "key_part": {"2"},
+		"pasted": {`{"service":"btc-mixed","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","script":"p2tr"}}`}, "password": {password}})
+	if body := w.Body.String(); w.Code != http.StatusBadRequest || strings.Contains(body, "api.anthropic.com") || !strings.Contains(body, `<option value="" selected>Other`) {
+		t.Fatalf("a refused paste kept the preset: %d", w.Code)
+	}
+	w = e.request("POST", "/keys/MIXED/connect", url.Values{"preset": {""}, "service": {""}, "base": {""}, "auth": {"bearer"}, "key_part": {"2"}, "password": {password}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Name the service.") || !bytes.Equal(e.accessBytes(), before) {
+		t.Fatalf("the form after a refused paste saved: %d", w.Code)
+	}
+	// One named value is still one value: the form sends its name, also
+	// while a service names a value that is not stored.
+	e.withService("solo-api", policy.Service{Base: e.proxy.Config().Services["api"].Base, Key: "SOLO.missing", Auth: policy.AuthBearer})
 	if err := store.Set(e.backend.StorePath, "SOLO.only", bitcointest.WIF); err != nil {
 		t.Fatal(err)
 	}
 	page = e.request("GET", "/keys/SOLO", nil).Body.String()
-	if !strings.Contains(page, `name="script"`) || !strings.Contains(page, `<input type="hidden" name="key_part" value="only">`) {
+	if !strings.Contains(page, `name="script"`) || !strings.Contains(page, `<input type="hidden" name="key_part" value="only">`) || !strings.Contains(page, `"key":"SOLO.only"`) {
 		t.Fatal("a key with one named bitcoin value lacks the Bitcoin form")
 	}
-	w := e.request("POST", "/keys/SOLO/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "key_part": {"only"}, "service": {"btc-solo"}, "network": {"regtest"}, "script": {"p2tr"}, "sighash": {"default"}, "password": {password}})
+	w = e.request("POST", "/keys/SOLO/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "key_part": {"only"}, "service": {"btc-solo"}, "network": {"regtest"}, "script": {"p2tr"}, "sighash": {"default"}, "password": {password}})
 	if w.Header().Get("Location") != "/keys/SOLO?done=connected" || e.proxy.Config().Services["btc-solo"].Key != "SOLO.only" {
 		t.Fatalf("connect the named value: %d %s", w.Code, w.Body.String())
+	}
+	// Both paste examples work as shown: settings that leave the value out
+	// mean the one stored value. A signing key backs one service, so each
+	// example gets its own key.
+	for key, pasted := range map[string]string{
+		"SOLA": `{"service":"btc-sola","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","script":"p2tr"}}`,
+		"SOLB": `{"btc-solb":{"auth":"bitcoin-psbt-sign","key":"SOLB.only","bitcoin":{"network":"regtest","script":"p2tr"}}}`,
+	} {
+		if err := store.Set(e.backend.StorePath, key+".only", bitcointest.WIF); err != nil {
+			t.Fatal(err)
+		}
+		w := e.request("POST", "/keys/"+key+"/connect", url.Values{"pasted": {pasted}, "password": {password}})
+		if w.Header().Get("Location") != "/keys/"+key+"?done=connected" || e.proxy.Config().Services["btc-"+strings.ToLower(key)].Key != key+".only" {
+			t.Fatalf("paste for %s: %d %s", key, w.Code, w.Body.String())
+		}
 	}
 }
 

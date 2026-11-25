@@ -426,6 +426,7 @@ type Info struct {
 	Fingerprint string
 	Kind        string // "BIP32 master key", "BIP32 key at depth N", "WIF key"
 	Networks    string // "test networks" or "mainnet"
+	WIF         bool   // a single key, signing for a script rather than paths
 }
 
 // Inspect reports whether value is a bitcoin private key (any network) and
@@ -453,7 +454,7 @@ func Inspect(value string) (Info, bool) {
 	if err != nil {
 		return Info{}, false
 	}
-	info := Info{Kind: "WIF key", Networks: "mainnet", Fingerprint: hex.EncodeToString(address.Hash160(wif.SerializePubKey())[:4])}
+	info := Info{Kind: "WIF key", Networks: "mainnet", WIF: true, Fingerprint: hex.EncodeToString(address.Hash160(wif.SerializePubKey())[:4])}
 	if wif.IsForNet(&chaincfg.TestNet3Params) {
 		info.Networks = "test networks"
 	}

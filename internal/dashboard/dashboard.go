@@ -29,7 +29,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/gitmoot/keyring/internal/admin"
-	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
@@ -1272,6 +1271,21 @@ const pasteHelp = `Paste one service's settings as JSON, like {"service":"name",
 
 var errTextAfter = errors.New("text after the settings")
 
+// hasAuth reports whether the JSON object has an "auth" member, its name
+// matched as encoding/json matches field names (case-insensitively).
+func hasAuth(object json.RawMessage) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(object, &members) != nil {
+		return false
+	}
+	for name := range members {
+		if strings.EqualFold(name, "auth") {
+			return true
+		}
+	}
+	return false
+}
+
 // decodeSettings reads pasted settings. Besides the settings themselves it
 // takes one service the way access.json writes it, {"name":{...}} or the
 // line "name": {...} copied from the file, and the name is then the
@@ -1298,9 +1312,9 @@ func decodeSettings(pasted string) (agentSettings, string) {
 				// A braced member named like a settings field (a service
 				// called "bitcoin") may be flat settings with a bad field
 				// instead: it is a service entry when it has the "auth"
-				// every service has, and copied lines always are.
-				var members map[string]json.RawMessage
-				if !copied && settingsField(name) && (json.Unmarshal(inner, &members) != nil || members["auth"] == nil) {
+				// every service has (matched as the decoder matches), and
+				// copied lines always are.
+				if !copied && settingsField(name) && !hasAuth(inner) {
 					break // flat settings: their error says which field
 				}
 				return agentSettings{}, pasteProblem(innerErr)
@@ -1454,9 +1468,10 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	again := func(status int, msg string) {
 		if f.Pasted != "" {
-			// A refused paste is one unit: none of it fills the form, so
-			// sending the form again does not save part of it.
-			f = b.connectFormFor(name, f.Preset)
+			// A refused paste is one unit: none of it fills the form, and
+			// no preset either, so sending the form again saves nothing
+			// until it is filled in or a paste is accepted.
+			f = b.connectFormFor(name, "")
 		}
 		b.renderKey(w, r, sid, status, name, f, msg)
 	}
@@ -1501,6 +1516,10 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusBadRequest, formProblem)
 		return
 	}
+	if f.Service == "" {
+		again(http.StatusBadRequest, "Name the service.")
+		return
+	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
 	row, ok, err := b.row(name)
@@ -1516,6 +1535,18 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	case f.KeyPool:
 		// The pool names the key itself; its values are tried in list order.
 	case len(row.Parts) > 0:
+		// Settings that leave the value out mean the one stored value.
+		if f.KeyPart == "" && !row.baseStored {
+			var only []string
+			for _, p := range row.Parts {
+				if p.HasValue {
+					only = append(only, p.Name)
+				}
+			}
+			if len(only) == 1 {
+				f.KeyPart = only[0]
+			}
+		}
 		has := map[string]bool{}
 		for _, p := range row.Parts {
 			has[p.Name] = true
@@ -1658,18 +1689,23 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	}
 	meta, _ := b.loadMeta()
 	info, never := neverShown(b.Proxy.Config(), row, values)
-	// A key whose one value is a Bitcoin key connects to a
+	// A key with one stored value that is a Bitcoin key connects to a
 	// bitcoin-psbt-sign service only, so its page offers that form instead
 	// of the API one (#201), sending that value's name when it has one. A
 	// key with several values keeps the API form, whatever its values are;
-	// Bitcoin settings for one of them are pasted.
+	// Bitcoin settings for one of them are pasted. With one stored value,
+	// info describes it.
 	var btc *bitcoinForm
 	btcPart := ""
-	if names := row.valueNames(); len(names) == 1 {
-		if one, ok := bitcoin.Inspect(values[names[0]]); ok {
-			btc = bitcoinFormOf(f.Bitcoin, one.Kind == "WIF key")
-			_, btcPart = store.SplitPart(names[0])
+	var stored []string
+	for _, full := range row.valueNames() {
+		if _, ok := values[full]; ok {
+			stored = append(stored, full)
 		}
+	}
+	if len(stored) == 1 && info != nil {
+		btc = bitcoinFormOf(f.Bitcoin, info.WIF)
+		_, btcPart = store.SplitPart(stored[0])
 	}
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
