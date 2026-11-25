@@ -439,8 +439,9 @@ Provisioning is not sign-in.
 project the signed-in account already owns and that still exists (an older
 `drivekey-…` project listed by `gcloud projects list`, or any other), for when
 Google will not create a new one (see `project_limit_reached` below). It
-provisions nothing. An invalid ID (not 6-30 lowercase letters, digits or
-hyphens, starting with a letter, not ending with a hyphen) gets `400`; without a
+provisions nothing; only a body without `project` provisions. An invalid ID
+(not 6-30 lowercase letters, digits or hyphens, starting with a letter, not
+ending with a hyphen; `""` and `null` included) gets `400`; without a
 retained sign-in whose setup has not finished, or while a connection runs, it
 gets `409`. Both change nothing. On success (`200 {"version":N}`) the ID is
 sealed like a generated one; the owner then presses Retry on the Drive page or

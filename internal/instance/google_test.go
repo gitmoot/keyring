@@ -135,6 +135,11 @@ func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
 		code int
 	}{
 		{map[string]any{"project": "Not_A_Project"}, http.StatusBadRequest},
+		// Only an omitted project provisions; an explicit empty one is a
+		// choice of nothing.
+		{map[string]any{"project": ""}, http.StatusBadRequest},
+		{map[string]any{"project": nil}, http.StatusBadRequest},
+		{map[string]any{"project": 5}, http.StatusBadRequest},
 		{map[string]any{"other": "field"}, http.StatusBadRequest},
 		// No Google sign-in yet: nothing to set the project for.
 		{map[string]any{"project": "owned-project-1"}, http.StatusConflict},
