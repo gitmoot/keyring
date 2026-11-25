@@ -490,18 +490,18 @@ func (b *Backend) saveAndApplyKeys(next policy.AccessList, keys map[string]strin
 	return nil
 }
 
-// saveBitcoinChecked saves next like saveAndApply when svc, a
-// bitcoin-psbt-sign service in it, can sign with its key in the same store
+// saveBitcoinChecked saves next like saveAndApply when its service name, a
+// bitcoin-psbt-sign service, can sign with its key in the same store
 // snapshot it puts in force; otherwise it returns the message to show and
 // saves nothing. Validation does not read the store, so a key that does not
 // fit (another network, a WIF key given paths) is refused here rather than
-// on the first PSBT. Callers hold b.Mu.
-func (b *Backend) saveBitcoinChecked(next policy.AccessList, svc policy.Service) (string, error) {
+// on the first PSBT. Callers hold b.Mu and have validated next.
+func (b *Backend) saveBitcoinChecked(next policy.AccessList, name string) (string, error) {
 	keys, err := store.Load(b.StorePath)
 	if err != nil {
 		return "", err
 	}
-	if msg := bitcoinKeyProblem(svc, keys); msg != "" {
+	if msg := bitcoinKeyProblem(next.Services[name], keys); msg != "" {
 		return msg, nil
 	}
 	return "", b.saveAndApplyKeys(next, keys)

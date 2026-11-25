@@ -132,7 +132,7 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 
 <details class="card"{{if or (not .Row.Services) .ConnectError}} open{{end}}><summary>{{if .Row.Services}}Connect to another service{{else}}Connect to a service{{end}}</summary>
 {{with .ConnectError}}<p class="error">{{.}}</p>{{end}}
-{{if .BitcoinForm}}<form method="post" action="/keys/{{.Row.Name}}/connect"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="auth" value="bitcoin-psbt-sign">
+{{if .BitcoinForm}}<form method="post" action="/keys/{{.Row.Name}}/connect"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="auth" value="bitcoin-psbt-sign">{{with .BitcoinKeyPart}}<input type="hidden" name="key_part" value="{{.}}">{{end}}
 <p class="hint">A Bitcoin signing service: an agent sends a PSBT and gets it back with this key's inputs signed. The key never leaves keyring and is never shown.</p>
 <label>Service name<input name="service" value="{{.Connect.Service}}" placeholder="e.g. btc-ord" autocapitalize="none" spellcheck="false"></label>
 {{template "bitcoinfields" .BitcoinForm}}

@@ -312,6 +312,7 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		{"key in paths", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","` + bitcointest.Master + `"]}}`, "path 2: path must start with m"},
 		{"key as sighash", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"],"sighash":["` + bitcointest.WIF + `"]}}`, "sighash 1: want default"},
 		{"a test method", `{"btc-ord":{"auth":"bitcoin-psbt-sign","test_method":"POST","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}}`, "test method is set in access.json"},
+		{"a service named auth with a bad field", `{"auth":{"auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","pathz":["m/86'/1'/0'/0/*"]}}}`, "unknown field &#34;pathz&#34;"},
 	} {
 		w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {tc.pasted}, "password": {password}})
 		body := w.Body.String()
@@ -331,6 +332,12 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		t.Fatalf("typed key in paths: %d", w.Code)
 	}
 	assertNoBitcoinKey(t, w.Body.String())
+	// A refused paste is one unit (review of #204): the form shows none of
+	// it, so sending the form again does not save part of it.
+	w = e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {`{"service":"btc-pasted","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","paths":["m/84'/1'/0'/0/*"]}}`}, "password": {password}})
+	if body := w.Body.String(); w.Code != http.StatusBadRequest || strings.Contains(body, `value="btc-pasted"`) || strings.Contains(body, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") {
+		t.Fatalf("a refused paste fills the form: %d", w.Code)
+	}
 }
 
 // A key with several values keeps the API form, whatever its values are
@@ -347,6 +354,18 @@ func TestBitcoinFormOnlyForAOneValueKey(t *testing.T) {
 		t.Fatal("a key with several values got the Bitcoin form")
 	}
 	assertNoBitcoinKey(t, page)
+	// One named value is still one value: the form sends its name.
+	if err := store.Set(e.backend.StorePath, "SOLO.only", bitcointest.WIF); err != nil {
+		t.Fatal(err)
+	}
+	page = e.request("GET", "/keys/SOLO", nil).Body.String()
+	if !strings.Contains(page, `name="script"`) || !strings.Contains(page, `<input type="hidden" name="key_part" value="only">`) {
+		t.Fatal("a key with one named bitcoin value lacks the Bitcoin form")
+	}
+	w := e.request("POST", "/keys/SOLO/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "key_part": {"only"}, "service": {"btc-solo"}, "network": {"regtest"}, "script": {"p2tr"}, "sighash": {"default"}, "password": {password}})
+	if w.Header().Get("Location") != "/keys/SOLO?done=connected" || e.proxy.Config().Services["btc-solo"].Key != "SOLO.only" {
+		t.Fatalf("connect the named value: %d %s", w.Code, w.Body.String())
+	}
 }
 
 // A service copied whole from access.json pastes with its own test method,
@@ -401,7 +420,14 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 			t.Fatalf("%s: a refused edit changed the access file", tc.name)
 		}
 	}
-	w := e.edit("btc-ord", url.Values{"key": {"BTC_ORD"}, "auth": {"bitcoin-psbt-sign"}, "network": {"regtest"}, "paths": {twoPaths}, "sighash": {"default", "all"}})
+	// A refused paste is one unit (review of #204): the form shows the
+	// stored settings, not the pasted project, so sending it again saves
+	// nothing of the paste.
+	w := e.edit("btc-ord", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","project":"elsewhere","bitcoin":{"network":"mainnet","paths":["m/86'/1'/0'/0/*"]}}`}})
+	if body := w.Body.String(); w.Code != http.StatusBadRequest || strings.Contains(body, `value="elsewhere"`) || !strings.Contains(body, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") {
+		t.Fatalf("a refused paste fills the edit form: %d", w.Code)
+	}
+	w = e.edit("btc-ord", url.Values{"key": {"BTC_ORD"}, "auth": {"bitcoin-psbt-sign"}, "network": {"regtest"}, "paths": {twoPaths}, "sighash": {"default", "all"}})
 	if w.Header().Get("Location") != "/services/btc-ord?done=saved" {
 		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
 	}

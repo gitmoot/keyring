@@ -176,16 +176,19 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		f.Bitcoin, formProblem = bitcoinFromForm(r)
 	}
 	again := func(status int, msg string) {
-		// Refused pasted settings are not shown again: they may hold a value
-		// pasted by mistake (as Connect already does). The Bitcoin fields
-		// show the stored rules then.
-		if f.Pasted != "" {
-			f.Bitcoin = nil
-		}
-		f.Pasted = ""
-		if svc, ok := b.Proxy.Config().Services[name]; ok {
+		svc, ok := b.Proxy.Config().Services[name]
+		switch {
+		case ok && f.Pasted != "":
+			// A refused paste is one unit: none of it fills the form, which
+			// shows the stored settings again, so sending the form does not
+			// save part of the paste.
+			f = formOf(name, svc)
+		case ok:
 			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
 		}
+		// Refused pasted settings are not shown again: they may hold a value
+		// pasted by mistake (as Connect already does).
+		f.Pasted = ""
 		b.renderService(w, sid, status, f, "", msg)
 	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
@@ -371,7 +374,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	}
 	msg := ""
 	if updated.Auth == policy.AuthBitcoinPSBTSign {
-		msg, err = b.saveBitcoinChecked(next, updated)
+		msg, err = b.saveBitcoinChecked(next, name)
 	} else {
 		err = b.saveAndApply(next)
 	}

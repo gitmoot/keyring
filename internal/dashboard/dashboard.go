@@ -1282,8 +1282,9 @@ func decodeSettings(pasted string) (agentSettings, string) {
 	if err == nil {
 		return a, ""
 	}
+	copied := strings.HasPrefix(pasted, `"`)
 	outer := pasted
-	if strings.HasPrefix(pasted, `"`) {
+	if copied {
 		outer = "{" + strings.TrimSuffix(pasted, ",") + "}"
 	}
 	var named map[string]json.RawMessage
@@ -1294,8 +1295,13 @@ func decodeSettings(pasted string) (agentSettings, string) {
 			}
 			a, innerErr := decodeStrict(string(inner))
 			if innerErr != nil {
-				if settingsField(name) {
-					break // flat settings with a bad field: their error says which
+				// A braced member named like a settings field (a service
+				// called "bitcoin") may be flat settings with a bad field
+				// instead: it is a service entry when it has the "auth"
+				// every service has, and copied lines always are.
+				var members map[string]json.RawMessage
+				if !copied && settingsField(name) && (json.Unmarshal(inner, &members) != nil || members["auth"] == nil) {
+					break // flat settings: their error says which field
 				}
 				return agentSettings{}, pasteProblem(innerErr)
 			}
@@ -1448,7 +1454,9 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	again := func(status int, msg string) {
 		if f.Pasted != "" {
-			f.Bitcoin = nil // refused pasted rules are not shown again
+			// A refused paste is one unit: none of it fills the form, so
+			// sending the form again does not save part of it.
+			f = b.connectFormFor(name, f.Preset)
 		}
 		b.renderKey(w, r, sid, status, name, f, msg)
 	}
@@ -1585,7 +1593,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	}
 	msg := ""
 	if svc.Auth == policy.AuthBitcoinPSBTSign {
-		msg, err = b.saveBitcoinChecked(next, svc)
+		msg, err = b.saveBitcoinChecked(next, f.Service)
 	} else {
 		err = b.saveAndApply(next)
 	}
@@ -1652,18 +1660,21 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	info, never := neverShown(b.Proxy.Config(), row, values)
 	// A key whose one value is a Bitcoin key connects to a
 	// bitcoin-psbt-sign service only, so its page offers that form instead
-	// of the API one (#201). A key with several values keeps the API form,
-	// whatever its values are; Bitcoin settings for one of them are pasted.
+	// of the API one (#201), sending that value's name when it has one. A
+	// key with several values keeps the API form, whatever its values are;
+	// Bitcoin settings for one of them are pasted.
 	var btc *bitcoinForm
-	if len(row.Parts) == 0 {
-		if one, ok := bitcoin.Inspect(values[name]); ok {
+	btcPart := ""
+	if names := row.valueNames(); len(names) == 1 {
+		if one, ok := bitcoin.Inspect(values[names[0]]); ok {
 			btc = bitcoinFormOf(f.Bitcoin, one.Kind == "WIF key")
+			_, btcPart = store.SplitPart(names[0])
 		}
 	}
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
 		"Notice": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"), "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
-		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never, "BitcoinForm": btc,
+		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never, "BitcoinForm": btc, "BitcoinKeyPart": btcPart,
 	})
 }
 
