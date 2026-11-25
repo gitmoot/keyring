@@ -41,7 +41,7 @@ type googleEntry struct {
 // Google answered 401 to a call with a token gcloud minted (#184). The
 // messages are fixed text: never Google's body, the account or a token.
 const (
-	googleRefusedContainer = "Google refused the sign-in (HTTP 401, session invalid); reconnect Drive"
+	googleRefusedContainer = "Google refused the sign-in (HTTP 401, session invalid); disconnect and reconnect Drive"
 	googleRefusedHost      = "Google refused the gcloud token (HTTP 401); run gcloud auth login for this account"
 )
 

@@ -489,9 +489,12 @@ gcloud can keep minting access tokens that Google refuses, for example with
 "Active session is invalid" after the account signed out everywhere or changed
 its password. A Google 401 to any proxied call therefore drops that token (the
 next call mints a new one) and reports all four services `connected: false`
-with `failing: "Google refused the sign-in (HTTP 401, session invalid); reconnect
-Drive"` (`reconnect_required` in the container's `/status`) until Google accepts
-a call again. Credentials are kept; the remedy is a new `drive` link and sign-in.
+with `failing: "Google refused the sign-in (HTTP 401, session invalid); disconnect
+and reconnect Drive"` (`reconnect_required` in the container's `/status`) until
+Google accepts a call again. Credentials are kept until then. A link alone does
+not sign in again while the saved connection is complete: disconnect Drive
+(`DELETE keys/drive`), then send a new `drive` link. If the new project cannot be
+created (`project_limit_reached`), enter the previous project's ID on the page.
 
 SDK credentials are bounded opaque database snapshots (256 KiB total), in a
 dedicated field of the instance's encrypted state, never in forwarded keys.
