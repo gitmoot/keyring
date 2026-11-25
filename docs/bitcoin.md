@@ -50,7 +50,30 @@ networks instead, and a reveal request is refused (`?error=never-shown`).
 
 ## 2. The service
 
-In the access file (`services` → name):
+**On the dashboard** (Keys → the key → Connect to a service): the page of a
+Bitcoin key offers a Bitcoin form instead of the API one: service name,
+network (regtest, testnet or signet), the path templates one per line
+(prefilled with BIP86 receive and change, `m/86'/1'/0'/0/*` and
+`m/86'/1'/0'/1/*`; add `m/84'/1'/0'/0/*` and `m/84'/1'/0'/1/*` for native
+SegWit) and the sighash types (default and all ticked; the others carry the
+warning below). For a WIF key the form asks for the script (`p2tr` or
+`p2wpkh`) instead of paths. Connect checks the whole access list and that the
+key fits the service (network; paths for a tprv, script for a WIF key) before
+anything is written, and is audit-logged as `key_connected`.
+
+Or open **Or paste settings** and paste
+`{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{…}}`, or the
+service as the access file writes it: `{"btc-ord":{…}}`, or the
+`"btc-ord": {…}` block below as it is. A `key` in pasted settings must be the
+key whose page it is.
+
+The service page (`/services/<name>`) edits the network, paths (or script)
+and sighash types the same ways; the edit is audit-logged as
+`service_edited` with the names that changed (`bitcoin.paths`,
+`bitcoin.sighash`, …). A Bitcoin service stays one. The sats limits are on
+each agent's grant (section 3).
+
+**In the access file** (`services` → name):
 
 ```json
 "btc-ord": {

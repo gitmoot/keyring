@@ -125,7 +125,9 @@ func TestRefusedEditChangesNothing(t *testing.T) {
 		{"header auth without a header", url.Values{"base": {"https://api.example.com"}, "auth": {"header"}}, 400, "header"},
 		{"pasted names another service", url.Values{"pasted": {`{"service":"other","base":"https://api.example.com","auth":"bearer"}`}}, 400, "cannot be renamed"},
 		{"pasted is not json", url.Values{"pasted": {"base=x"}}, 400, "not valid"},
-		{"pasted has an unknown field", url.Values{"pasted": {`{"base":"https://api.example.com","auth":"bearer","key":"API_KEY"}`}}, 400, "not valid"},
+		{"pasted has an unknown field", url.Values{"pasted": {`{"base":"https://api.example.com","auth":"bearer","keys":"API_KEY"}`}}, 400, "unknown field &#34;keys&#34;"},
+		{"pasted names another key", url.Values{"pasted": {`{"base":"https://api.example.com","auth":"bearer","key":"OTHER_KEY"}`}}, 400, "another key"},
+		{"api service becomes a bitcoin one", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}, 400, "stays one"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

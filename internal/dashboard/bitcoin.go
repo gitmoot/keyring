@@ -2,7 +2,10 @@ package dashboard
 
 import (
 	"errors"
+	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gitmoot/keyring/internal/bitcoin"
@@ -76,4 +79,119 @@ func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 	}
 	data["Signatures"], data["SignatureDays"] = signatures, bitcoinSignatureDays
 	return data
+}
+
+// The Bitcoin fields of Connect and of a service's edit form (#201). The
+// networks are the test ones; mainnet is phase 2 and refused by validation
+// whatever is posted.
+var (
+	bitcoinNetworks = []string{bitcoin.Regtest, bitcoin.Testnet, bitcoin.Signet}
+	// bitcoinSighashes in the forms' order: the default two first.
+	bitcoinSighashes = []string{"default", "all", "none", "single", "all|anyonecanpay", "none|anyonecanpay", "single|anyonecanpay"}
+	// defaultBitcoinPaths: BIP86 receive and change on test networks.
+	defaultBitcoinPaths = []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"}
+)
+
+// bitcoinChoice is one option, select entry or checkbox of the form.
+type bitcoinChoice struct {
+	Value string
+	On    bool
+}
+
+// bitcoinForm is what the forms show: paths for an extended key, the script
+// for a WIF key.
+type bitcoinForm struct {
+	WIF                        bool
+	Paths                      string
+	Networks, Scripts, Sighash []bitcoinChoice
+}
+
+// bitcoinFormOf fills the form from settings, or with the defaults for a new
+// service when s is nil.
+func bitcoinFormOf(s *policy.Bitcoin, wif bool) *bitcoinForm {
+	if s == nil {
+		s = &policy.Bitcoin{Network: bitcoin.Regtest, Paths: defaultBitcoinPaths, Script: bitcoin.ScriptP2TR}
+	}
+	sighash := s.Sighash
+	if len(sighash) == 0 {
+		sighash = bitcoin.DefaultSighash
+	}
+	f := &bitcoinForm{WIF: wif, Paths: strings.Join(s.Paths, "\n")}
+	for _, n := range bitcoinNetworks {
+		f.Networks = append(f.Networks, bitcoinChoice{n, n == s.Network})
+	}
+	for _, script := range []string{bitcoin.ScriptP2TR, bitcoin.ScriptP2WPKH} {
+		f.Scripts = append(f.Scripts, bitcoinChoice{script, script == s.Script})
+	}
+	for _, h := range bitcoinSighashes {
+		f.Sighash = append(f.Sighash, bitcoinChoice{h, slices.Contains(sighash, h)})
+	}
+	return f
+}
+
+// bitcoinFromForm reads the posted Bitcoin fields, with the message to show
+// if they cannot be used. The default sighash pair is stored as no list, as
+// access.json may write it.
+func bitcoinFromForm(r *http.Request) (*policy.Bitcoin, string) {
+	s := &policy.Bitcoin{Network: r.PostFormValue("network"), Script: strings.TrimSpace(r.PostFormValue("script"))}
+	for line := range strings.Lines(r.PostFormValue("paths")) {
+		if path := strings.TrimSpace(line); path != "" {
+			s.Paths = append(s.Paths, path)
+		}
+	}
+	s.Sighash = r.PostForm["sighash"]
+	if len(s.Sighash) == 0 {
+		return s, "Tick at least one sighash type; default and all are the usual ones."
+	}
+	if slices.Equal(s.Sighash, bitcoin.DefaultSighash) {
+		s.Sighash = nil
+	}
+	return s, ""
+}
+
+// bitcoinKeyProblem returns why the stored key svc names cannot sign for
+// it, or "". The texts are fixed and never carry the value.
+func (b *Backend) bitcoinKeyProblem(svc policy.Service) (string, error) {
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
+		return "", err
+	}
+	rules, err := svc.Bitcoin.Rules()
+	if err != nil {
+		return "bitcoin: " + err.Error(), nil
+	}
+	if _, err := bitcoin.ParseKey(keys[svc.Key], rules); err != nil {
+		return svc.Key + " cannot sign for this service: " + err.Error() + ".", nil
+	}
+	return "", nil
+}
+
+// bitcoinChanges names the Bitcoin settings an edit changed. No sighash
+// list is the default pair.
+func bitcoinChanges(old, now *policy.Bitcoin) []string {
+	if old == nil {
+		old = &policy.Bitcoin{}
+	}
+	if now == nil {
+		now = &policy.Bitcoin{}
+	}
+	sighash := func(s *policy.Bitcoin) []string {
+		if len(s.Sighash) == 0 {
+			return bitcoin.DefaultSighash
+		}
+		return s.Sighash
+	}
+	var changed []string
+	for _, c := range []struct {
+		name string
+		diff bool
+	}{
+		{"bitcoin.network", old.Network != now.Network}, {"bitcoin.paths", !slices.Equal(old.Paths, now.Paths)},
+		{"bitcoin.script", old.Script != now.Script}, {"bitcoin.sighash", !slices.Equal(sighash(old), sighash(now))},
+	} {
+		if c.diff {
+			changed = append(changed, c.name)
+		}
+	}
+	return changed
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -155,5 +156,219 @@ func TestBitcoinGrantFormKeepsSatsLimits(t *testing.T) {
 	}
 	if page := e.request("GET", "/access/phobos/api", nil).Body.String(); strings.Contains(page, "max_sats_tx") {
 		t.Fatal("sats limits offered for a service that is not bitcoin")
+	}
+}
+
+// addBitcoinKey pastes a bitcoin key with Add key, as the owner does.
+func addBitcoinKey(e *env, name, value string) {
+	e.t.Helper()
+	if w := e.request("POST", "/keys", url.Values{"name": {name}, "value": {value}, "password": {password}}); w.Code != http.StatusSeeOther {
+		e.t.Fatalf("add %s: %d", name, w.Code)
+	}
+}
+
+// grantBitcoin gives phobos the whole service with sats limits through the
+// grant form and checks they were kept.
+func grantBitcoin(e *env, service string) {
+	e.t.Helper()
+	w := e.request("POST", "/access/phobos/"+service, url.Values{"on": {"yes"}, "mode": {"full"}, "paths": {"/"}, "max_sats_tx": {"100000"}, "max_sats_day": {"1000000"}, "password": {password}})
+	if w.Code != http.StatusSeeOther {
+		e.t.Fatalf("grant %s: %d %s", service, w.Code, w.Body.String())
+	}
+	if got := e.proxy.Config().Roles["phobos"].Access[service]; got.BitcoinMaxSatsPerTx != 100_000 || got.BitcoinMaxSatsPerDay != 1_000_000 {
+		e.t.Fatalf("grant limits = %+v", got)
+	}
+}
+
+// addresses calls the service's addresses action as phobos.
+func addresses(e *env, service, path string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("GET", "/_keyring/bitcoin/"+service+"/addresses?"+url.Values{"path": {path}, "count": {"2"}}.Encode(), nil)
+	r.RemoteAddr = "127.0.0.1:50000"
+	r.Header.Set(server.TokenHeader, token)
+	w := httptest.NewRecorder()
+	e.proxy.ServeHTTP(w, r)
+	return w
+}
+
+// The Connect form of a Bitcoin key makes a bitcoin-psbt-sign service that
+// answers once an agent is granted it (#201). Mainnet is refused.
+func TestBitcoinConnectFormMakesAWorkingService(t *testing.T) {
+	e := newEnv(t)
+	addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
+	page := e.request("GET", "/keys/BTC_ORD", nil).Body.String()
+	for _, want := range []string{`name="auth" value="bitcoin-psbt-sign"`, `<option selected>regtest</option>`, "m/86&#39;/1&#39;/0&#39;/0/*\nm/86&#39;/1&#39;/0&#39;/1/*</textarea>",
+		`value="default" checked`, `value="all" checked`, `value="none">`, `value="single|anyonecanpay">`, "add <span class=\"mono\">m/84'/1'/0'/0/*</span>"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the Connect form of a bitcoin key lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "mainnet</option>") || strings.Contains(page, `class="presetpick"`) || strings.Contains(page, `name="base"`) || strings.Contains(page, `name="script"`) {
+		t.Fatal("the bitcoin Connect form offers mainnet, the API form or a WIF script")
+	}
+	before := e.accessBytes()
+	form := func(network string, sighash ...string) url.Values {
+		return url.Values{"auth": {"bitcoin-psbt-sign"}, "service": {"btc-new"}, "network": {network}, "paths": {"m/86'/1'/0'/0/*\r\nm/86'/1'/0'/1/*\r\n"}, "sighash": sighash, "password": {password}}
+	}
+	for _, tc := range []struct {
+		name, want string
+		form       url.Values
+	}{
+		{"mainnet", "mainnet is not supported", form("mainnet", "default", "all")},
+		{"no sighash", "Tick at least one sighash type", form("regtest")},
+	} {
+		if w := e.request("POST", "/keys/BTC_ORD/connect", tc.form); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+			t.Fatalf("%s: %d, want 400 with %q", tc.name, w.Code, tc.want)
+		}
+		if !bytes.Equal(e.accessBytes(), before) {
+			t.Fatalf("%s: a refused connect changed the access file", tc.name)
+		}
+	}
+	if w := e.request("POST", "/keys/BTC_ORD/connect", form("regtest", "default", "all")); w.Header().Get("Location") != "/keys/BTC_ORD?done=connected" {
+		t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+	}
+	svc := e.proxy.Config().Services["btc-new"]
+	if svc.Auth != policy.AuthBitcoinPSBTSign || svc.Key != "BTC_ORD" || svc.Bitcoin == nil || svc.Bitcoin.Network != "regtest" ||
+		!slices.Equal(svc.Bitcoin.Paths, []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"}) || svc.Bitcoin.Script != "" || svc.Bitcoin.Sighash != nil {
+		t.Fatalf("saved service = %+v %+v", svc, svc.Bitcoin)
+	}
+	if !strings.Contains(e.audit.String(), `"admin":"key_connected"`) {
+		t.Fatal("the connect is not audited")
+	}
+	grantBitcoin(e, "btc-new")
+	w := addresses(e, "btc-new", "m/86'/1'/0'/0")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "73c5da0a") || !strings.Contains(w.Body.String(), "bcrt1p") {
+		t.Fatalf("addresses: %d %s", w.Code, w.Body.String())
+	}
+	assertNoBitcoinKey(t, page, e.audit.String(), e.request("GET", "/keys/BTC_ORD", nil).Body.String())
+}
+
+// A WIF key's Connect form asks for the script and no paths.
+func TestBitcoinConnectFormForAWIFKey(t *testing.T) {
+	e := newEnv(t)
+	addBitcoinKey(e, "BTC_WIF", bitcointest.WIF)
+	page := e.request("GET", "/keys/BTC_WIF", nil).Body.String()
+	if !strings.Contains(page, `<select name="script"><option selected>p2tr</option><option>p2wpkh</option>`) || strings.Contains(page, `name="paths"`) {
+		t.Fatal("the Connect form of a WIF key does not ask for the script alone")
+	}
+	w := e.request("POST", "/keys/BTC_WIF/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "service": {"btc-wif"}, "network": {"regtest"}, "script": {"p2wpkh"}, "sighash": {"all"}, "password": {password}})
+	if w.Header().Get("Location") != "/keys/BTC_WIF?done=connected" {
+		t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+	}
+	if b := e.proxy.Config().Services["btc-wif"].Bitcoin; b == nil || b.Script != "p2wpkh" || b.Paths != nil || !slices.Equal(b.Sighash, []string{"all"}) {
+		t.Fatalf("saved = %+v", b)
+	}
+	grantBitcoin(e, "btc-wif")
+	if w := addresses(e, "btc-wif", "m"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "bcrt1q") {
+		t.Fatalf("addresses: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The paste box takes a bitcoin service as settings and as access.json
+// writes it, including the owner's paste from 554234 and the line copied
+// from docs/bitcoin.md.
+func TestBitcoinConnectTakesPastedSettingsInBothShapes(t *testing.T) {
+	const rules = `"bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"],"sighash":["default","all"]}`
+	for name, pasted := range map[string]string{
+		"settings":         `{"service":"btc-ord","auth":"bitcoin-psbt-sign",` + rules + `}`,
+		"access.json":      `{"btc-ord":{"auth":"bitcoin-psbt-sign","key":"BTC_ORD",` + rules + `}}`,
+		"access.json line": `"btc-ord": {"auth": "bitcoin-psbt-sign", "key": "BTC_ORD", ` + rules + `},`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
+			w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {pasted}, "password": {password}})
+			if w.Header().Get("Location") != "/keys/BTC_ORD?done=connected" {
+				t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+			}
+			svc := e.proxy.Config().Services["btc-ord"]
+			if svc.Key != "BTC_ORD" || svc.Bitcoin == nil || len(svc.Bitcoin.Paths) != 2 || !slices.Equal(svc.Bitcoin.Sighash, []string{"default", "all"}) {
+				t.Fatalf("saved service = %+v", svc)
+			}
+			grantBitcoin(e, "btc-ord")
+			if w := addresses(e, "btc-ord", "m/86'/1'/0'/1"); w.Code != http.StatusOK {
+				t.Fatalf("addresses: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// A refused paste says what is wrong in plain text, never a Go type error,
+// and names no pasted value.
+func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
+	e := newEnv(t)
+	addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
+	before := e.accessBytes()
+	for _, tc := range []struct{ name, pasted, want string }{
+		{"another key", `{"btc-ord":{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}}`, "name another key"},
+		{"unknown field", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","pathz":["m/86'/1'/0'/0/*"]}}`, "unknown field &#34;pathz&#34;"},
+		{"wrong type", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":"m/86'/1'/0'/0/*"}}`, "&#34;bitcoin.paths&#34; has the wrong type"},
+		{"a bare name", `"btc-ord"`, "Paste one service&#39;s settings as JSON"},
+		{"mainnet", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","paths":["m/86'/0'/0'/0/*"]}}`, "mainnet is not supported"},
+		{"WIF rules for a tprv", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","script":"p2tr"}}`, "does not fit the service"},
+	} {
+		w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {tc.pasted}, "password": {password}})
+		body := w.Body.String()
+		if w.Code != http.StatusBadRequest || !strings.Contains(body, tc.want) || strings.Contains(body, "Go value") || strings.Contains(body, "cannot unmarshal") {
+			t.Fatalf("%s: %d, want 400 with %q:\n%s", tc.name, w.Code, tc.want, body)
+		}
+		if !bytes.Equal(e.accessBytes(), before) {
+			t.Fatalf("%s: a refused paste changed the access file", tc.name)
+		}
+		assertNoBitcoinKey(t, body)
+	}
+}
+
+// The service page edits a bitcoin service's rules; the edit is audited by
+// the names of what changed and agents keep their grant and its limits.
+func TestBitcoinServiceEditChangesRules(t *testing.T) {
+	e := newEnv(t)
+	addBitcoin(e)
+	page := e.request("GET", "/services/btc-ord", nil).Body.String()
+	if !strings.Contains(page, `name="paths"`) || !strings.Contains(page, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") || !strings.Contains(page, `<option selected>regtest</option>`) || strings.Contains(page, "changed in access.json") {
+		t.Fatal("the service page offers no edit of the bitcoin rules")
+	}
+	before := e.accessBytes()
+	twoPaths := "m/86'/1'/0'/0/*\nm/86'/1'/0'/1/*"
+	for _, tc := range []struct {
+		name, want string
+		form       url.Values
+	}{
+		{"mainnet", "mainnet is not supported", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"becomes a proxy", "stays one", url.Values{"auth": {"bearer"}, "base": {"https://api.example.com"}}},
+		{"pasted for another key", "another key", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}},
+		{"pasted without rules", "bitcoin", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign"}`}}},
+	} {
+		if w := e.edit("btc-ord", tc.form); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+			t.Fatalf("%s: %d, want 400 with %q", tc.name, w.Code, tc.want)
+		}
+		if !bytes.Equal(e.accessBytes(), before) {
+			t.Fatalf("%s: a refused edit changed the access file", tc.name)
+		}
+	}
+	w := e.edit("btc-ord", url.Values{"key": {"BTC_ORD"}, "auth": {"bitcoin-psbt-sign"}, "network": {"regtest"}, "paths": {twoPaths}, "sighash": {"default", "all"}})
+	if w.Header().Get("Location") != "/services/btc-ord?done=saved" {
+		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
+	}
+	if got := e.proxy.Config().Services["btc-ord"].Bitcoin; !slices.Equal(got.Paths, []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"}) {
+		t.Fatalf("paths = %v", got.Paths)
+	}
+	if !strings.Contains(e.audit.String(), `"changed":["bitcoin.paths"]`) {
+		t.Fatalf("the edit is not audited by what changed: %s", e.audit.String())
+	}
+	pasted := `{"btc-ord":{"auth":"bitcoin-psbt-sign","key":"BTC_ORD","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"],"sighash":["default","all","all|anyonecanpay"]}}}`
+	if w := e.edit("btc-ord", url.Values{"pasted": {pasted}}); w.Header().Get("Location") != "/services/btc-ord?done=saved" {
+		t.Fatalf("pasted edit: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(e.audit.String(), `"changed":["bitcoin.sighash"]`) {
+		t.Fatal("the pasted edit is not audited by what changed")
+	}
+	if got := e.proxy.Config().Roles["phobos"].Access["btc-ord"]; got.BitcoinMaxSatsPerTx != 70_000 {
+		t.Fatalf("the grant lost its limit: %+v", got)
+	}
+	if w := addresses(e, "btc-ord", "m/84'/1'/0'/0"); w.Code == http.StatusOK {
+		t.Fatal("a path removed by the edit still answers")
+	}
+	if w := addresses(e, "btc-ord", "m/86'/1'/0'/1"); w.Code != http.StatusOK {
+		t.Fatalf("addresses after the edit: %d %s", w.Code, w.Body.String())
 	}
 }
