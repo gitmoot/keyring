@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/workspace"
 )
@@ -283,8 +282,8 @@ func (h *Handler) fetchAccessToken(ctx context.Context, cfg policy.OAuth2, refre
 	// Every refresh comes here, including those for Workspace accounts,
 	// whose tokens no service names: a Bitcoin key never goes to a token
 	// endpoint. It is refused like a rejected token, to be replaced.
-	if bitcoin.IsKey(refresh) || bitcoin.IsKey(secret) {
-		return fail(true, bitcoinKeyRefused)
+	if err := policy.RefuseBitcoinKeys(refresh, secret); err != nil {
+		return fail(true, "%v", err)
 	}
 	form := url.Values{
 		"grant_type":    {"refresh_token"},

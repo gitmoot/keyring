@@ -73,7 +73,7 @@ type Instance struct {
 	// bitcoinUses are the bitcoinKeyUses of state. A change may keep one
 	// that came with the state it unlocked, never add one: it is refused
 	// at request time and shown as failing until the owner fixes it.
-	bitcoinUses []bitcoinKeyUse
+	bitcoinUses []policy.BitcoinKeyError
 }
 
 type running struct {
@@ -274,11 +274,8 @@ func (in *Instance) commit(next *State, key []byte) error {
 	uses := next.bitcoinKeyUses(cfg)
 	loading := in.state == nil
 	if !loading {
-		for _, u := range uses {
-			// Kept: the same use, of the same value.
-			if _, kept := in.bitcoinKeyUse(u.same); !kept || in.state.Keys[u.key] != next.Keys[u.key] {
-				return badRequest("%s", u.why)
-			}
+		if err := policy.AddedBitcoinKeyUse(uses, next.Keys, in.bitcoinUses, in.state.Keys); err != nil {
+			return badRequest("%v", err)
 		}
 	}
 	sealed, err := seal(next, key)
@@ -325,7 +322,7 @@ func (in *Instance) commit(next *State, key []byte) error {
 	in.state, in.key, in.sealed, in.bitcoinUses = next, key, sealed, uses
 	if loading {
 		for _, u := range uses {
-			fmt.Fprintf(in.opt.Log, "%s: its calls are refused until it is replaced or deleted\n", u.why)
+			fmt.Fprintf(in.opt.Log, "%v: its calls are refused until it is replaced or deleted\n", &u)
 		}
 	}
 	in.proxy.Swap(cfg, next.Keys)
@@ -334,16 +331,6 @@ func (in *Instance) commit(next *State, key []byte) error {
 	}
 	in.serve(cfg, opened)
 	return nil
-}
-
-// bitcoinKeyUse returns the first use of the state in force that match
-// accepts. Callers hold in.mu.
-func (in *Instance) bitcoinKeyUse(match func(bitcoinKeyUse) bool) (bitcoinKeyUse, bool) {
-	i := slices.IndexFunc(in.bitcoinUses, match)
-	if i < 0 {
-		return bitcoinKeyUse{}, false
-	}
-	return in.bitcoinUses[i], true
 }
 
 // change applies fn to a copy of the state and commits it as the next
@@ -672,8 +659,8 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 	// A service that would send a Bitcoin key loaded with the state: every
 	// call is refused before anything is sent (commit).
 	for _, u := range in.bitcoinUses {
-		if u.service != "" {
-			failing[u.service] = u.why
+		if u.Service != "" {
+			failing[u.Service] = u.Error()
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

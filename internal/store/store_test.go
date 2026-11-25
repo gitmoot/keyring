@@ -1,10 +1,12 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -103,9 +105,8 @@ func TestSetAllRejectsPartialCredentialBundle(t *testing.T) {
 	}
 }
 
-// SetChecked writes and returns the very map its check saw, writes nothing
-// when the check refuses, and asks to try again rather than overwrite a
-// change made after its read.
+// SetChecked writes and returns the very map its check saw, and writes
+// nothing when the check refuses.
 func TestSetChecked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keys.json")
 	if err := Set(path, "A", "a"); err != nil {
@@ -127,13 +128,37 @@ func TestSetChecked(t *testing.T) {
 	if after, _ := Load(path); !reflect.DeepEqual(after, disk) {
 		t.Fatalf("a refused update wrote %v", after)
 	}
-	_, err = SetChecked(path, map[string]string{"D": "d"}, func(map[string]string) error {
-		return Set(path, "E", "e") // another writer, between the read and the write
-	})
-	if err == nil || !strings.Contains(err.Error(), "try again") {
-		t.Fatalf("changed store: %v", err)
+}
+
+// Writers hold the store's lock (a flock, so separate opens exclude each
+// other as separate processes do) from their read to their rename: writes
+// at the same time are all kept.
+func TestConcurrentWritesAreAllKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	const writers = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("K%d", i)
+			if i%2 == 0 {
+				errs <- Set(path, name, "v")
+				return
+			}
+			_, err := SetChecked(path, map[string]string{name: "v"}, func(map[string]string) error { return nil })
+			errs <- err
+		}()
 	}
-	if after, _ := Load(path); after["D"] != "" || after["E"] != "e" {
-		t.Fatalf("the other writer's change was lost: %v", after)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if keys, err := Load(path); err != nil || len(keys) != writers {
+		t.Fatalf("%d of %d writes kept: %v", len(keys), writers, err)
 	}
 }

@@ -135,18 +135,16 @@ func TestWorkspaceAccountKeyRefusesABitcoinKey(t *testing.T) {
 	}
 }
 
-// A sealed state accepted before #204 may hold a Bitcoin key as a secondary
-// Workspace account's refresh token. It still unlocks, and the other
-// accounts keep working: that account's calls are refused before any
-// provider request, its listing says why, its key can be deleted, and a
-// change that stores such a key again is refused (round 5 of #204).
-func TestSealedBitcoinKeyOfAWorkspaceAccountUnlocks(t *testing.T) {
-	f := newWorkspaceFixture(t, 0)
-	personal := f.hydrate(f.migrate())
-	work := f.connect(f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any), "work")
-	id := accountField(work, "account_id")
+// sealedBitcoinAccount unlocks, in a new instance, a state as one sealed
+// before #204 could be: the secondary Workspace account work, connected,
+// with a Bitcoin key as its refresh token (key).
+func sealedBitcoinAccount(t *testing.T) (f *workspaceFixture, personal, work map[string]any, key string) {
+	t.Helper()
+	f = newWorkspaceFixture(t, 0)
+	personal = f.hydrate(f.migrate())
+	work = f.connect(f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any), "work")
 	f.in.mu.Lock()
-	key := f.in.state.WorkspaceAccounts[id].Key
+	key = f.in.state.WorkspaceAccounts[accountField(work, "account_id")].Key
 	f.in.mu.Unlock()
 	sealed := sealedWith(t, f.in, func(s *State) { s.Keys[key] = bitcointest.WIF })
 	f.in.Close()
@@ -156,7 +154,17 @@ func TestSealedBitcoinKeyOfAWorkspaceAccountUnlocks(t *testing.T) {
 	}
 	f.in, f.admin = in, in.AdminHandler()
 	f.must("POST", "/unlock", map[string]any{"data_key": f.key, "state": sealed}, "")
+	return f, personal, work, key
+}
 
+// A sealed state accepted before #204 may hold a Bitcoin key as a secondary
+// Workspace account's refresh token. It still unlocks, and the other
+// accounts keep working: that account's calls are refused before any
+// provider request, its listing says why, its key can be deleted, and a
+// change that stores such a key again is refused (round 5 of #204).
+func TestSealedBitcoinKeyOfAWorkspaceAccountUnlocks(t *testing.T) {
+	f, personal, work, key := sealedBitcoinAccount(t)
+	id := accountField(work, "account_id")
 	events := f.provider.snapshot()
 	code, _, err := f.proxy("GET", qualified(work, "/gmail/gmail/v1/users/me/profile"), accountField(work, "binding_generation"))
 	if err != nil || code/100 == 2 {
@@ -178,6 +186,27 @@ func TestSealedBitcoinKeyOfAWorkspaceAccountUnlocks(t *testing.T) {
 	f.must("DELETE", "/keys/"+key, nil, "")
 	if code, _ := f.call("PUT", "/keys/"+key, map[string]any{"value": bitcointest.WIF}, ""); code != 400 {
 		t.Fatalf("a Bitcoin key for the account again: %d", code)
+	}
+	assertNoBitcoinKeyIn(t, f.audit.String())
+}
+
+// Disconnecting that account deletes its key without sending it to the
+// revoke endpoint (round 6 of #204).
+func TestDisconnectNeverRevokesABitcoinKey(t *testing.T) {
+	f, _, work, key := sealedBitcoinAccount(t)
+	events := f.provider.snapshot()
+	out := f.must("DELETE", "/accounts/"+accountField(work, "account_id"), nil, accountField(work, "binding_generation"))
+	if out["provider_revoked"] != false {
+		t.Fatalf("disconnect: %v", out)
+	}
+	if !reflect.DeepEqual(events, f.provider.snapshot()) {
+		t.Fatalf("the provider was asked: %v", f.provider.snapshot()[len(events):])
+	}
+	f.in.mu.Lock()
+	stored := f.in.state.Keys[key]
+	f.in.mu.Unlock()
+	if stored != "" {
+		t.Fatal("the key was not deleted")
 	}
 	assertNoBitcoinKeyIn(t, f.audit.String())
 }

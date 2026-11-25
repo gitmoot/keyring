@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/framing"
 	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
@@ -117,10 +116,10 @@ type snapshot struct {
 	// apns holds a token minter per apns service; one whose key and identity
 	// are unchanged is carried over by Swap, cached token included.
 	apns map[string]*apnsSigner
-	// bitcoinValues are the values of keys that are Bitcoin private keys
-	// (bitcoinValues); a service other than a Bitcoin signing service never
-	// sends one.
-	bitcoinValues map[string]bool
+	// holdsBitcoinKey: a value of keys is a Bitcoin private key, which a
+	// service other than a Bitcoin signing service never sends
+	// (sendsBitcoinKey).
+	holdsBitcoinKey bool
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -225,7 +224,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 
 // SwapWithOrder is Swap with a new value order, published together.
 func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
-	snap := &snapshot{config: config, keys: keys, order: order, bitcoinValues: bitcoinValues(keys)}
+	snap := &snapshot{config: config, keys: keys, order: order, holdsBitcoinKey: holdsBitcoinKey(keys)}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}
@@ -1073,8 +1072,10 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
 	snap := h.snap.Load()
 	// key may come from the store on disk rather than snap: checked itself.
-	if bitcoin.IsKey(key) && svc.Auth != policy.AuthBitcoinPSBTSign {
-		return 0, errors.New(bitcoinKeyRefused)
+	if svc.Auth != policy.AuthBitcoinPSBTSign {
+		if err := policy.RefuseBitcoinKeys(key); err != nil {
+			return 0, err
+		}
 	}
 	resp, err := h.testRequest(ctx, snap, svc, key)
 	if err != nil {
@@ -1090,7 +1091,7 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 		return nil, errors.New("sign-only service has no upstream test")
 	}
 	if snap.sendsBitcoinKey(svc, key, nil) {
-		return nil, errors.New(bitcoinKeyRefused)
+		return nil, policy.ErrBitcoinKeyRefused
 	}
 	if svc.TestPath == "" {
 		return nil, errors.New("the service has no test request")

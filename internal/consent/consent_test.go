@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
 )
@@ -945,6 +946,42 @@ func TestGoogleSetupFailuresExplainWhatToDo(t *testing.T) {
 		message := googleFailureMessage(googlelogin.View{Phase: "failed", Error: code, Step: "project_create"})
 		if message == generic || !strings.Contains(message, advice) || !strings.HasSuffix(message, "(Failed step: project_create.)") {
 			t.Errorf("%s: %q", code, message)
+		}
+	}
+}
+
+// A stored Bitcoin key never goes to the OAuth provider, though settings
+// and keys loaded as they are can name one (round 6 of #204): a disconnect
+// deletes the key without revoking it, and a sign-in whose client secret is
+// one is refused before the code exchange.
+func TestBitcoinKeyNeverGoesToTheProvider(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct{ refresh, secret string }{
+		{bitcointest.WIF, "google-client-secret"},
+		{"1//person-refresh", bitcointest.Master},
+	} {
+		e.keys.Set("GMAIL_REFRESH", c.refresh)
+		e.keys.Set("GOOGLE_SECRET", c.secret)
+		w := e.api("DELETE", "/keys/gmail", apiToken, "")
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"revoked":false`) || !strings.Contains(w.Body.String(), "bitcoin key refused") || e.keys.get("GMAIL_REFRESH") != "" {
+			t.Fatalf("disconnect: %d %s", w.Code, w.Body)
+		}
+	}
+	e.keys.Set("GOOGLE_SECRET", bitcointest.WIF)
+	to, cookie := e.startSignIn()
+	w := e.page("GET", callbackPath(url.Values{"code": {"good-code"}, "state": {to.Query().Get("state")}}), nil, nil, cookie)
+	if w.Code == http.StatusOK || e.keys.get("GMAIL_REFRESH") != "" {
+		t.Fatalf("sign-in with a Bitcoin client secret: %d %s", w.Code, w.Body)
+	}
+	e.prov.mu.Lock()
+	revoked, exchanged := len(e.prov.revoked), len(e.prov.exchanges)
+	e.prov.mu.Unlock()
+	if revoked != 0 || exchanged != 0 {
+		t.Fatalf("the provider got %d revokes and %d exchanges", revoked, exchanged)
+	}
+	for _, key := range []string{bitcointest.WIF[:20], bitcointest.Master[:20]} {
+		if strings.Contains(e.audit.String()+w.Body.String(), key) {
+			t.Fatal("a Bitcoin key in the audit log or the page")
 		}
 	}
 }

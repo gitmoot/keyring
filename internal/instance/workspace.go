@@ -7,7 +7,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -129,31 +128,16 @@ func (s *State) validateWorkspace(container bool) error {
 	return nil
 }
 
-// bitcoinKeyUse is something in a state that would send a stored Bitcoin key
-// though it is not a Bitcoin signing service: a service naming the key
-// (policy.BitcoinKeyUses), or a Workspace account whose refresh key holds
-// one, which the Workspace services send though no service names it.
-type bitcoinKeyUse struct {
-	service string // the service, or "" for a Workspace account
-	account string // the Workspace account ID, when service is ""
-	key     string // the store name of the key, never its value
-	why     string
-}
-
-func (u bitcoinKeyUse) same(o bitcoinKeyUse) bool {
-	return u.service == o.service && u.account == o.account && u.key == o.key
-}
-
-// bitcoinKeyUses lists every bitcoinKeyUse of s: services first, by name,
-// then Workspace accounts, by ID.
-func (s *State) bitcoinKeyUses(cfg *policy.Config) []bitcoinKeyUse {
-	var uses []bitcoinKeyUse
-	for _, u := range cfg.BitcoinKeyUses(s.Keys) {
-		uses = append(uses, bitcoinKeyUse{service: u.Service, key: u.Key, why: u.Error()})
-	}
+// bitcoinKeyUses lists what in s would send a stored Bitcoin key though it
+// is not a Bitcoin signing service: services naming the key
+// (policy.BitcoinKeyUses), by name, then Workspace accounts whose refresh key
+// holds one, which the Workspace services send though no service names it,
+// by ID.
+func (s *State) bitcoinKeyUses(cfg *policy.Config) []policy.BitcoinKeyError {
+	uses := cfg.BitcoinKeyUses(s.Keys)
 	for _, id := range slices.Sorted(maps.Keys(s.WorkspaceAccounts)) {
 		if a := s.WorkspaceAccounts[id]; bitcoin.IsKey(s.Keys[a.Key]) {
-			uses = append(uses, bitcoinKeyUse{account: id, key: a.Key, why: fmt.Sprintf("Workspace account %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", a.Alias, a.Key)})
+			uses = append(uses, policy.BitcoinKeyError{Account: a.Alias, Key: a.Key})
 		}
 	}
 	return uses
@@ -242,7 +226,7 @@ func (in *Instance) viewLocked(a workspace.Record) workspace.View {
 			v.Status = "identity_pending"
 		}
 	}
-	_, bitcoinRefused := in.bitcoinKeyUse(func(u bitcoinKeyUse) bool { return u.account == a.ID })
+	bitcoinRefused := slices.ContainsFunc(in.bitcoinUses, func(u policy.BitcoinKeyError) bool { return u.Account == a.Alias })
 	for _, name := range v.AffectedServices {
 		svc := s.Services[name]
 		svc.Key = a.Key

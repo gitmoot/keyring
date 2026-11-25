@@ -16,11 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,46 +72,32 @@ func BitcoinSpendPath(base string) string {
 
 // bitcoinKeyRefused is the note of a call refused because its service, not
 // a Bitcoin signing service, would send a stored Bitcoin key.
-const bitcoinKeyRefused = "bitcoin key refused"
+var bitcoinKeyRefused = policy.ErrBitcoinKeyRefused.Error()
 
-// bitcoinValues are the values of keys that are Bitcoin private keys, nil
-// when there are none; Swap finds them once per snapshot.
-func bitcoinValues(keys map[string]string) map[string]bool {
-	var found map[string]bool
-	for _, value := range keys {
-		if bitcoin.IsKey(value) {
-			if found == nil {
-				found = map[string]bool{}
-			}
-			found[value] = true
-		}
-	}
-	return found
+// holdsBitcoinKey reports whether a value of keys is a Bitcoin private key
+// (policy.RefuseBitcoinKeys); Swap finds out once per snapshot, so calls
+// of a store with none check nothing more.
+func holdsBitcoinKey(keys map[string]string) bool {
+	return policy.RefuseBitcoinKeys(slices.Collect(maps.Values(keys))...) != nil
 }
 
 // sendsBitcoinKey reports whether svc, other than a Bitcoin signing service,
 // would send a stored Bitcoin key: key, a value of pool, or a value it names
-// (extra headers, OAuth client secret). Changes are checked for this first
-// (policy.CheckBitcoinKeys), settings and a store loaded as they are are not;
-// this is the last line before anything goes upstream.
+// (extra headers, OAuth client secret), as policy.RefuseBitcoinKeys finds.
 func (s *snapshot) sendsBitcoinKey(svc policy.Service, key string, pool []string) bool {
-	if len(s.bitcoinValues) == 0 || svc.Auth == policy.AuthBitcoinPSBTSign {
+	if !s.holdsBitcoinKey || svc.Auth == policy.AuthBitcoinPSBTSign {
 		return false
 	}
-	if s.bitcoinValues[key] {
-		return true
-	}
+	names := svc.KeyNames()
+	values := make([]string, 0, 1+len(pool)+len(names))
+	values = append(values, key)
 	for _, name := range pool {
-		if s.bitcoinValues[s.keys[name]] {
-			return true
-		}
+		values = append(values, s.keys[name])
 	}
-	for _, name := range svc.KeyNames() {
-		if s.bitcoinValues[s.keys[name]] {
-			return true
-		}
+	for _, name := range names {
+		values = append(values, s.keys[name])
 	}
-	return false
+	return policy.RefuseBitcoinKeys(values...) != nil
 }
 
 type bitcoinSignRequest struct {

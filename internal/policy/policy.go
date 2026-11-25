@@ -411,16 +411,43 @@ func (b *Bitcoin) Rules() (*bitcoin.Rules, error) {
 	return bitcoin.NewRules(b.Network, b.Paths, b.Script, b.Sighash)
 }
 
+// ErrBitcoinKeyRefused refuses to send a stored Bitcoin private key anywhere
+// (RefuseBitcoinKeys).
+var ErrBitcoinKeyRefused = errors.New("bitcoin key refused")
+
+// RefuseBitcoinKeys is the one check every outbound use of stored
+// credentials passes, other than a Bitcoin signing service's: the values
+// about to be sent (a service's key, pool value or extra header to its
+// upstream or in its test request; a refresh token or client secret to an
+// OAuth provider for a refresh, a code exchange or a revoke). It returns
+// ErrBitcoinKeyRefused, before anything is sent, when one of them is a
+// Bitcoin private key. Changes may not add such a use (CheckBitcoinKeys),
+// but settings and keys loaded as they are can hold one; this stops it.
+func RefuseBitcoinKeys(values ...string) error {
+	for _, v := range values {
+		if bitcoin.IsKey(v) {
+			return ErrBitcoinKeyRefused
+		}
+	}
+	return nil
+}
+
 // BitcoinKeyError refuses settings in which a service other than a Bitcoin
 // signing service would use a stored Bitcoin private key: a proxy service
-// would send it upstream as its credential.
+// would send it upstream as its credential, a Workspace account to Google
+// as its refresh token.
 type BitcoinKeyError struct {
-	Service string // the service that would use the key
+	Service string // the service that would use the key, or
+	Account string // the alias of the Workspace account that would
 	Key     string // the store name of the key, never its value
 }
 
 func (e *BitcoinKeyError) Error() string {
-	return fmt.Sprintf("service %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", e.Service, e.Key)
+	who := "service " + e.Service
+	if e.Account != "" {
+		who = "Workspace account " + e.Account
+	}
+	return fmt.Sprintf("%s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", who, e.Key)
 }
 
 // CheckBitcoinKeys returns a *BitcoinKeyError when a service other than a
@@ -437,16 +464,23 @@ func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
 
 // CheckAddedBitcoinKeys is CheckBitcoinKeys for a change from the settings
 // before with the stored values beforeKeys: it refuses only a use the change
-// adds. A use already in force (settings and a store loaded as they are) is
-// refused at request time instead; it never blocks another change, nor the
-// change that fixes it. A use is kept when the same service uses the same
-// key name, holding the same value.
+// adds (AddedBitcoinKeyUse).
 func (a AccessList) CheckAddedBitcoinKeys(keys map[string]string, before AccessList, beforeKeys map[string]string) error {
 	uses := a.BitcoinKeyUses(keys)
 	if len(uses) == 0 {
 		return nil
 	}
-	kept := before.BitcoinKeyUses(beforeKeys)
+	return AddedBitcoinKeyUse(uses, keys, before.BitcoinKeyUses(beforeKeys), beforeKeys)
+}
+
+// AddedBitcoinKeyUse returns the first of uses, of the stored values keys,
+// that is not one of kept, of beforeKeys, as a *BitcoinKeyError; nil when
+// there is none. A use is kept when the same service or Workspace account
+// uses the same key name, holding the same value. A use already in force
+// (settings and a store loaded as they are) is refused at request time
+// instead (RefuseBitcoinKeys); it never blocks another change, nor the
+// change that fixes it.
+func AddedBitcoinKeyUse(uses []BitcoinKeyError, keys map[string]string, kept []BitcoinKeyError, beforeKeys map[string]string) error {
 	for _, u := range uses {
 		if !slices.Contains(kept, u) || beforeKeys[u.Key] != keys[u.Key] {
 			return &u

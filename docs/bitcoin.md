@@ -64,10 +64,13 @@ Settings and keys that already hold such a use (written by hand, or stored
 before v0.15.3) still load, so one bad credential never stops the keyring or
 locks an instance: the service start and a reload log a warning naming the
 service and key, an unlocked instance logs it and its status lists the
-service (or the Workspace account, `bitcoin_key_refused`) as failing. Every
-such call is answered 503 with the audit note `bitcoin key refused`, and an
-OAuth refresh is refused, so nothing goes upstream. Replace or delete the key,
-or change the service, to fix it; other changes keep working meanwhile.
+service (or the Workspace account, `bitcoin_key_refused`) as failing. One
+check stands before every outbound use of a stored credential: such a call
+is answered 503 with the audit note `bitcoin key refused`, and an OAuth
+refresh, a sign-in's code exchange (with a Bitcoin key as client secret) or
+a disconnect's revoke (`"revoked": false`, the key is still deleted) is
+refused, so nothing goes upstream. Replace or delete the key, or change the
+service, to fix it; other changes keep working meanwhile.
 
 ## 2. The service
 
