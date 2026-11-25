@@ -16,11 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +68,36 @@ func bitcoinRoute(path string) (service, action string) {
 // totals, and a restart does not reset bitcoin_max_sats_per_day.
 func BitcoinSpendPath(base string) string {
 	return base + ".bitcoin-spend.json"
+}
+
+// bitcoinKeyRefused is the note of a call refused because its service, not
+// a Bitcoin signing service, would send a stored Bitcoin key.
+var bitcoinKeyRefused = policy.ErrBitcoinKeyRefused.Error()
+
+// holdsBitcoinKey reports whether a value of keys is a Bitcoin private key
+// (policy.RefuseBitcoinKeys); Swap finds out once per snapshot, so calls
+// of a store with none check nothing more.
+func holdsBitcoinKey(keys map[string]string) bool {
+	return policy.RefuseBitcoinKeys(slices.Collect(maps.Values(keys))...) != nil
+}
+
+// sendsBitcoinKey reports whether svc, other than a Bitcoin signing service,
+// would send a stored Bitcoin key: key, a value of pool, or a value it names
+// (extra headers, OAuth client secret), as policy.RefuseBitcoinKeys finds.
+func (s *snapshot) sendsBitcoinKey(svc policy.Service, key string, pool []string) bool {
+	if !s.holdsBitcoinKey || svc.Auth == policy.AuthBitcoinPSBTSign {
+		return false
+	}
+	names := svc.KeyNames()
+	values := make([]string, 0, 1+len(pool)+len(names))
+	values = append(values, key)
+	for _, name := range pool {
+		values = append(values, s.keys[name])
+	}
+	for _, name := range names {
+		values = append(values, s.keys[name])
+	}
+	return policy.RefuseBitcoinKeys(values...) != nil
 }
 
 type bitcoinSignRequest struct {

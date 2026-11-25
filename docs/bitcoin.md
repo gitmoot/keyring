@@ -25,13 +25,14 @@ Read the key from stdin (it is refused as an argument, so it does not end up in
 shell history or process lists):
 
 ```sh
-keyring bitcoin-import --store ~/.keyring/keys.json --network regtest BTC_ORD < /path/to/tprv.txt
+keyring bitcoin-import --config rules.json --store ~/.keyring/keys.json --network regtest BTC_ORD < /path/to/tprv.txt
 ```
 
 Without a redirect it prompts and reads the key without echo. It refuses an
 existing name, a key for another network (`xprv` on regtest, `tprv` on
-mainnet) and anything else that is not a key, with a fixed message that never
-contains the value. It prints what to check in your wallet:
+mainnet), a name a service other than a Bitcoin signing service would use
+(see below), and anything else that is not a key, with a fixed message that
+never contains the value. It prints what to check in your wallet:
 
 ```
 stored BTC_ORD
@@ -48,9 +49,56 @@ Pasting the key with **Add key** on the dashboard works too. Keyring recognises
 and never offers **Show** for them: the key page shows the fingerprint and
 networks instead, and a reveal request is refused (`?error=never-shown`).
 
+**A Bitcoin key is only ever used by a `bitcoin-psbt-sign` service.** Any
+other service would send its key upstream as a credential, so keyring refuses
+changes in which one would use a stored Bitcoin key: its `key`, a value of
+its key pool, an extra header, an OAuth client secret, or the refresh token of
+a Workspace account. The refusal reads `service api: BTC_ORD is a Bitcoin key;
+it can only be used by a Bitcoin signing service` and nothing is saved. It is
+checked wherever settings and keys change together: the dashboard's Connect,
+service, key and upload forms, the instance admin API, consent links, and
+`keyring set` and `keyring bitcoin-import`, which need `--config` to store a
+Bitcoin key. `keyring check` refuses such settings too.
+
+Settings and keys that already hold such a use (written by hand, or stored
+before v0.15.3) still load, so one bad credential never stops the keyring or
+locks an instance: the service start and a reload log a warning naming the
+service and key, an unlocked instance logs it and its status lists the
+service (or the Workspace account, `bitcoin_key_refused`) as failing. One
+check stands before every outbound use of a stored credential: such a call
+is answered 503 with the audit note `bitcoin key refused`, and an OAuth
+refresh, a sign-in's code exchange (with a Bitcoin key as client secret) or
+a disconnect's revoke (`"revoked": false`, the key is still deleted) is
+refused, so nothing goes upstream. Replace or delete the key, or change the
+service, to fix it; other changes keep working meanwhile.
+
 ## 2. The service
 
-In the access file (`services` → name):
+**On the dashboard** (Keys → the key → Connect to a service): the page of a
+key whose one value is a Bitcoin key (a key with several values keeps the API
+form; paste the settings there) offers a Bitcoin form instead: service name,
+network (regtest, testnet or signet), the path templates one per line
+(prefilled with BIP86 receive and change, `m/86'/1'/0'/0/*` and
+`m/86'/1'/0'/1/*`; add `m/84'/1'/0'/0/*` and `m/84'/1'/0'/1/*` for native
+SegWit) and the sighash types (default and all ticked; the others carry the
+warning below). For a WIF key the form asks for the script (`p2tr` or
+`p2wpkh`) instead of paths. Connect checks the whole access list and that the
+key fits the service (network; paths for a tprv, script for a WIF key) before
+anything is written, and is audit-logged as `key_connected`.
+
+Or open **Or paste settings** and paste
+`{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{…}}`, or the
+service as the access file writes it: `{"btc-ord":{…}}`, or the
+`"btc-ord": {…}` block below as it is. A `key` in pasted settings must be the
+key whose page it is.
+
+The service page (`/services/<name>`) edits the network, paths (or script)
+and sighash types the same ways; the edit is audit-logged as
+`service_edited` with the names that changed (`bitcoin.paths`,
+`bitcoin.sighash`, …). A Bitcoin service stays one. The sats limits are on
+each agent's grant (section 3).
+
+**In the access file** (`services` → name):
 
 ```json
 "btc-ord": {

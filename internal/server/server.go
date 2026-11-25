@@ -116,6 +116,10 @@ type snapshot struct {
 	// apns holds a token minter per apns service; one whose key and identity
 	// are unchanged is carried over by Swap, cached token included.
 	apns map[string]*apnsSigner
+	// holdsBitcoinKey: a value of keys is a Bitcoin private key, which a
+	// service other than a Bitcoin signing service never sends
+	// (sendsBitcoinKey).
+	holdsBitcoinKey bool
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -187,6 +191,16 @@ func (h *Handler) clientFor(svc policy.Service) *http.Client {
 // Config returns the settings in use.
 func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 
+// CheckBitcoinChange refuses settings next with stored values keys when,
+// compared with the settings and keys in use, they add a use of a stored
+// Bitcoin key by a service other than a Bitcoin signing service
+// (policy.CheckAddedBitcoinKeys). A use already in force is refused at
+// request time instead, and blocks no change.
+func (h *Handler) CheckBitcoinChange(next policy.AccessList, keys map[string]string) error {
+	in := h.snap.Load()
+	return next.CheckAddedBitcoinKeys(keys, in.config.AccessList, in.keys)
+}
+
 // SetValueOrder sets each key's list order of its value names (key ->
 // parts), which key pools try in that order from the next call on.
 func (h *Handler) SetValueOrder(order map[string][]string) {
@@ -210,7 +224,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 
 // SwapWithOrder is Swap with a new value order, published together.
 func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
-	snap := &snapshot{config: config, keys: keys, order: order}
+	snap := &snapshot{config: config, keys: keys, order: order, holdsBitcoinKey: holdsBitcoinKey(keys)}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}
@@ -608,6 +622,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusServiceUnavailable, "key not loaded")
 			return
 		}
+	}
+	// Changes never let a service other than a Bitcoin signing service use
+	// a Bitcoin key (policy.CheckBitcoinKeys), but settings and a store
+	// loaded as they are (serve, a reload, an unlocked instance) may: such
+	// a call is refused here, before anything is sent or charged.
+	if snap.sendsBitcoinKey(svc, key, members) {
+		fail(http.StatusServiceUnavailable, bitcoinKeyRefused)
+		return
 	}
 	// A key that goes in a header must be a legal header value. Go refuses to
 	// send one with a line break or control character, and that used to come
@@ -1048,7 +1070,14 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 // oauth2 service, key is the refresh token: the test mints an access token
 // with it and the client secret in use.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
-	resp, err := h.testRequest(ctx, h.snap.Load(), svc, key)
+	snap := h.snap.Load()
+	// key may come from the store on disk rather than snap: checked itself.
+	if svc.Auth != policy.AuthBitcoinPSBTSign {
+		if err := policy.RefuseBitcoinKeys(key); err != nil {
+			return 0, err
+		}
+	}
+	resp, err := h.testRequest(ctx, snap, svc, key)
 	if err != nil {
 		return 0, err
 	}
@@ -1060,6 +1089,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Service, key string) (*http.Response, error) {
 	if svc.SignOnly() {
 		return nil, errors.New("sign-only service has no upstream test")
+	}
+	if snap.sendsBitcoinKey(svc, key, nil) {
+		return nil, policy.ErrBitcoinKeyRefused
 	}
 	if svc.TestPath == "" {
 		return nil, errors.New("the service has no test request")

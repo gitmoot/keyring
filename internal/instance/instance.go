@@ -70,6 +70,10 @@ type Instance struct {
 	google    *googlelogin.Controller // fixed at construction for container mode
 	listeners map[string]*running
 	wiped     chan struct{}
+	// bitcoinUses are the bitcoinKeyUses of state. A change may keep one
+	// that came with the state it unlocked, never add one: it is refused
+	// at request time and shown as failing until the owner fixes it.
+	bitcoinUses []policy.BitcoinKeyError
 }
 
 type running struct {
@@ -255,11 +259,24 @@ func badRequest(format string, args ...any) error {
 // commit makes next the state in use, sealed with key: it validates next,
 // opens any new listeners, writes the sealed state, swaps it into the proxy
 // and closes listeners no longer used. On any error nothing changes.
-// Callers hold in.mu.
+//
+// A change that would have anything but a Bitcoin signing service send a
+// stored Bitcoin key is refused. A state unlocked with such a use is still
+// loaded (one bad credential never locks the instance, nor keeps the owner
+// from fixing it): the proxy and the OAuth refresh refuse that key at
+// request time, status shows the use as failing, and later changes may keep
+// it but not add another. Callers hold in.mu.
 func (in *Instance) commit(next *State, key []byte) error {
 	cfg, err := next.config(in.opt.AuditName, in.opt.Container)
 	if err != nil {
 		return badRequest("%v", err)
+	}
+	uses := next.bitcoinKeyUses(cfg)
+	loading := in.state == nil
+	if !loading {
+		if err := policy.AddedBitcoinKeyUse(uses, next.Keys, in.bitcoinUses, in.state.Keys); err != nil {
+			return badRequest("%v", err)
+		}
 	}
 	sealed, err := seal(next, key)
 	if err != nil {
@@ -302,7 +319,12 @@ func (in *Instance) commit(next *State, key []byte) error {
 			return err
 		}
 	}
-	in.state, in.key, in.sealed = next, key, sealed
+	in.state, in.key, in.sealed, in.bitcoinUses = next, key, sealed, uses
+	if loading {
+		for _, u := range uses {
+			fmt.Fprintf(in.opt.Log, "%v: its calls are refused until it is replaced or deleted\n", &u)
+		}
+	}
 	in.proxy.Swap(cfg, next.Keys)
 	if in.google != nil {
 		in.google.SetState(next.Google)
@@ -632,6 +654,13 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 			if google.Refused {
 				reconnect[name] = true
 			}
+		}
+	}
+	// A service that would send a Bitcoin key loaded with the state: every
+	// call is refused before anything is sent (commit).
+	for _, u := range in.bitcoinUses {
+		if u.Service != "" {
+			failing[u.Service] = u.Error()
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

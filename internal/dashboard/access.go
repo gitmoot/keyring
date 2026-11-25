@@ -476,12 +476,49 @@ func (b *Backend) saveAndApply(next policy.AccessList) error {
 	if err != nil {
 		return err
 	}
+	return b.saveAndApplyKeys(next, keys)
+}
+
+// saveAndApplyKeys is saveAndApply with keys already loaded, for a caller
+// that checked the very values it puts in force. It saves nothing and
+// returns a *policy.BitcoinKeyError when the change would have a service
+// other than a Bitcoin signing service use a stored Bitcoin key
+// (server.Handler.CheckBitcoinChange). Callers hold b.Mu.
+func (b *Backend) saveAndApplyKeys(next policy.AccessList, keys map[string]string) error {
+	if err := b.Proxy.CheckBitcoinChange(next, keys); err != nil {
+		return err
+	}
 	cfg, err := policy.SaveAccess(b.rules(), next)
 	if err != nil {
 		return err
 	}
 	b.Proxy.Swap(cfg, keys)
 	return nil
+}
+
+// saveChecked saves next like saveAndApply when the service name, as next
+// has it, works with its keys in the same store snapshot it puts in force;
+// otherwise it returns the message to show and saves nothing. Refused are a
+// service other than a Bitcoin signing service that would use a Bitcoin key,
+// and a bitcoin-psbt-sign service whose key does not fit it (another
+// network, a WIF key given paths): validation does not read the store, so
+// that would otherwise show only on the first PSBT. Callers hold b.Mu and
+// have validated next.
+func (b *Backend) saveChecked(next policy.AccessList, name string) (string, error) {
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
+		return "", err
+	}
+	if svc := next.Services[name]; svc.Auth == policy.AuthBitcoinPSBTSign {
+		if msg := bitcoinKeyProblem(svc, keys); msg != "" {
+			return msg, nil
+		}
+	}
+	err = b.saveAndApplyKeys(next, keys)
+	if refused := (*policy.BitcoinKeyError)(nil); errors.As(err, &refused) {
+		return refused.Error(), nil
+	}
+	return "", err
 }
 
 func (b *Backend) newAgentPage(w http.ResponseWriter, r *http.Request, sid string) {

@@ -23,6 +23,16 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "password"}}<label class="pw">Dashboard password<input type="password" name="password" autocomplete="current-password" required placeholder="asked on every change"></label>{{end}}
 
+{{define "bitcoinfields"}}<label>Network<select name="network">{{range .Networks}}<option{{if .On}} selected{{end}}>{{.Value}}</option>{{end}}</select></label>
+<p class="hint">Test networks only; mainnet is not supported yet.</p>
+{{if .WIF}}<label>Script (a WIF key signs for one address)<select name="script">{{range .Scripts}}<option{{if .On}} selected{{end}}>{{.Value}}</option>{{end}}</select></label>
+<p class="hint">p2tr: taproot key path (BIP86 style). p2wpkh: native SegWit.</p>
+{{else}}<label>Paths it signs for, one per line<textarea name="paths" spellcheck="false" autocapitalize="none">{{.Paths}}</textarea></label>
+<p class="hint">Taproot (BIP86) receive and change. For native SegWit (BIP84) add <span class="mono">m/84'/1'/0'/0/*</span> and <span class="mono">m/84'/1'/0'/1/*</span>. A trailing /* means any index; hardened steps take ' or h.</p>{{end}}
+<p class="hint">Sighash types it signs:</p>
+{{range .Sighash}}<label class="check"><input type="checkbox" name="sighash" value="{{.Value}}"{{if .On}} checked{{end}}> <span class="mono">{{.Value}}</span></label>{{end}}
+<p class="hint">default and all commit to the whole transaction. With none, single or an |anyonecanpay form the other side may change what the signature does not cover, so the sats a PSBT sends are only what it sends now. Tick them only if your tool needs them.</p>{{end}}
+
 {{define "thead"}}<thead><tr>{{range .}}<th{{with .Class}} class="{{.}}"{{end}}>{{if .Href}}<a href="{{.Href}}">{{.Label}}{{with .Arrow}} <span class="arrow">{{.}}</span>{{end}}</a>{{else}}{{.Label}}{{end}}</th>{{end}}</tr></thead>{{end}}
 
 {{define "status"}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}
@@ -122,6 +132,17 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 
 <details class="card"{{if or (not .Row.Services) .ConnectError}} open{{end}}><summary>{{if .Row.Services}}Connect to another service{{else}}Connect to a service{{end}}</summary>
 {{with .ConnectError}}<p class="error">{{.}}</p>{{end}}
+{{if .BitcoinForm}}<form method="post" action="/keys/{{.Row.Name}}/connect"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="auth" value="bitcoin-psbt-sign">{{with .BitcoinKeyPart}}<input type="hidden" name="key_part" value="{{.}}">{{end}}
+<p class="hint">A Bitcoin signing service: an agent sends a PSBT and gets it back with this key's inputs signed. The key never leaves keyring and is never shown.</p>
+<label>Service name<input name="service" value="{{.Connect.Service}}" placeholder="e.g. btc-ord" autocapitalize="none" spellcheck="false"></label>
+{{template "bitcoinfields" .BitcoinForm}}
+<details><summary>Or paste settings</summary>
+<label>JSON like {"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest",{{if .BitcoinForm.WIF}}"script":"p2tr"{{else}}"paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"]{{end}}}}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
+<p class="hint">The service as access.json writes it works too: {"btc-ord":{"auth":"bitcoin-psbt-sign","key":"{{.Row.Name}}{{with .BitcoinKeyPart}}.{{.}}{{end}}","bitcoin":{…}}}. A "key" in it must be {{.Row.Name}}{{with .BitcoinKeyPart}}.{{.}}{{end}}. Pasted settings replace the fields above.</p>
+</details>
+{{template "password" .}}
+<div class="actions"><button>Connect</button></div>
+</form>{{else}}
 <form method="get" action="/keys/{{.Row.Name}}" class="presetpick"><label>Which API?<select name="preset" data-autosubmit>
 <option value=""{{if eq .Connect.Preset ""}} selected{{end}}>Other (fill in below)</option>
 {{range .Presets}}<option value="{{.ID}}"{{if eq .ID $.Connect.Preset}} selected{{end}}>{{.Label}}</option>{{end}}
@@ -153,7 +174,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 </details>
 {{template "password" .}}
 <div class="actions"><button>Connect</button></div>
-</form></details>
+</form>{{end}}</details>
 
 <div class="card" id="add-value"><h2>Add a value</h2>
 <p class="hint">It goes last in the list. Without a name it gets the next number{{if not .Row.Parts}}; this key's value becomes value 1 and services using {{.Row.Name}} change to {{.Row.Name}}.1{{end}}.</p>
@@ -356,11 +377,13 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <p class="hint">From the audit log, newest first, the last {{.SignatureDays}} days (up to 50). The audit never records a PSBT or a key.</p></div>{{end}}
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
-<p class="hint">Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.</p>
+<p class="hint">{{if .BitcoinForm}}Changes the signing rules and the project. Agents with their own grant for this service keep it, with the same paths and sats limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it and may sign with it, without sats limits (a project grant has none; give an agent its own grant for limits).{{else}}Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.{{end}}</p>
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>
-<label>Base URL<input name="base" value="{{.F.Base}}" inputmode="url" autocapitalize="none" spellcheck="false"></label>
+{{if .BitcoinForm}}<input type="hidden" name="auth" value="bitcoin-psbt-sign">
+{{template "bitcoinfields" .BitcoinForm}}
+{{else}}<label>Base URL<input name="base" value="{{.F.Base}}" inputmode="url" autocapitalize="none" spellcheck="false"></label>
 {{if eq .F.Auth "oauth2"}}<input type="hidden" name="auth" value="oauth2">
 <p class="hint">OAuth service: the key is the refresh token. An "invalid_client" from the provider means the client ID or secret below does not match its console.</p>
 <label>OAuth client ID<input name="client_id" value="{{.F.ClientID}}" autocapitalize="none" spellcheck="false"></label>
@@ -374,12 +397,14 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <div class="two"><label>Header (if a header)<input name="header" value="{{.F.Header}}" autocapitalize="none"></label>
 <label>Parameter (if a query)<input name="param" value="{{.F.Param}}" autocapitalize="none"></label></div>{{end}}
 <label>Test request path (optional; sent with the method shown above, {{.TestMethod}})<input name="test_path" value="{{.F.TestPath}}" autocapitalize="none" spellcheck="false"></label>
-<label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.F.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>
+<label>Pinned certificate SHA-256 (optional, only for a self-signed https service)<input name="tls_pin_sha256" value="{{.F.TLSPin}}" placeholder="64 hex characters" autocapitalize="none" spellcheck="false"></label>{{end}}
 <label>Project (optional: a client or engagement this service belongs to; lowercase letters, digits and -)<input name="project" value="{{.F.Project}}" placeholder="e.g. noted" autocapitalize="none" spellcheck="false"></label>
-<label class="check"><input type="checkbox" name="forward_role" value="yes"{{if .F.ForwardRole}} checked{{end}}> Tell the service which agent is calling (sends <span class="mono">X-Keyring-Role</span>; for services you run yourself, such as a build server)</label>
+{{if not .BitcoinForm}}<label class="check"><input type="checkbox" name="forward_role" value="yes"{{if .F.ForwardRole}} checked{{end}}> Tell the service which agent is calling (sends <span class="mono">X-Keyring-Role</span>; for services you run yourself, such as a build server)</label>{{end}}
 <details{{if .F.Pasted}} open{{end}}><summary>Or paste settings from an agent</summary>
-<label>JSON like {"base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
-<p class="hint">Replaces every setting above, including the project (include "project" to keep it), and the key stays as chosen. Leave "service" out; a service cannot be renamed here. "extra_headers" (header name to the name of another stored key, for example {"Modal-Secret":"MODAL_PROXY_SECRET"}) replaces the extra secret headers; leave it out to keep them, or use {} to remove them. The test method (shown above) is kept; change a POST test to something else in access.json. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>
+{{if .BitcoinForm}}<label>JSON like {"auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest",{{if .BitcoinForm.WIF}}"script":"p2tr"{{else}}"paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"]{{end}}}}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
+<p class="hint">Replaces the rules above and the project (include "project" to keep it); the key stays as chosen, and a "key" in the settings must be that key. The service as access.json writes it works too: {"{{.Name}}":{"auth":"bitcoin-psbt-sign","key":"{{.F.Key}}","bitcoin":{…}}}.</p>
+{{else}}<label>JSON like {"base":"https://…","auth":"bearer","test_path":"/…"}<textarea name="pasted" spellcheck="false" autocapitalize="none">{{.F.Pasted}}</textarea></label>
+<p class="hint">Replaces every setting above, including the project (include "project" to keep it), and the key stays as chosen. Leave "service" out; a service cannot be renamed here. "extra_headers" (header name to the name of another stored key, for example {"Modal-Secret":"MODAL_PROXY_SECRET"}) replaces the extra secret headers; leave it out to keep them, or use {} to remove them. The test method (shown above) is kept; change a POST test to something else in access.json. Optional fixed_headers sets up to two nonsecret header values, for example {"CF-R2-Jurisdiction":"default"}; without it the fixed headers are removed. Never put credentials here.</p>{{end}}
 </details>
 {{template "password" .}}
 <div class="actions"><button>Save</button></div>

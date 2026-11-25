@@ -7,11 +7,13 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/workspace"
 )
@@ -126,6 +128,21 @@ func (s *State) validateWorkspace(container bool) error {
 	return nil
 }
 
+// bitcoinKeyUses lists what in s would send a stored Bitcoin key though it
+// is not a Bitcoin signing service: services naming the key
+// (policy.BitcoinKeyUses), by name, then Workspace accounts whose refresh key
+// holds one, which the Workspace services send though no service names it,
+// by ID.
+func (s *State) bitcoinKeyUses(cfg *policy.Config) []policy.BitcoinKeyError {
+	uses := cfg.BitcoinKeyUses(s.Keys)
+	for _, id := range slices.Sorted(maps.Keys(s.WorkspaceAccounts)) {
+		if a := s.WorkspaceAccounts[id]; bitcoin.IsKey(s.Keys[a.Key]) {
+			uses = append(uses, policy.BitcoinKeyError{Account: a.Alias, Key: a.Key})
+		}
+	}
+	return uses
+}
+
 // reconcileWorkspace invalidates approvals when an existing admin writer
 // replaces credentials or client settings. Refreshing an access token is not a
 // state mutation and never changes this generation.
@@ -209,11 +226,19 @@ func (in *Instance) viewLocked(a workspace.Record) workspace.View {
 			v.Status = "identity_pending"
 		}
 	}
+	bitcoinRefused := slices.ContainsFunc(in.bitcoinUses, func(u policy.BitcoinKeyError) bool { return u.Account == a.Alias })
 	for _, name := range v.AffectedServices {
 		svc := s.Services[name]
 		svc.Key = a.Key
 		failure := ""
-		if connected && svc.OAuth2 != nil && in.proxy.WorkspaceRejected(svc, s.Keys[a.Key], s.Keys[svc.OAuth2.ClientSecretKey]) {
+		switch {
+		case connected && bitcoinRefused:
+			// Loaded with the state: refused at request time until the
+			// owner replaces or deletes the key.
+			failure = "bitcoin_key_refused"
+			v.Status = "reconnect_required"
+			v.Connected = false
+		case connected && svc.OAuth2 != nil && in.proxy.WorkspaceRejected(svc, s.Keys[a.Key], s.Keys[svc.OAuth2.ClientSecretKey]):
 			failure = "account_reconnect_required"
 			v.Status = "reconnect_required"
 			v.Connected = false

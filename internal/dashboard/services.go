@@ -1,9 +1,6 @@
 package dashboard
 
 import (
-	"encoding/json"
-	"errors"
-	"io"
 	"maps"
 	"net/http"
 	"slices"
@@ -23,9 +20,9 @@ func registerServices(b *Backend) {
 }
 
 // editableService reports whether the dashboard form can change the service
-// without losing settings it does not show. Static and OAuth services can;
-// sign-only, Google and egress-proxy services carry their own fields and stay
-// in access.json.
+// without losing settings it does not show. Static, OAuth and Bitcoin signing
+// services (#201) can; the other sign-only, Google and egress-proxy services
+// carry their own fields and stay in access.json.
 func editableService(svc policy.Service) bool {
 	switch svc.Auth {
 	case policy.AuthBearer, policy.AuthHeader, policy.AuthQuery:
@@ -33,6 +30,10 @@ func editableService(svc policy.Service) bool {
 			return false
 		}
 	case policy.AuthOAuth2:
+	case policy.AuthBitcoinPSBTSign:
+		if svc.Bitcoin == nil {
+			return false
+		}
 	default:
 		return false
 	}
@@ -56,11 +57,14 @@ type serviceForm struct {
 	// its value name, for the link to the key's page.
 	KeyPool bool
 	KeyBase string
+	// Bitcoin: a bitcoin-psbt-sign service's network, paths or script and
+	// sighash, from the form or pasted.
+	Bitcoin *policy.Bitcoin
 }
 
 func formOf(name string, svc policy.Service) serviceForm {
 	f := serviceForm{Name: name, Key: svc.Key, Base: svc.Base, Auth: svc.Auth, Scheme: svc.Scheme, Header: svc.Header, Param: svc.Param,
-		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole, KeyPool: svc.KeyPool}
+		TestPath: svc.TestPath, TLSPin: svc.TLSPinSHA256, Project: svc.Project, FixedHeaders: svc.FixedHeaders, ForwardRole: svc.ForwardRole, KeyPool: svc.KeyPool, Bitcoin: svc.Bitcoin}
 	f.KeyBase, _ = store.SplitPart(svc.Key)
 	if o := svc.OAuth2; o != nil {
 		f.ClientID, f.TokenURL, f.ClientSecretKey = o.ClientID, o.TokenURL, o.ClientSecretKey
@@ -145,6 +149,12 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	}
 	if svc.Auth == policy.AuthBitcoinPSBTSign {
 		maps.Copy(data, b.bitcoinPage(f.Name, svc))
+		shown := f.Bitcoin
+		if shown == nil {
+			shown = svc.Bitcoin
+		}
+		// The stored service tells a WIF key (script) from an extended one.
+		data["BitcoinForm"] = bitcoinFormOf(shown, svc.Bitcoin != nil && svc.Bitcoin.Script != "")
 	}
 	b.render(w, status, "service", sid, data)
 }
@@ -161,13 +171,24 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		ClientSecretKey: strings.TrimSpace(r.PostFormValue("client_secret_key")),
 		ForwardRole:     r.PostFormValue("forward_role") == "yes",
 	}
+	formProblem := ""
+	if f.Auth == policy.AuthBitcoinPSBTSign {
+		f.Bitcoin, formProblem = bitcoinFromForm(r)
+	}
 	again := func(status int, msg string) {
+		svc, ok := b.Proxy.Config().Services[name]
+		switch {
+		case ok && f.Pasted != "":
+			// A refused paste is one unit: none of it fills the form, which
+			// shows the stored settings again, so sending the form does not
+			// save part of the paste.
+			f = formOf(name, svc)
+		case ok:
+			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
+		}
 		// Refused pasted settings are not shown again: they may hold a value
 		// pasted by mistake (as Connect already does).
 		f.Pasted = ""
-		if svc, ok := b.Proxy.Config().Services[name]; ok {
-			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
-		}
 		b.renderService(w, sid, status, f, "", msg)
 	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
@@ -180,18 +201,11 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	var keyPool *bool            // nil: keep the stored key_pool
 	var extra *map[string]string // nil: keep the stored extra headers
 	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
+	pastedKey, pastedMethod := "", ""
 	if pasted {
-		var a agentSettings
-		dec := json.NewDecoder(strings.NewReader(f.Pasted))
-		dec.DisallowUnknownFields()
-		err := dec.Decode(&a)
-		if err == nil {
-			if _, extra := dec.Token(); extra != io.EOF {
-				err = errors.New("text after the settings")
-			}
-		}
-		if err != nil {
-			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
+		a, msg := decodeSettings(f.Pasted)
+		if msg != "" {
+			again(http.StatusBadRequest, msg)
 			return
 		}
 		if a.Service != "" && a.Service != name {
@@ -200,6 +214,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		}
 		f.Base, f.Auth, f.Scheme, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Scheme, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
 		fixed, extra, oauth, forwardRole, keyPool = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole, a.KeyPool
+		f.Bitcoin, pastedKey, pastedMethod = a.Bitcoin, a.Key, a.TestMethod
+	} else if formProblem != "" {
+		again(http.StatusBadRequest, formProblem)
+		return
 	} else if f.Auth != policy.AuthBearer {
 		f.Scheme = "" // the form's scheme box belongs to the bearer choice
 	}
@@ -228,6 +246,12 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		again(http.StatusBadRequest, "An OAuth service stays OAuth, and a static one stays static. Connect a new service for the other kind.")
 		return
 	}
+	// A Bitcoin signing service stays one: the other kinds forward calls
+	// with the key, and this key is never sent anywhere.
+	if (cur.Auth == policy.AuthBitcoinPSBTSign) != (f.Auth == policy.AuthBitcoinPSBTSign) {
+		again(http.StatusBadRequest, "A Bitcoin signing service stays one, and another service does not become one. Connect a new service for the other kind.")
+		return
+	}
 	pool := cur.KeyPool
 	if keyPool != nil {
 		pool = *keyPool
@@ -236,6 +260,16 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		// A pool names the key itself; one of its values offered by the
 		// menu stands for its key.
 		f.Key, _ = store.SplitPart(f.Key)
+	}
+	// A pasted "key" (as access.json names it) must be the key chosen
+	// above; it is not repeated, as it may be a value pasted by mistake.
+	if pastedKey != "" && pastedKey != f.Key {
+		again(http.StatusBadRequest, "The pasted settings name another key in \"key\" than "+f.Key+". Pick the key under Key, or leave \"key\" out.")
+		return
+	}
+	if msg := testMethodKept(pastedMethod, cur.TestMethod); msg != "" {
+		again(http.StatusBadRequest, msg)
+		return
 	}
 	if f.Key != cur.Key || pool != cur.KeyPool {
 		pools, values, _, err := b.keyChoices()
@@ -263,6 +297,11 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		if keyPool != nil {
 			updated.KeyPool = *keyPool
 		}
+	}
+	if pasted || cur.Auth == policy.AuthBitcoinPSBTSign {
+		// Pasted settings without "bitcoin" remove it, so validation
+		// refuses a Bitcoin service left without its settings.
+		updated.Bitcoin = f.Bitcoin
 	}
 	if cur.Auth == policy.AuthOAuth2 {
 		next := *cur.OAuth2
@@ -333,8 +372,13 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := b.saveAndApply(next); err != nil {
+	msg, err := b.saveChecked(next, name)
+	if err != nil {
 		b.fail(w, sid, err)
+		return
+	}
+	if msg != "" {
+		again(http.StatusBadRequest, msg)
 		return
 	}
 	fields := map[string]any{"service": name, "key": updated.Key, "changed": changed}
@@ -365,5 +409,5 @@ func changedFields(old, now policy.Service) []string {
 			changed = append(changed, c.name)
 		}
 	}
-	return changed
+	return append(changed, bitcoinChanges(old.Bitcoin, now.Bitcoin)...)
 }

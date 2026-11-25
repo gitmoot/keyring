@@ -44,3 +44,5 @@ There are two settings files.
 A rules file from before the split still holds `services` and `roles`. The service refuses it until you run `keyring migrate --config rules.json --access /absolute/path/access.json`, which moves them into the access file. Running it again does nothing.
 
 `SIGHUP` re-reads the rules file, the access file and the keys. A change to `allow_sources` applies at once; a changed `listen`, `audit_log` or `access_file`, or an invalid file, is refused, and the previous settings stay in use. Daily counts carry over.
+
+A stored Bitcoin private key (`tprv`/`xprv`/WIF) can only be used by a `bitcoin-psbt-sign` service: `check`, the start and `SIGHUP` refuse settings in which another service would use one, and `keyring set` stores one only with `--config rules.json`, to check that first. See [bitcoin.md](bitcoin.md).

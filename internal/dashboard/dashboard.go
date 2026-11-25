@@ -5,6 +5,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -321,6 +324,25 @@ func (r keyRow) valueNames() []string {
 		out = append(out, p.Full)
 	}
 	return out
+}
+
+// soleValue is the stored name (KEY, or KEY.part) of row's one stored value;
+// ok is false when it has none or several. Connect's page and its
+// submission both use it: settings that leave the value out mean it.
+func (r keyRow) soleValue() (name string, ok bool) {
+	var stored []string
+	if r.baseStored {
+		stored = append(stored, r.Name)
+	}
+	for _, p := range r.Parts {
+		if p.HasValue {
+			stored = append(stored, p.Full)
+		}
+	}
+	if len(stored) != 1 {
+		return "", false
+	}
+	return stored[0], true
 }
 
 // grant is an agent's access to a key, for the chips in the keys table.
@@ -1164,6 +1186,13 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 			return
 		}
 	}
+	// A service may wait for this name already: no service but a Bitcoin
+	// signing service may get a Bitcoin key.
+	maps.Copy(keys, values)
+	if err := b.Proxy.CheckBitcoinChange(b.Proxy.Config().AccessList, keys); err != nil {
+		b.renderNewKey(w, sid, http.StatusBadRequest, name, err.Error())
+		return
+	}
 	// The key notes hold the value order a key pool follows: they are
 	// written before the values are stored, so a pool never sends the new
 	// values in another order, and put back if storing fails.
@@ -1186,7 +1215,6 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	maps.Copy(keys, values)
 	b.Proxy.SwapWithOrder(b.Proxy.Config(), keys, valueOrder(meta))
 	fields := map[string]any{"key": name}
 	if _, plain := values[name]; !plain {
@@ -1213,6 +1241,8 @@ type connectForm struct {
 	OAuth2      *policy.OAuth2
 	ForwardRole bool
 	KeyPool     bool
+	// Bitcoin: the settings of a bitcoin-psbt-sign service (#201).
+	Bitcoin *policy.Bitcoin
 }
 
 // agentSettings is what an agent may hand the owner to paste: the same
@@ -1249,6 +1279,127 @@ type agentSettings struct {
 	// OAuth2 makes an "oauth2" service: the key is the refresh token, and
 	// client_secret_key names another stored key (never a value).
 	OAuth2 *policy.OAuth2 `json:"oauth2,omitempty"`
+	// Key names the key as access.json does. Pasted on a key's page it must
+	// be that key (or one of its values); on a service's page, the key
+	// chosen there.
+	Key string `json:"key,omitempty"`
+	// Bitcoin makes a "bitcoin-psbt-sign" service: network, paths or
+	// script, sighash (#201).
+	Bitcoin *policy.Bitcoin `json:"bitcoin,omitempty"`
+	// TestMethod is taken so a service copied from access.json pastes as
+	// it is; the dashboard does not change it (see testMethodKept).
+	TestMethod string `json:"test_method,omitempty"`
+}
+
+// pasteHelp is what a refused paste is told the settings look like.
+const pasteHelp = `Paste one service's settings as JSON, like {"service":"name","auth":"bearer","base":"https://…"}; for a Bitcoin key: {"service":"name","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"]}}.`
+
+var errTextAfter = errors.New("text after the settings")
+
+// hasAuth reports whether the JSON object has an "auth" member, its name
+// matched as encoding/json matches field names (case-insensitively).
+func hasAuth(object json.RawMessage) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(object, &members) != nil {
+		return false
+	}
+	for name := range members {
+		if strings.EqualFold(name, "auth") {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeSettings reads pasted settings. Besides the settings themselves it
+// takes one service the way access.json writes it, {"name":{...}} or the
+// line "name": {...} copied from the file, and the name is then the
+// service's. A refused paste gets plain text naming at most a field, never
+// a value: a secret pasted by mistake is not repeated.
+func decodeSettings(pasted string) (agentSettings, string) {
+	a, err := decodeStrict(pasted)
+	if err == nil {
+		return a, ""
+	}
+	copied := strings.HasPrefix(pasted, `"`)
+	outer := pasted
+	if copied {
+		outer = "{" + strings.TrimSuffix(pasted, ",") + "}"
+	}
+	var named map[string]json.RawMessage
+	if json.Unmarshal([]byte(outer), &named) == nil && len(named) == 1 {
+		for name, inner := range named {
+			if !bytes.HasPrefix(bytes.TrimSpace(inner), []byte("{")) {
+				break
+			}
+			a, innerErr := decodeStrict(string(inner))
+			if innerErr != nil {
+				// A braced member named like a settings field (a service
+				// called "bitcoin") may be flat settings with a bad field
+				// instead: it is a service entry when it has the "auth"
+				// every service has (matched as the decoder matches), and
+				// copied lines always are.
+				if !copied && settingsField(name) && !hasAuth(inner) {
+					break // flat settings: their error says which field
+				}
+				return agentSettings{}, pasteProblem(innerErr)
+			}
+			if a.Service != "" && a.Service != name {
+				return agentSettings{}, "The pasted settings name two services. Paste one service's settings."
+			}
+			a.Service = name
+			return a, ""
+		}
+	}
+	return agentSettings{}, pasteProblem(err)
+}
+
+// testMethodKept returns the message for a pasted test_method other than
+// the one the service keeps (have; "" is GET): it is set in access.json.
+func testMethodKept(pasted, have string) string {
+	if pasted == "" || strings.EqualFold(pasted, cmp.Or(have, http.MethodGet)) {
+		return ""
+	}
+	return "The test method is set in access.json, not here: leave \"test_method\" out, or give the one shown on the service's page."
+}
+
+func decodeStrict(text string) (agentSettings, error) {
+	var a agentSettings
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return a, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return a, errTextAfter
+	}
+	return a, nil
+}
+
+// settingsField reports whether name is a field of agentSettings, matched
+// as encoding/json does (case-insensitively).
+func settingsField(name string) bool {
+	t := reflect.TypeFor[agentSettings]()
+	for i := range t.NumField() {
+		if tag, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); strings.EqualFold(tag, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// pasteProblem is the plain text for a paste that does not decode.
+func pasteProblem(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case errors.Is(err, errTextAfter):
+		return "There is text after the pasted settings. " + pasteHelp
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		return "The pasted settings have an " + strings.TrimPrefix(err.Error(), "json: ") + ". " + pasteHelp
+	case errors.As(err, &typeErr) && typeErr.Field != "":
+		return "In the pasted settings, " + strconv.Quote(typeErr.Field) + " has the wrong type. " + pasteHelp
+	}
+	return "The pasted settings are not valid. " + pasteHelp
 }
 
 // extraHeaderKeys checks that every key named in extra (header -> key name)
@@ -1336,23 +1487,47 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			f.PartHeaders[part] = strings.TrimSpace(values[0])
 		}
 	}
-	again := func(status int, msg string) { b.renderKey(w, r, sid, status, name, f, msg) }
+	formProblem := ""
+	if f.Auth == policy.AuthBitcoinPSBTSign {
+		f.Bitcoin, formProblem = bitcoinFromForm(r)
+	}
+	again := func(status int, msg string) {
+		if f.Pasted != "" {
+			// A refused paste is one unit: none of it fills the form, and
+			// no preset either, so sending the form again saves nothing
+			// until it is filled in or a paste is accepted.
+			f = b.connectFormFor(name, "")
+		}
+		b.renderKey(w, r, sid, status, name, f, msg)
+	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		again(http.StatusForbidden, "Enter your dashboard password to connect the key.")
 		return
 	}
 	if f.Pasted != "" {
-		var a agentSettings
-		dec := json.NewDecoder(strings.NewReader(f.Pasted))
-		dec.DisallowUnknownFields()
-		err := dec.Decode(&a)
-		if err == nil {
-			if _, extra := dec.Token(); extra != io.EOF {
-				err = errors.New("text after the settings")
+		a, msg := decodeSettings(f.Pasted)
+		if msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
+		}
+		// The pasted key, as access.json names it, must be this page's key;
+		// "NAME.part" picks the value, like key_part. It is never repeated:
+		// it may be a value pasted by mistake.
+		if a.Key != "" {
+			base, part := store.SplitPart(a.Key)
+			switch {
+			case base != name:
+				again(http.StatusBadRequest, "The pasted settings name another key in \"key\". Connect them from that key's page, or leave \"key\" out to connect "+name+".")
+				return
+			case part != "" && a.KeyPart != "" && part != a.KeyPart:
+				again(http.StatusBadRequest, "The pasted \"key\" and \"key_part\" name different values. Leave one of them out.")
+				return
+			case part != "":
+				a.KeyPart = part
 			}
 		}
-		if err != nil {
-			again(http.StatusBadRequest, "The pasted settings are not valid: "+err.Error())
+		if msg := testMethodKept(a.TestMethod, ""); msg != "" {
+			again(http.StatusBadRequest, msg)
 			return
 		}
 		f.Service, f.Base, f.Auth, f.Scheme, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Scheme, a.Header, a.Param, a.TestPath, a.TLSPin
@@ -1360,8 +1535,15 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		if a.ExtraHeaders != nil {
 			f.ExtraHeaders = *a.ExtraHeaders
 		}
-		f.APNs, f.SignInWithApple, f.KeyPart, f.OAuth2 = a.APNs, a.SignInWithApple, a.KeyPart, a.OAuth2
+		f.APNs, f.SignInWithApple, f.KeyPart, f.OAuth2, f.Bitcoin = a.APNs, a.SignInWithApple, a.KeyPart, a.OAuth2, a.Bitcoin
 		f.PartHeaders = nil
+	} else if formProblem != "" {
+		again(http.StatusBadRequest, formProblem)
+		return
+	}
+	if f.Service == "" {
+		again(http.StatusBadRequest, "Name the service.")
+		return
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
@@ -1371,13 +1553,23 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		return
 	}
 	keyName := name
+	sole, hasSole := row.soleValue()
+	_, solePart := store.SplitPart(sole)
 	switch {
 	case f.KeyPool && f.KeyPart != "":
 		again(http.StatusBadRequest, "Leave key_part out: a key pool uses the values of "+name+" in list order.")
 		return
 	case f.KeyPool:
 		// The pool names the key itself; its values are tried in list order.
+	case f.KeyPart == "" && hasSole && solePart == "":
+		// The plain value is the one stored value (services may name values
+		// not stored yet): settings that leave the value out mean it, as the
+		// page that offers them does.
 	case len(row.Parts) > 0:
+		// Settings that leave the value out mean the one stored value.
+		if f.KeyPart == "" && hasSole {
+			f.KeyPart = solePart
+		}
 		has := map[string]bool{}
 		for _, p := range row.Parts {
 			has[p.Name] = true
@@ -1447,13 +1639,19 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if len(f.ExtraHeaders) > 0 {
 		extra = f.ExtraHeaders
 	}
-	next.Services[f.Service] = policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Scheme: f.Scheme, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, ForwardRole: f.ForwardRole, KeyPool: f.KeyPool, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2}
+	svc := policy.Service{Base: f.Base, Key: keyName, Auth: f.Auth, Scheme: f.Scheme, Header: f.Header, Param: f.Param, TestPath: f.TestPath, TLSPinSHA256: f.TLSPin, FixedHeaders: f.FixedHeaders, ExtraHeaders: extra, Project: f.Project, ForwardRole: f.ForwardRole, KeyPool: f.KeyPool, APNs: f.APNs, SignInWithApple: f.SignInWithApple, OAuth2: f.OAuth2, Bitcoin: f.Bitcoin}
+	next.Services[f.Service] = svc
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := b.saveAndApply(next); err != nil {
+	msg, err := b.saveChecked(next, f.Service)
+	if err != nil {
 		b.fail(w, sid, err)
+		return
+	}
+	if msg != "" {
+		again(http.StatusBadRequest, msg)
 		return
 	}
 	fields := map[string]any{"key": keyName, "service": f.Service, "base": f.Base}
@@ -1465,7 +1663,8 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 }
 
 // apply loads the saved access file and keys and swaps them into the proxy,
-// with the running rules. Callers hold b.Mu.
+// with the running rules, as a reload does: a stored Bitcoin key a proxy
+// service would use is refused at request time. Callers hold b.Mu.
 func (b *Backend) apply() error {
 	access, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
@@ -1509,10 +1708,22 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	}
 	meta, _ := b.loadMeta()
 	info, never := neverShown(b.Proxy.Config(), row, values)
+	// A key with one stored value that is a Bitcoin key connects to a
+	// bitcoin-psbt-sign service only, so its page offers that form instead
+	// of the API one (#201), sending that value's name when it has one. A
+	// key with several values keeps the API form, whatever its values are;
+	// Bitcoin settings for one of them are pasted. With one stored value,
+	// info describes it.
+	var btc *bitcoinForm
+	btcPart := ""
+	if sole, ok := row.soleValue(); ok && info != nil {
+		btc = bitcoinFormOf(f.Bitcoin, info.WIF)
+		_, btcPart = store.SplitPart(sole)
+	}
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
 		"Notice": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"), "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
-		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never,
+		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never, "BitcoinForm": btc, "BitcoinKeyPart": btcPart,
 	})
 }
 
@@ -1716,11 +1927,14 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.fail(w, sid, err)
 		return
 	}
+	keys[target] = value
+	if refusedBitcoinKey(w, r, name, b.Proxy.CheckBitcoinChange(b.Proxy.Config().AccessList, keys)) {
+		return
+	}
 	if err := store.Set(b.StorePath, target, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	keys[target] = value
 	// Live at once with the running config, as upload does: nothing can fail
 	// after the value is stored, so the store and the keyring agree (#128).
 	b.Proxy.Swap(b.Proxy.Config(), keys)

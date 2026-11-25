@@ -437,6 +437,44 @@ func TestParseKey(t *testing.T) {
 	}
 }
 
+// IsKey agrees with Inspect, and neither decodes a value longer than a key:
+// every stored value is checked, and Base58 decoding takes time quadratic in
+// the length (review of #204).
+func TestIsKey(t *testing.T) {
+	master, err := hdkeychain.NewKeyFromString(bitcointest.Master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := master.Neuter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for value, want := range map[string]bool{
+		bitcointest.Master:             true,
+		bitcointest.MasterMainnet:      true,
+		bitcointest.WIF:                true,
+		" " + bitcointest.WIF + "\n":   true,
+		public.String():                false,
+		bitcointest.Master[:110] + "x": false,
+		bitcointest.WIF + "1":          false,
+		"sk-ant-api03-notabitcoinkey":  false,
+		"":                             false,
+	} {
+		_, inspected := Inspect(value)
+		if got := IsKey(value); got != want || inspected != want {
+			t.Fatalf("IsKey(%.8s...) = %v, Inspect %v; want %v", value, got, inspected, want)
+		}
+	}
+	long := strings.Repeat("z", 1<<14)
+	found := false
+	if n := testing.AllocsPerRun(3, func() {
+		_, inspected := Inspect(long)
+		found = found || inspected || IsKey(long)
+	}); n != 0 || found {
+		t.Fatalf("a %d-character credential was decoded (%v allocations, found %v)", len(long), n, found)
+	}
+}
+
 func TestDescribe(t *testing.T) {
 	d, err := Describe(bitcointest.Master+"\n", Regtest)
 	if err != nil {

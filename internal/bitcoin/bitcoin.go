@@ -41,16 +41,39 @@ const (
 	ScriptP2WPKH = "p2wpkh" // BIP84 native segwit v0
 )
 
-// Sighash names a service may allow. "default" is the taproot-only
-// SIGHASH_DEFAULT; a P2WPKH input without a sighash field signs ALL.
-var sighashNames = map[string]txscript.SigHashType{
-	"default":             txscript.SigHashDefault,
-	"all":                 txscript.SigHashAll,
-	"none":                txscript.SigHashNone,
-	"single":              txscript.SigHashSingle,
-	"all|anyonecanpay":    txscript.SigHashAll | txscript.SigHashAnyOneCanPay,
-	"none|anyonecanpay":   txscript.SigHashNone | txscript.SigHashAnyOneCanPay,
-	"single|anyonecanpay": txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+// sighashTypes are the sighash names a service may allow, in the order the
+// dashboard offers them. "default" is the taproot-only SIGHASH_DEFAULT; a
+// P2WPKH input without a sighash field signs ALL.
+var sighashTypes = []struct {
+	name string
+	t    txscript.SigHashType
+}{
+	{"default", txscript.SigHashDefault},
+	{"all", txscript.SigHashAll},
+	{"none", txscript.SigHashNone},
+	{"single", txscript.SigHashSingle},
+	{"all|anyonecanpay", txscript.SigHashAll | txscript.SigHashAnyOneCanPay},
+	{"none|anyonecanpay", txscript.SigHashNone | txscript.SigHashAnyOneCanPay},
+	{"single|anyonecanpay", txscript.SigHashSingle | txscript.SigHashAnyOneCanPay},
+}
+
+// SighashChoices lists the sighash names a service may allow, in order.
+func SighashChoices() []string {
+	names := make([]string, len(sighashTypes))
+	for i, s := range sighashTypes {
+		names[i] = s.name
+	}
+	return names
+}
+
+// sighashType returns the type a sighash name stands for.
+func sighashType(name string) (txscript.SigHashType, bool) {
+	for _, s := range sighashTypes {
+		if s.name == name {
+			return s.t, true
+		}
+	}
+	return 0, false
 }
 
 // DefaultSighash is what a service allows when it lists none.
@@ -222,29 +245,32 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 	// The addresses call names a path by its fixed part, so no two paths may
 	// share it (m/86'/1'/0'/0 and m/86'/1'/0'/0/* would make the answer
 	// depend on their order).
-	seen := map[string]string{}
-	for _, s := range paths {
+	seen := map[string]int{}
+	// Settings are named by their place in the list, never quoted: the
+	// messages reach the dashboard, and a key pasted into the wrong field
+	// must not be shown back.
+	for i, s := range paths {
 		path, err := ParsePath(s)
 		if err != nil {
-			return nil, fmt.Errorf("path %q: %w", s, err)
+			return nil, fmt.Errorf("path %d: %w", i+1, err)
 		}
 		lookup := formatPath(path.fixed)
 		if other, ok := seen[lookup]; ok {
-			return nil, fmt.Errorf("paths %q and %q are both looked up as %s: list one", other, s, lookup)
+			return nil, fmt.Errorf("paths %d and %d are both looked up as %s: list one", other, i+1, lookup)
 		}
-		seen[lookup] = s
+		seen[lookup] = i + 1
 		r.paths = append(r.paths, path)
 	}
 	if len(sighash) == 0 {
 		sighash = DefaultSighash
 	}
-	for _, name := range sighash {
-		t, ok := sighashNames[name]
+	for i, name := range sighash {
+		t, ok := sighashType(name)
 		if !ok {
-			return nil, fmt.Errorf("sighash %q: want default, all, none, single, or one of those three with |anyonecanpay", name)
+			return nil, fmt.Errorf("sighash %d: want default, all, none, single, or one of those three with |anyonecanpay", i+1)
 		}
 		if r.sighash[t] {
-			return nil, fmt.Errorf("sighash %q is listed twice", name)
+			return nil, fmt.Errorf("sighash %d is listed twice", i+1)
 		}
 		r.sighash[t] = true
 	}
@@ -400,17 +426,51 @@ type Info struct {
 	Fingerprint string
 	Kind        string // "BIP32 master key", "BIP32 key at depth N", "WIF key"
 	Networks    string // "test networks" or "mainnet"
+	WIF         bool   // a single key, signing for a script rather than paths
 }
 
-// Inspect reports whether value is a bitcoin private key (any network) and
-// what may be shown about it. The dashboard never shows such a value.
-func Inspect(value string) (Info, bool) {
+// maxWIFLength is the longest WIF key: 52 Base58 characters (compressed).
+// Nothing longer is decoded as one; Base58 decoding takes time quadratic in
+// the length, and every stored value is checked (IsKey).
+const maxWIFLength = 52
+
+// recognise is the one test of whether value is a bitcoin private key (any
+// network): it returns the extended private key or the WIF key value is,
+// both nil when it is neither. IsKey and Inspect both use it.
+func recognise(value string) (*hdkeychain.ExtendedKey, *btcutil.WIF) {
 	value = strings.TrimSpace(value)
 	if isExtended(value) {
 		ext, err := hdkeychain.NewKeyFromString(value)
 		if err != nil || !ext.IsPrivate() {
-			return Info{}, false
+			return nil, nil
 		}
+		return ext, nil
+	}
+	if len(value) > maxWIFLength {
+		return nil, nil
+	}
+	wif, err := btcutil.DecodeWIF(value)
+	if err != nil {
+		return nil, nil
+	}
+	return nil, wif
+}
+
+// IsKey reports whether value is a bitcoin private key (any network),
+// without deriving what Inspect shows. It is the check that keeps a Bitcoin
+// key from every service but a Bitcoin signing one.
+func IsKey(value string) bool {
+	ext, wif := recognise(value)
+	return ext != nil || wif != nil
+}
+
+// Inspect reports whether value is a bitcoin private key (any network), as
+// IsKey does, and what may be shown about it. The dashboard never shows such
+// a value.
+func Inspect(value string) (Info, bool) {
+	ext, wif := recognise(value)
+	switch {
+	case ext != nil:
 		info := Info{Kind: "BIP32 master key", Networks: "mainnet"}
 		if ext.Depth() != 0 {
 			info.Kind = fmt.Sprintf("BIP32 key at depth %d", ext.Depth())
@@ -422,16 +482,14 @@ func Inspect(value string) (Info, bool) {
 			info.Fingerprint = hex.EncodeToString(address.Hash160(pub.SerializeCompressed())[:4])
 		}
 		return info, true
+	case wif != nil:
+		info := Info{Kind: "WIF key", Networks: "mainnet", WIF: true, Fingerprint: hex.EncodeToString(address.Hash160(wif.SerializePubKey())[:4])}
+		if wif.IsForNet(&chaincfg.TestNet3Params) {
+			info.Networks = "test networks"
+		}
+		return info, true
 	}
-	wif, err := btcutil.DecodeWIF(value)
-	if err != nil {
-		return Info{}, false
-	}
-	info := Info{Kind: "WIF key", Networks: "mainnet", Fingerprint: hex.EncodeToString(address.Hash160(wif.SerializePubKey())[:4])}
-	if wif.IsForNet(&chaincfg.TestNet3Params) {
-		info.Networks = "test networks"
-	}
-	return info, true
+	return Info{}, false
 }
 
 // Description is what the import command shows the owner to check.

@@ -219,3 +219,17 @@ func reloadMessage(cfg *policy.Config, err error, keysMissing []string) string {
 	}
 	return msg
 }
+
+// bitcoinKeyWarnings are the lines serve and a reload log for each stored
+// Bitcoin key a service other than a Bitcoin signing service would use
+// (policy.BitcoinKeyUses). They do not stop the keyring: every other
+// service keeps working, the proxy refuses those calls before anything is
+// sent, and the owner fixes the key or the service in the dashboard. Changes
+// that would add such a use are refused.
+func bitcoinKeyWarnings(cfg *policy.Config, keys map[string]string) []string {
+	var lines []string
+	for _, u := range cfg.BitcoinKeyUses(keys) {
+		lines = append(lines, "warning: "+u.Error()+"; its calls are refused until the key or the service is changed")
+	}
+	return lines
+}

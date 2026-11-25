@@ -95,9 +95,9 @@ func (k *Key) own(r *Rules, bip32 []*psbt.Bip32Derivation, tap []*psbt.TaprootBi
 
 // sighashName names t for the refusal text; "" for a type that is not one.
 func sighashName(t txscript.SigHashType) string {
-	for name, v := range sighashNames {
-		if v == t {
-			return name
+	for _, s := range sighashTypes {
+		if s.t == t {
+			return s.name
 		}
 	}
 	return ""

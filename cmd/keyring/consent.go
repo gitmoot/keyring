@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -31,7 +30,7 @@ type storeKeys struct {
 func (k storeKeys) Load() (map[string]string, error) { return store.Load(k.path) }
 
 func (k storeKeys) Set(name, value string) error {
-	return k.change(name, false, func() error { return store.Set(k.path, name, value) })
+	return k.set(map[string]string{name: value})
 }
 
 func (k storeKeys) Delete(name string) error {
@@ -39,12 +38,30 @@ func (k storeKeys) Delete(name string) error {
 }
 
 func (k storeKeys) SetAll(values map[string]string) error {
+	return k.set(values)
+}
+
+// set stores values and puts them in force. The store write itself checks
+// the map it is about to write, so the change gives no service but a Bitcoin
+// signing service a Bitcoin key (server.Handler.CheckBitcoinChange), and
+// that same map is written and swapped into the proxy (store.SetChecked).
+func (k storeKeys) set(values map[string]string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if err := store.SetAll(k.path, values); err != nil {
+	cfg := k.proxy.Config()
+	keys, err := store.SetChecked(k.path, values, func(keys map[string]string) error {
+		return k.proxy.CheckBitcoinChange(cfg.AccessList, keys)
+	})
+	if err != nil {
 		return err
 	}
-	return k.applyBundle(maps.Keys(values), false)
+	k.proxy.Swap(cfg, keys)
+	for name := range values {
+		if err := dashboardpkg.NoteKeyChange(k.metaPath, name, false, time.Now()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (k storeKeys) DeleteAll(names []string) error {

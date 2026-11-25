@@ -22,7 +22,8 @@ import (
 // a page, a message, the key notes or the audit log.
 
 // keyEditErrors are the messages for the ?error= codes of these forms.
-// {service} is replaced by the service named in ?service=.
+// {service} is replaced by the service named in ?service=, {value} by the
+// store name in ?value=.
 var keyEditErrors = map[string]string{
 	"name":          "The new name must be letters, digits and _, not starting with a digit.",
 	"name-taken":    "A key with that name exists already. Pick another name.",
@@ -32,6 +33,7 @@ var keyEditErrors = map[string]string{
 	"value-plain":   "This key has one value without a name. Add a second value to give both numbers.",
 	"value-only":    "This is the key's only value. To remove it, use Delete below.",
 	"value-used":    "{service} sends this value. Change or remove that service first, then remove the value.",
+	"bitcoin-key":   "{service} would use {value}, which is a Bitcoin key: it can only be used by a Bitcoin signing service. Nothing was saved.",
 	"label":         fmt.Sprintf("A label is at most %d characters, on one line.", maxLabel),
 	"too-many":      fmt.Sprintf("A key has at most %d values. Remove one first.", maxParts),
 }
@@ -39,16 +41,35 @@ var keyEditErrors = map[string]string{
 // keyEditError is the message for an error code of these forms, or "".
 func (b *Backend) keyEditError(q url.Values) string {
 	msg := keyEditErrors[q.Get("error")]
-	if !strings.Contains(msg, "{service}") {
-		return msg
-	}
-	svc := "A service"
-	if name := q.Get("service"); name != "" {
-		if _, ok := b.Proxy.Config().Services[name]; ok {
-			svc = "Service " + name
+	if strings.Contains(msg, "{service}") {
+		svc := "A service"
+		if name := q.Get("service"); name != "" {
+			if _, ok := b.Proxy.Config().Services[name]; ok {
+				svc = "Service " + name
+			}
 		}
+		msg = strings.ReplaceAll(msg, "{service}", svc)
 	}
-	return strings.ReplaceAll(msg, "{service}", svc)
+	if strings.Contains(msg, "{value}") {
+		value := "a value"
+		if name := q.Get("value"); store.ValidName(name) {
+			value = name
+		}
+		msg = strings.ReplaceAll(msg, "{value}", value)
+	}
+	return msg
+}
+
+// refusedBitcoinKey sends the browser back to key name's page with the
+// message for err when it is a *policy.BitcoinKeyError, and reports whether
+// it did.
+func refusedBitcoinKey(w http.ResponseWriter, r *http.Request, name string, err error) bool {
+	var refused *policy.BitcoinKeyError
+	if !errors.As(err, &refused) {
+		return false
+	}
+	http.Redirect(w, r, "/keys/"+name+"?"+url.Values{"error": {"bitcoin-key"}, "service": {refused.Service}, "value": {refused.Key}}.Encode(), http.StatusSeeOther)
+	return true
 }
 
 // connectRedirect sends a browser that opened the connect form's address
@@ -99,8 +120,10 @@ func renameRefs(access *policy.AccessList, moves map[string]string) []string {
 // moveValues renames stored values (old name -> new name), adds new ones
 // (name -> value), points every service reference at the new names and
 // applies notes to the key notes, which hold each key's value order; it
-// returns the services changed. The new access list is checked before
-// anything is written. The key notes are written first. When no service
+// returns the services changed. The new access list, and the keys it puts
+// in force (a *policy.BitcoinKeyError if a service other than a Bitcoin
+// signing service would use a Bitcoin key), are checked before anything is
+// written. The key notes are written first. When no service
 // reference moves, the store then changes in one atomic write. Otherwise
 // the store gets the values under their new names while keeping the old
 // ones, then the access list is written, and only then are the old names
@@ -124,6 +147,31 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 	if err != nil {
 		return nil, err
 	}
+	stored := map[string]string{}
+	put := maps.Clone(add)
+	if put == nil {
+		put = map[string]string{}
+	}
+	for from, to := range moves {
+		if v, ok := keys[from]; ok {
+			stored[from] = to
+			put[to] = v
+		}
+	}
+	// The keys the proxy gets: no service but a Bitcoin signing service may
+	// use a Bitcoin key in them (an added value joins a key pool).
+	after := maps.Clone(keys)
+	for from := range stored {
+		delete(after, from)
+	}
+	maps.Copy(after, put)
+	inForce := b.Proxy.Config().AccessList
+	if len(services) > 0 {
+		inForce = next
+	}
+	if err := b.Proxy.CheckBitcoinChange(inForce, after); err != nil {
+		return nil, err
+	}
 	before, err := b.loadMeta()
 	if err != nil {
 		return nil, err
@@ -139,28 +187,13 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 		}
 		return err
 	}
-	stored := map[string]string{}
-	put := maps.Clone(add)
-	if put == nil {
-		put = map[string]string{}
-	}
-	for from, to := range moves {
-		if v, ok := keys[from]; ok {
-			stored[from] = to
-			put[to] = v
-		}
-	}
 	if len(services) == 0 {
 		if len(put) > 0 {
 			if err := store.Move(b.StorePath, stored, add); err != nil {
 				return nil, undo(err)
 			}
 		}
-		for from := range stored {
-			delete(keys, from)
-		}
-		maps.Copy(keys, put)
-		b.Proxy.SwapWithOrder(b.Proxy.Config(), keys, valueOrder(meta))
+		b.Proxy.SwapWithOrder(b.Proxy.Config(), after, valueOrder(meta))
 		return nil, nil
 	}
 	if len(put) > 0 {
@@ -314,7 +347,9 @@ func (b *Backend) addValue(w http.ResponseWriter, r *http.Request, sid string) {
 	notes = append(notes, ValueNote{Name: part, Label: label})
 	services, err := b.moveValues(moves, map[string]string{target: value}, func(meta map[string]KeyMeta) { setNotes(meta, name, notes, last) })
 	if err != nil {
-		b.fail(w, sid, err)
+		if !refusedBitcoinKey(w, r, name, err) {
+			b.fail(w, sid, err)
+		}
 		return
 	}
 	b.Admin.Audit("key_value_added", sid, map[string]any{"key": target, "moved": moves, "services": services})
@@ -415,7 +450,9 @@ func (b *Backend) renameKey(w http.ResponseWriter, r *http.Request, sid string) 
 	}
 	services, err := b.moveValues(moves, nil, func(meta map[string]KeyMeta) { moveNotes(meta, moves) })
 	if err != nil {
-		b.fail(w, sid, err)
+		if !refusedBitcoinKey(w, r, name, err) {
+			b.fail(w, sid, err)
+		}
 		return
 	}
 	b.Admin.Audit("key_renamed", sid, map[string]any{"key": name, "new_name": newName, "services": services})
@@ -460,7 +497,9 @@ func (b *Backend) renameValue(w http.ResponseWriter, r *http.Request, sid string
 		setNotes(meta, name, notes, last)
 	})
 	if err != nil {
-		b.fail(w, sid, err)
+		if !refusedBitcoinKey(w, r, name, err) {
+			b.fail(w, sid, err)
+		}
 		return
 	}
 	b.Admin.Audit("key_value_renamed", sid, map[string]any{"key": from, "new_name": moves[from], "services": services})

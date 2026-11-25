@@ -45,12 +45,15 @@ const usage = `Usage:
                                              turn the dashboard on (loopback only; kept if already on)
   keyring admin-password --config FILE [--if-missing]
                                              set the dashboard password (asked twice, not shown)
-  keyring set --store FILE [--file PATH] NAME add or replace a key; --file imports up to 1 MiB without echo
+  keyring set --store FILE [--config FILE] [--file PATH] NAME
+                                             add or replace a key; --file imports up to 1 MiB without echo;
+                                             a Bitcoin key needs --config, to check only a Bitcoin signing
+                                             service uses it
   keyring delete --store FILE NAME           remove a key
   keyring list --store FILE                  print key names (never values)
   keyring minisign-keygen --store FILE NAME  make a new Ed25519 signing key in the store (never shown) and
                                              print its minisign public key
-  keyring bitcoin-import --store FILE --network regtest|testnet|signet NAME
+  keyring bitcoin-import --config FILE --store FILE --network regtest|testnet|signet NAME
                                              import a Bitcoin tprv or WIF key from stdin (never shown) and print
                                              its fingerprint and first receive addresses
   keyring new-token                          make a role token and its hash for the rules file
@@ -174,6 +177,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			value, err = readSecret(stdin, stderr, fs.Arg(0))
 		}
 		if err == nil {
+			err = checkBitcoinValue(*configPath, *storePath, fs.Arg(0), value)
+		}
+		if err == nil {
 			err = store.Set(*storePath, fs.Arg(0), value)
 		}
 		if err == nil {
@@ -203,11 +209,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		err = minisignKeygen(*storePath, fs.Arg(0), stdout)
 	case "bitcoin-import":
-		if !need("store") || fs.NArg() != 1 {
-			fmt.Fprintln(stderr, "keyring bitcoin-import: pass --store FILE, --network and one NAME; the key is read from stdin, never from arguments")
+		if !need("config", "store") || fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "keyring bitcoin-import: pass --config FILE, --store FILE, --network and one NAME; the key is read from stdin, never from arguments")
 			return 2
 		}
-		err = bitcoinImport(*storePath, *network, fs.Arg(0), stdin, stdout, stderr)
+		err = bitcoinImport(*configPath, *storePath, *network, fs.Arg(0), stdin, stdout, stderr)
 	case "new-token":
 		if fs.NArg() != 0 {
 			return 2
@@ -255,8 +261,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func check(configPath, storePath string, stdout io.Writer) error {
-	cfg, err := loadConfig(configPath, storePath, false, stdout)
+	cfg, keys, err := loadConfig(configPath, storePath, false, stdout)
 	if err != nil {
+		return err
+	}
+	// A check refuses what serve only warns about (bitcoinKeyWarnings).
+	if err := cfg.CheckBitcoinKeys(keys); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "rules ok: %d services, %d roles\n", len(cfg.Services), len(cfg.Roles))
@@ -268,10 +278,6 @@ func check(configPath, storePath string, stdout io.Writer) error {
 	}
 	if storePath == "" {
 		return nil
-	}
-	keys, err := store.Load(storePath)
-	if err != nil {
-		return err
 	}
 	if missing := missingKeys(cfg, keys); len(missing) > 0 {
 		return fmt.Errorf("keys not in the store: %s", strings.Join(missing, ", "))
@@ -301,16 +307,15 @@ func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 }
 
 func serve(configPath, storePath string, stderr io.Writer) error {
-	cfg, err := loadConfig(configPath, storePath, true, stderr)
-	if err != nil {
-		return err
-	}
-	keys, err := store.Load(storePath)
+	cfg, keys, err := loadConfig(configPath, storePath, true, stderr)
 	if err != nil {
 		return err
 	}
 	if missing := missingKeys(cfg, keys); len(missing) > 0 {
 		fmt.Fprintf(stderr, "warning: keys not in the store (their services answer 503): %s\n", strings.Join(missing, ", "))
+	}
+	for _, w := range bitcoinKeyWarnings(cfg, keys) {
+		fmt.Fprintln(stderr, w)
 	}
 	audit, err := openAudit(cfg.AuditLog)
 	if err != nil {
@@ -414,6 +419,11 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 					missing = missingKeys(next, keys)
 				}
 				fmt.Fprintln(stderr, reloadMessage(next, err, missing))
+				if err == nil {
+					for _, w := range bitcoinKeyWarnings(next, keys) {
+						fmt.Fprintln(stderr, w)
+					}
+				}
 			}
 		}
 	}()

@@ -279,6 +279,12 @@ func (h *Handler) fetchAccessToken(ctx context.Context, cfg policy.OAuth2, refre
 	if refresh == "" {
 		return fail(true, "no refresh token stored")
 	}
+	// Every refresh comes here, including those for Workspace accounts,
+	// whose tokens no service names: a Bitcoin key never goes to a token
+	// endpoint. It is refused like a rejected token, to be replaced.
+	if err := policy.RefuseBitcoinKeys(refresh, secret); err != nil {
+		return fail(true, "%v", err)
+	}
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refresh},

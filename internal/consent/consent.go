@@ -530,7 +530,12 @@ func (s *Server) deleteOAuthKey(w http.ResponseWriter, r *http.Request, name str
 }
 
 // revoke tells the provider a refresh token is no longer used (RFC 7009).
+// A stored Bitcoin key is never sent (policy.RefuseBitcoinKeys): the local
+// delete stands, and the revoke reports the refusal.
 func (s *Server) revoke(ctx context.Context, cfg policy.OAuth2, token, secret string) error {
+	if err := policy.RefuseBitcoinKeys(token, secret); err != nil {
+		return err
+	}
 	form := url.Values{"token": {token}, "token_type_hint": {"refresh_token"}, "client_id": {cfg.ClientID}}
 	if secret != "" {
 		form.Set("client_secret", secret)
@@ -912,8 +917,13 @@ func done(data pageData, said, back string) pageData {
 
 // exchange trades the authorization code for tokens (RFC 6749 4.1.3, RFC
 // 7636) and returns the refresh token and optional verified Workspace email.
-// Errors never include tokens, secrets or the provider's free text.
+// A stored Bitcoin key is never sent as the client secret
+// (policy.RefuseBitcoinKeys). Errors never include tokens, secrets or the
+// provider's free text.
 func (s *Server) exchange(ctx context.Context, cfg policy.OAuth2, code, verifier, redirectURI, secret string, verifyIdentity bool) (string, string, error) {
+	if err := policy.RefuseBitcoinKeys(secret); err != nil {
+		return "", "", err
+	}
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
