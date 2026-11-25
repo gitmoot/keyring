@@ -138,12 +138,13 @@ type Plan struct {
 // derivation of this key on an allowed path, derived script equal to the
 // output's), plus the fee.
 //
-// The input amounts come from the PSBT, but a signature commits to them:
-// BIP341 (taproot) to every input's amount and script, BIP143 (P2WPKH) to
-// the signed input's. A wrong amount for an input of this key makes its
-// signature invalid; any other input's amount only adds to the count when
-// it is overstated, and an understated one still leaves the count at least
-// what this key's inputs lose.
+// The input amounts come from the PSBT, so each must be committed: a
+// taproot signature without anyonecanpay commits to every input's amount
+// and script (BIP341); otherwise a signature commits only to its own
+// input's amount (BIP143, BIP341 anyonecanpay), and every other input must
+// prove its amount with non_witness_utxo, the previous transaction. An
+// understated amount would lower the fee and so the external count, while
+// another call signs that input.
 func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 	packet, err := psbt.NewFromRawBytes(strings.NewReader(psbtBase64), true)
 	if err != nil || packet.UnsignedTx == nil {
@@ -233,6 +234,25 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 		}
 		plan.matches = append(plan.matches, m)
 		plan.types = append(plan.types, t)
+	}
+	committed := false
+	for n := range plan.inputs {
+		if plan.matches[n].kind == ScriptP2TR && plan.types[n]&txscript.SigHashAnyOneCanPay == 0 {
+			committed = true
+		}
+	}
+	for i, pin := range packet.Inputs {
+		if committed || listed[i] {
+			continue
+		}
+		prev, nw := tx.TxIn[i].PreviousOutPoint, pin.NonWitnessUtxo
+		if nw == nil {
+			return nil, refuse("input %d amount is not committed by the signatures: add its non_witness_utxo (the previous transaction)", i)
+		}
+		if nw.TxHash() != prev.Hash || uint64(prev.Index) >= uint64(len(nw.TxOut)) ||
+			nw.TxOut[prev.Index].Value != pin.WitnessUtxo.Value || !bytes.Equal(nw.TxOut[prev.Index].PkScript, pin.WitnessUtxo.PkScript) {
+			return nil, refuse("input %d: non_witness_utxo does not match its outpoint and witness_utxo", i)
+		}
 	}
 	var out, external int64
 	for i, txOut := range tx.TxOut {

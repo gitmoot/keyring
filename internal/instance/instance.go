@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -271,7 +270,7 @@ func (in *Instance) commit(next *State, key []byte) error {
 		if in.opt.StatePath != "" {
 			// Without a state file there is no disk: bitcoin daily limits
 			// then refuse rather than reset on restart.
-			if err := in.proxy.OpenBitcoinSpend(filepath.Join(filepath.Dir(in.opt.StatePath), server.BitcoinSpendFile)); err != nil {
+			if err := in.proxy.OpenBitcoinSpend(server.BitcoinSpendPath(in.opt.StatePath)); err != nil {
 				fmt.Fprintf(in.opt.Log, "bitcoin daily totals unavailable: %v\n", err)
 			}
 		}

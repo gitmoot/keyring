@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 
 	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 )
@@ -122,7 +123,9 @@ func TestSignTaprootAndP2WPKHInputsVerify(t *testing.T) {
 func TestSignsOnlyListedInputs(t *testing.T) {
 	r := regtestRules(t)
 	k := masterKey(t, r)
-	plan, err := Prepare(k, r, bitcointest.Encode(t, standard(t)), []int{1})
+	p := standard(t)
+	withPrevious(p, 0) // input 0's amount is not committed by a P2WPKH signature
+	plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +251,59 @@ func TestRefusals(t *testing.T) {
 				t.Fatal("refusal carries the key or the PSBT")
 			}
 		})
+	}
+}
+
+// withPrevious gives input i a previous transaction that holds its
+// witness_utxo, and points the input at it.
+func withPrevious(p *psbt.Packet, i int) {
+	prev := wire.NewMsgTx(2)
+	prev.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 7}, nil, nil))
+	prev.AddTxOut(&wire.TxOut{Value: 1, PkScript: bitcointest.External})
+	prev.AddTxOut(p.Inputs[i].WitnessUtxo)
+	p.UnsignedTx.TxIn[i].PreviousOutPoint = wire.OutPoint{Hash: prev.TxHash(), Index: 1}
+	p.Inputs[i].NonWitnessUtxo = prev
+}
+
+// Review of #188: a P2WPKH signature commits only to its own input's amount,
+// so without a taproot signature over all amounts the other inputs must
+// prove theirs with the previous transaction; an understated amount would
+// lower the fee and the external count.
+func TestUncommittedAmountsNeedThePreviousTransaction(t *testing.T) {
+	r := regtestRules(t, "default", "all", "all|anyonecanpay")
+	k := masterKey(t, r)
+	refused := func(p *psbt.Packet, inputs []int, want string) {
+		t.Helper()
+		plan, err := Prepare(k, r, bitcointest.Encode(t, p), inputs)
+		if plan != nil || err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Prepare = %v, %v; want %q", plan, err, want)
+		}
+	}
+	// Only the P2WPKH input is signed: input 0's amount is not committed.
+	p := standard(t)
+	p.Inputs[0].WitnessUtxo.Value = 20_000 // understated by 30000
+	refused(p, []int{1}, "input 0 amount is not committed by the signatures: add its non_witness_utxo")
+	p = standard(t)
+	withPrevious(p, 0)
+	p.Inputs[0].WitnessUtxo.Value = 20_000
+	refused(p, []int{1}, "input 0: non_witness_utxo does not match its outpoint and witness_utxo")
+	p = standard(t)
+	withPrevious(p, 0)
+	p.UnsignedTx.TxIn[0].PreviousOutPoint.Index = 0
+	refused(p, []int{1}, "input 0: non_witness_utxo does not match")
+	p = standard(t)
+	withPrevious(p, 0)
+	plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{1})
+	if err != nil || plan.External != 65_000 || plan.Fee != 5_000 {
+		t.Fatalf("with the previous transaction: %v, %+v", err, plan)
+	}
+	// A taproot signature with anyonecanpay commits only to its own amount.
+	p = standard(t)
+	p.Inputs[0].SighashType = txscript.SigHashAll | txscript.SigHashAnyOneCanPay
+	refused(p, []int{0}, "input 1 amount is not committed by the signatures")
+	// Without anyonecanpay it commits to every amount.
+	if _, err := Prepare(k, r, bitcointest.Encode(t, standard(t)), []int{0}); err != nil {
+		t.Fatal(err)
 	}
 }
 

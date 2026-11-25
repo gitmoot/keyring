@@ -327,7 +327,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		// The unsafe/corrupt file is never replaced by an empty history.
 		fmt.Fprintf(stderr, "Google renewal history unavailable: %v\n", err)
 	}
-	if err := handler.OpenBitcoinSpend(filepath.Join(filepath.Dir(storePath), server.BitcoinSpendFile)); err != nil {
+	if err := handler.OpenBitcoinSpend(server.BitcoinSpendPath(storePath)); err != nil {
 		// Kept closed: grants with bitcoin_max_sats_per_day sign nothing
 		// until the file is fixed; the file is never replaced.
 		fmt.Fprintf(stderr, "bitcoin daily totals unavailable: %v\n", err)

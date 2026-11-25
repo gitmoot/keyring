@@ -127,6 +127,7 @@ func TestBitcoinRefusalsSignNothing(t *testing.T) {
 		{"not JSON", `{"psbt":`, "body must be one JSON object"},
 		{"unknown field", `{"psbt":"x","inputs":[0],"sighash":"all"}`, "body must be one JSON object"},
 		{"no inputs", signBody(psbt65k(t)), "psbt and inputs are required"},
+		{"null input index", `{"psbt":"` + psbt65k(t) + `","inputs":[null]}`, "inputs must be input indices, not null"},
 	}
 	var audit bytes.Buffer
 	h := New(bitcoinConfig(t, bitcoinTestPaths, policy.Access{}), map[string]string{"BTC_ORD": bitcointest.Master}, &audit)
@@ -157,7 +158,7 @@ func TestBitcoinMaxSatsPerTx(t *testing.T) {
 
 func TestBitcoinMaxSatsPerDaySurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	spendFile := filepath.Join(dir, BitcoinSpendFile)
+	spendFile := BitcoinSpendPath(filepath.Join(dir, "keys.json"))
 	cfg := bitcoinConfig(t, bitcoinTestPaths, policy.Access{BitcoinMaxSatsPerDay: 100_000})
 	day := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
 	start := func() *Handler {
@@ -193,6 +194,25 @@ func TestBitcoinMaxSatsPerDaySurvivesRestart(t *testing.T) {
 	if w := signCall(h, "POST", bitcoinSignPath, signBody(psbt65k(t), 0, 1), testToken); w.Code != 200 {
 		t.Fatalf("next day: %d %s", w.Code, w.Body.String())
 	}
+	// Review of #188: a request still on the previous day's clock counts
+	// toward the new day instead of moving the ledger back and erasing it.
+	day = day.Add(-time.Minute)
+	if w := signCall(h, "POST", bitcoinSignPath, signBody(psbt65k(t), 0, 1), testToken); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "65000 sats signed today") {
+		t.Fatalf("late request: %d %s", w.Code, w.Body.String())
+	}
+	if raw, _ := os.ReadFile(spendFile); !strings.Contains(string(raw), `"day":"2026-11-26"`) || !strings.Contains(string(raw), `"sats":65000`) {
+		t.Fatalf("spend file: %s", raw)
+	}
+}
+
+// Review of #188: two keyrings in one directory keep separate totals.
+func TestBitcoinSpendPathFollowsTheStore(t *testing.T) {
+	if a, b := BitcoinSpendPath("/k/keys.json"), BitcoinSpendPath("/k/other.json"); a != "/k/keys.bitcoin-spend.json" || b != "/k/other.bitcoin-spend.json" {
+		t.Fatalf("%s %s", a, b)
+	}
+	if got := BitcoinSpendPath("/k/state"); got != "/k/state.bitcoin-spend.json" {
+		t.Fatal(got)
+	}
 }
 
 // Without the file a daily limit cannot hold across restarts, so the grant
@@ -200,11 +220,11 @@ func TestBitcoinMaxSatsPerDaySurvivesRestart(t *testing.T) {
 func TestBitcoinMaxSatsPerDayNeedsTheFile(t *testing.T) {
 	h := New(bitcoinConfig(t, bitcoinTestPaths, policy.Access{BitcoinMaxSatsPerDay: 100_000}), map[string]string{"BTC_ORD": bitcointest.Master}, &bytes.Buffer{})
 	w := signCall(h, "POST", bitcoinSignPath, signBody(psbt30k(t), 0), testToken)
-	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), BitcoinSpendFile+" is unavailable") {
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "daily bitcoin total on disk, which is unavailable") {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
 	dir := t.TempDir()
-	spendFile := filepath.Join(dir, BitcoinSpendFile)
+	spendFile := BitcoinSpendPath(filepath.Join(dir, "keys.json"))
 	if err := os.WriteFile(spendFile, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}

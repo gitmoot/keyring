@@ -38,9 +38,6 @@ const (
 	// bitcoinBodyLimit bounds a sign-psbt body: a reveal PSBT may carry a
 	// whole inscription in its tapscript leaf.
 	bitcoinBodyLimit = 4 << 20
-	// BitcoinSpendFile keeps each grant's sats signed today, next to the
-	// store, so a restart does not reset bitcoin_max_sats_per_day.
-	BitcoinSpendFile = "bitcoin-spend.json"
 )
 
 // bitcoinRoute resolves "/_keyring/bitcoin/<service>/<action>" to the
@@ -62,6 +59,15 @@ func bitcoinRoute(path string) (service, action string) {
 	return service, action
 }
 
+// BitcoinSpendPath is where the daily bitcoin totals of the keyring whose
+// store (or instance state) is base are kept: keys.json ->
+// keys.bitcoin-spend.json. Named after base, so two keyrings sharing a
+// directory keep separate totals and a restart does not reset
+// bitcoin_max_sats_per_day.
+func BitcoinSpendPath(base string) string {
+	return strings.TrimSuffix(base, filepath.Ext(base)) + ".bitcoin-spend.json"
+}
+
 type bitcoinSignRequest struct {
 	PSBT   string `json:"psbt"`
 	Inputs []int  `json:"inputs"`
@@ -70,18 +76,31 @@ type bitcoinSignRequest struct {
 var errBitcoinBody = errors.New(`body must be one JSON object {"psbt": "<base64>", "inputs": [0, ...]} of at most 4 MiB`)
 
 func decodeBitcoinSign(body io.Reader) (bitcoinSignRequest, error) {
+	// Inputs decode as pointers: encoding/json leaves an int at 0 for null,
+	// which would select input 0 (review of #188).
+	var raw struct {
+		PSBT   string `json:"psbt"`
+		Inputs []*int `json:"inputs"`
+	}
 	var in bitcoinSignRequest
 	decoder := json.NewDecoder(io.LimitReader(body, bitcoinBodyLimit))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&in); err != nil {
+	if err := decoder.Decode(&raw); err != nil {
 		return in, errBitcoinBody
 	}
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return in, errBitcoinBody
 	}
-	if in.PSBT == "" || len(in.Inputs) == 0 {
+	if raw.PSBT == "" || len(raw.Inputs) == 0 {
 		return in, errors.New("psbt and inputs are required")
+	}
+	in.PSBT = raw.PSBT
+	for _, i := range raw.Inputs {
+		if i == nil {
+			return in, errors.New("inputs must be input indices, not null")
+		}
+		in.Inputs = append(in.Inputs, *i)
 	}
 	return in, nil
 }
@@ -219,17 +238,22 @@ func (b *bitcoinSpend) save() error {
 // sign signs plan if the day's total stays within limit (0: no limit), and
 // counts it. With a limit, the signature is returned only once the new
 // total is on disk.
-func (b *bitcoinSpend) sign(role, service string, limit int64, plan *bitcoin.Plan, now time.Time) (*bitcoin.Signed, int, string) {
+func (b *bitcoinSpend) sign(role, service string, limit int64, plan *bitcoin.Plan, now func() time.Time) (*bitcoin.Signed, int, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if day := now.UTC().Format(time.DateOnly); day != b.day || b.sats == nil {
-		b.day, b.sats = day, map[[2]string]int64{}
+	// The day is read under the lock and never goes back: a request that
+	// started before midnight counts toward the new day rather than reset it.
+	if day := now().UTC().Format(time.DateOnly); day > b.day {
+		b.day, b.sats = day, nil
+	}
+	if b.sats == nil {
+		b.sats = map[[2]string]int64{}
 	}
 	k := [2]string{role, service}
 	persisted := b.path != "" && !b.unavailable
 	if limit > 0 {
 		if !persisted {
-			return nil, http.StatusServiceUnavailable, "bitcoin_max_sats_per_day needs the daily total on disk, and " + BitcoinSpendFile + " is unavailable"
+			return nil, http.StatusServiceUnavailable, "bitcoin_max_sats_per_day needs the daily bitcoin total on disk, which is unavailable"
 		}
 		if plan.External > limit-b.sats[k] {
 			return nil, http.StatusBadRequest, fmt.Sprintf("bitcoin_max_sats_per_day: %d sats signed today plus %d external sats is over the limit of %d", b.sats[k], plan.External, limit)
@@ -285,7 +309,7 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, r
 			fail(http.StatusBadRequest, fmt.Sprintf("bitcoin_max_sats_per_tx: %d external sats is over the limit of %d", plan.External, max))
 			return
 		}
-		signed, status, why := h.bitcoinSpend.sign(role, service, access.BitcoinMaxSatsPerDay, plan, start)
+		signed, status, why := h.bitcoinSpend.sign(role, service, access.BitcoinMaxSatsPerDay, plan, h.now)
 		if signed == nil {
 			fail(status, why)
 			return
