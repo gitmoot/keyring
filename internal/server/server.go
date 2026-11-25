@@ -116,10 +116,10 @@ type snapshot struct {
 	// apns holds a token minter per apns service; one whose key and identity
 	// are unchanged is carried over by Swap, cached token included.
 	apns map[string]*apnsSigner
-	// holdsBitcoinKey: a value of keys is a Bitcoin private key, which a
-	// service other than a Bitcoin signing service never sends
-	// (sendsBitcoinKey).
-	holdsBitcoinKey bool
+	// refusedValues are the values of keys that policy.RefuseBitcoinKeys
+	// refuses (refusedValues): a service other than a Bitcoin signing
+	// service never sends one (sendsBitcoinKey).
+	refusedValues map[string]bool
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -224,7 +224,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 
 // SwapWithOrder is Swap with a new value order, published together.
 func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
-	snap := &snapshot{config: config, keys: keys, order: order, holdsBitcoinKey: holdsBitcoinKey(keys)}
+	snap := &snapshot{config: config, keys: keys, order: order, refusedValues: refusedValues(keys)}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}

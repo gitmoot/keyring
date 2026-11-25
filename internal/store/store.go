@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/gitmoot/keyring/internal/fileutil"
 )
@@ -102,6 +101,8 @@ func Set(path, name, value string) error {
 // is written and returned, so a caller can put in force exactly what was
 // checked and stored. The store's lock is held from the read to the rename
 // (update), so no other writer, in this process or another, comes between.
+// check runs under that lock: it must not write the store (the write would
+// wait for the lock forever) nor wait on slow I/O.
 func SetChecked(path string, values map[string]string, check func(map[string]string) error) (map[string]string, error) {
 	for name, value := range values {
 		if !ValidName(name) {
@@ -218,26 +219,6 @@ func update(path string, change func(keys map[string]string) error) (map[string]
 		return nil, err
 	}
 	return keys, nil
-}
-
-// lock takes the store's lock, an exclusive flock of path + ".lock", and
-// returns the function that releases it. Every writer (update) holds it from
-// its read to its rename, so a write from another process, such as keyring
-// set while the service runs, is never lost. Readers need no lock: the
-// rename replaces the file whole.
-func lock(path string) (func(), error) {
-	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
 }
 
 // OrderParts sorts the value names of one key (the parts of KEY.part): those
