@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 )
 
 func bitcoinConfig() *Config {
@@ -62,6 +65,51 @@ func TestValidateBitcoinService(t *testing.T) {
 		c.set(cfg)
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
+}
+
+// A stored Bitcoin key goes only to a Bitcoin signing service: any other
+// service that would send it (its key, a pool value, an extra header, an
+// OAuth client secret) is refused, naming the service and the store name.
+func TestCheckBitcoinKeys(t *testing.T) {
+	keys := map[string]string{"BTC_ORD": bitcointest.Master, "OPENROUTER_API_KEY": "sk-or-0123456789"}
+	if err := bitcoinConfig().CheckBitcoinKeys(keys); err != nil {
+		t.Fatalf("the signing service's own key: %v", err)
+	}
+	// Another value of the same key is not sent by a service naming one
+	// value; only a pool sends them all.
+	named := bitcoinConfig()
+	named.Services["openrouter"] = Service{Base: "https://openrouter.ai", Key: "MIXED.token", Auth: AuthBearer}
+	if err := named.CheckBitcoinKeys(map[string]string{"MIXED.token": "sk-or-0123456789", "MIXED.btc": bitcointest.WIF}); err != nil {
+		t.Fatalf("a named value beside a Bitcoin value: %v", err)
+	}
+	for name, c := range map[string]struct {
+		svc  Service
+		keys map[string]string
+		key  string
+	}{
+		"bearer key": {Service{Base: "https://openrouter.ai", Key: "OPENROUTER_API_KEY", Auth: AuthBearer},
+			map[string]string{"OPENROUTER_API_KEY": bitcointest.WIF}, "OPENROUTER_API_KEY"},
+		"pool value": {Service{Base: "https://openrouter.ai", Key: "POOL", Auth: AuthBearer, KeyPool: true},
+			map[string]string{"POOL.1": "sk-or-0123456789", "POOL.2": "  " + bitcointest.Master + "\n"}, "POOL.2"},
+		"extra header": {Service{Base: "https://openrouter.ai", Key: "OPENROUTER_API_KEY", Auth: AuthBearer, ExtraHeaders: map[string]string{"X-Secret": "EXTRA"}},
+			map[string]string{"OPENROUTER_API_KEY": "sk-or-0123456789", "EXTRA": bitcointest.WIF}, "EXTRA"},
+		"oauth client secret": {Service{Base: "https://openrouter.ai", Key: "REFRESH", Auth: AuthOAuth2, OAuth2: &OAuth2{TokenURL: "https://openrouter.ai/token", ClientID: "c", ClientSecretKey: "SECRET"}},
+			map[string]string{"REFRESH": "r-0123456789", "SECRET": bitcointest.WIF}, "SECRET"},
+		"signing service of another kind": {Service{Key: "SIGNER", Auth: AuthEd25519Sign},
+			map[string]string{"SIGNER": bitcointest.WIF}, "SIGNER"},
+	} {
+		cfg := validConfig()
+		cfg.Services["openrouter"] = c.svc
+		err := cfg.CheckBitcoinKeys(c.keys)
+		var refused *BitcoinKeyError
+		if !errors.As(err, &refused) || refused.Service != "openrouter" || refused.Key != c.key {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if want := "service openrouter: " + c.key + " is a Bitcoin key; it can only be used by a Bitcoin signing service"; err.Error() != want {
+			t.Errorf("%s: %q, want %q", name, err, want)
 		}
 	}
 }

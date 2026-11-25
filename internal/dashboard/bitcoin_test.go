@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -488,5 +489,61 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 	}
 	if w := addresses(e, "btc-ord", "m/86'/1'/0'/1"); w.Code != http.StatusOK {
 		t.Fatalf("addresses after the edit: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A Bitcoin key goes only to a Bitcoin signing service (review of #204):
+// every form that would give one to another service is refused and saves
+// nothing. First the review's resubmission: the API form of a key with a
+// tprv and a WIF value, with the Cloudflare preset, on the WIF value.
+func TestBitcoinKeyOnlyForABitcoinSigningService(t *testing.T) {
+	e := newEnv(t)
+	for name, value := range map[string]string{"MIXED.1": bitcointest.Master, "MIXED.2": bitcointest.WIF, "POOLED.1": "sk-pooled-0123456789"} {
+		if err := store.Set(e.backend.StorePath, name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := e.proxy.Config().Services["api"].Base
+	e.withService("pooled", policy.Service{Base: base, Key: "POOLED", Auth: policy.AuthBearer, KeyPool: true})
+	e.withService("waiting", policy.Service{Base: base, Key: "LATER", Auth: policy.AuthBearer})
+	access := e.accessBytes()
+	keys, _ := store.Load(e.backend.StorePath)
+	unchanged := func(what string) {
+		t.Helper()
+		if now, _ := store.Load(e.backend.StorePath); !bytes.Equal(e.accessBytes(), access) || !maps.Equal(now, keys) {
+			t.Fatalf("%s: saved", what)
+		}
+	}
+	refused := func(what string, w *httptest.ResponseRecorder, name string) {
+		t.Helper()
+		if body := w.Body.String(); w.Code != http.StatusBadRequest || !strings.Contains(body, name+" is a Bitcoin key; it can only be used by a Bitcoin signing service") {
+			t.Fatalf("%s: %d %s", what, w.Code, body)
+		}
+		assertNoBitcoinKey(t, w.Body.String())
+		unchanged(what)
+	}
+	refused("the review's resubmission", e.request("POST", "/keys/MIXED/connect", url.Values{"preset": {"cloudflare"}, "service": {"cloudflare"},
+		"base": {"https://api.cloudflare.com"}, "auth": {"bearer"}, "test_path": {"/client/v4/user/tokens/verify"}, "key_part": {"2"}, "password": {password}}), "MIXED.2")
+	refused("the service page", e.edit("api", url.Values{"key": {"MIXED.2"}, "base": {base}, "auth": {"bearer"}, "test_path": {"/v1/check"}}), "MIXED.2")
+	refused("Add key for a name a service waits for", e.request("POST", "/keys", url.Values{"name": {"LATER"}, "value": {bitcointest.WIF}, "password": {password}}), "LATER")
+	refused("upload over a proxy service's key", e.upload(map[string]string{"name": "API_KEY", "replace": "yes", "password": password}, "key.txt", []byte(bitcointest.WIF), e.csrf), "API_KEY")
+	// The key page's forms go back to the page, which says why.
+	for what, c := range map[string]struct {
+		path, service, value string
+	}{
+		"a value added to a key pool":      {"/keys/POOLED/add-value", "pooled", "POOLED.2"},
+		"Replace on a proxy service's key": {"/keys/API_KEY/replace", "api", "API_KEY"},
+	} {
+		w := e.request("POST", c.path, url.Values{"value": {bitcointest.Master}, "password": {password}})
+		loc, err := url.Parse(w.Header().Get("Location"))
+		if err != nil || w.Code != http.StatusSeeOther || loc.Query().Get("error") != "bitcoin-key" {
+			t.Fatalf("%s: %d %s", what, w.Code, w.Header().Get("Location"))
+		}
+		page := e.request("GET", loc.String(), nil).Body.String()
+		if !strings.Contains(page, "Service "+c.service+" would use "+c.value+", which is a Bitcoin key") {
+			t.Fatalf("%s: the page does not say why:\n%s", what, page)
+		}
+		assertNoBitcoinKey(t, page)
+		unchanged(what)
 	}
 }

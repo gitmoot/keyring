@@ -25,13 +25,14 @@ Read the key from stdin (it is refused as an argument, so it does not end up in
 shell history or process lists):
 
 ```sh
-keyring bitcoin-import --store ~/.keyring/keys.json --network regtest BTC_ORD < /path/to/tprv.txt
+keyring bitcoin-import --config rules.json --store ~/.keyring/keys.json --network regtest BTC_ORD < /path/to/tprv.txt
 ```
 
 Without a redirect it prompts and reads the key without echo. It refuses an
 existing name, a key for another network (`xprv` on regtest, `tprv` on
-mainnet) and anything else that is not a key, with a fixed message that never
-contains the value. It prints what to check in your wallet:
+mainnet), a name a service other than a Bitcoin signing service would use
+(see below), and anything else that is not a key, with a fixed message that
+never contains the value. It prints what to check in your wallet:
 
 ```
 stored BTC_ORD
@@ -47,6 +48,19 @@ Pasting the key with **Add key** on the dashboard works too. Keyring recognises
 `tprv`/`xprv`/WIF values, and any key used by a `bitcoin-psbt-sign` service,
 and never offers **Show** for them: the key page shows the fingerprint and
 networks instead, and a reveal request is refused (`?error=never-shown`).
+
+**A Bitcoin key is only ever used by a `bitcoin-psbt-sign` service.** Any
+other service would send its key upstream as a credential, so keyring refuses
+settings in which one would use a stored Bitcoin key: its `key`, a value of
+its key pool, an extra header or an OAuth client secret. The refusal reads
+`service api: BTC_ORD is a Bitcoin key; it can only be used by a Bitcoin
+signing service` and nothing is saved. It is checked wherever settings and
+keys meet: the dashboard's Connect, service, key and upload forms, `keyring
+check`, the service start and a reload (refused, the settings in force are
+kept), the instance admin API, consent links, and `keyring set` and
+`keyring bitcoin-import`, which need `--config` to store a Bitcoin key. Should
+such settings get past all of these, the call is answered 503 with the audit
+note `bitcoin key refused` and nothing goes upstream.
 
 ## 2. The service
 

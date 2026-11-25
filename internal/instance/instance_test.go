@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 )
 
 const adminToken = "supervisor-admin-token"
@@ -410,6 +412,7 @@ func TestRefusedChangesLeaveTheStateAlone(t *testing.T) {
 		{"PUT", "/roles/agent", map[string]any{"access": map[string]any{"nope": map[string]any{"paths": []string{"/"}}}}},
 		{"PUT", "/keys/bad-name", map[string]any{"value": "v"}},
 		{"PUT", "/keys/K", map[string]any{"value": ""}},
+		{"PUT", "/keys/API_KEY", map[string]any{"value": bitcointest.WIF}}, // the bearer service api would send it
 		{"PUT", "/network", map[string]any{"listen": busy.Addr().String(), "allow_sources": []string{"127.0.0.1"}}},
 		{"PUT", "/network", map[string]any{"listen": x.in.opt.AdminListen, "allow_sources": []string{"127.0.0.1"}}},
 		{"PUT", "/network", map[string]any{"listen": "0.0.0.0:7799", "allow_sources": []string{"127.0.0.1"}}},

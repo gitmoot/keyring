@@ -372,12 +372,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
-	msg := ""
-	if updated.Auth == policy.AuthBitcoinPSBTSign {
-		msg, err = b.saveBitcoinChecked(next, name)
-	} else {
-		err = b.saveAndApply(next)
-	}
+	msg, err := b.saveChecked(next, name)
 	if err != nil {
 		b.fail(w, sid, err)
 		return

@@ -2,11 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,4 +342,33 @@ func TestBitcoinKeyThatDoesNotFit(t *testing.T) {
 		}
 		assertNoBitcoinKey(t, w.Body.String(), audit.String())
 	}
+}
+
+// A service other than a Bitcoin signing service whose credential is a
+// stored Bitcoin key answers 503 and calls nothing upstream, should such
+// settings get past the checks where they are put in force: its own key, a
+// pool value it would try after another, and the dashboard's Test (review of
+// #204).
+func TestBitcoinKeyIsNeverSentUpstream(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer up.Close()
+	const note = `"note":"bitcoin key refused"`
+	h, audit := newHandlerKey(t, up.URL, bearer, allowAll, bitcointest.WIF)
+	w := call(h, "GET", "/api/v1/x", testToken, nil)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(audit.String(), note) {
+		t.Fatalf("bearer service on a Bitcoin key: %d %s", w.Code, audit.String())
+	}
+	pool, poolAudit, _ := poolHandler(t, "https://api.anthropic.com", up, map[string]string{"CLAUDE_KEYS.main": "sk-ant-main-0000", "CLAUDE_KEYS.backup1": bitcointest.Master})
+	pw := call(pool, "POST", "/claude-api/v1/messages", testToken, nil)
+	if pw.Code != http.StatusServiceUnavailable || !strings.Contains(poolAudit.String(), note) {
+		t.Fatalf("pool with a Bitcoin value: %d %s", pw.Code, poolAudit.String())
+	}
+	if _, err := h.TestKey(context.Background(), h.Config().Services["api"], bitcointest.WIF); err == nil || err.Error() != bitcoinKeyRefused {
+		t.Fatalf("test with a Bitcoin key: %v", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("%d upstream calls", n)
+	}
+	assertNoBitcoinKey(t, w.Body.String(), audit.String(), pw.Body.String(), poolAudit.String())
 }

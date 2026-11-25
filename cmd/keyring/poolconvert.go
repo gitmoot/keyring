@@ -30,59 +30,66 @@ func metaPathOf(storePath string) string {
 // pool now would, once the key has no other values). Without write (keyring
 // check) the conversion is checked in memory only; the service writes it
 // when it starts. The key notes are written before the access file, so a
-// failure in between is redone at the next start.
-func loadConfig(configPath, storePath string, write bool, out io.Writer) (*policy.Config, error) {
+// failure in between is redone at the next start. With a store, its keys are
+// returned, and settings that let a service other than a Bitcoin signing
+// service use a stored Bitcoin key are refused before anything is written.
+func loadConfig(configPath, storePath string, write bool, out io.Writer) (*policy.Config, map[string]string, error) {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	access, err := policy.LoadAccess(rules.AccessFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	first, err := policy.ConvertNamedValuePools(&access)
 	if err != nil {
-		return nil, fmt.Errorf("converting v0.14.18 key pools: %w", err)
+		return nil, nil, fmt.Errorf("converting v0.14.18 key pools: %w", err)
 	}
 	cfg := &policy.Config{Rules: rules, AccessList: access}
 	if err := cfg.Validate(); err != nil {
 		if len(first) > 0 {
-			return nil, fmt.Errorf("converting v0.14.18 key pools (%s): %w", poolKeys(first), err)
+			return nil, nil, fmt.Errorf("converting v0.14.18 key pools (%s): %w", poolKeys(first), err)
 		}
-		return nil, err
+		return nil, nil, err
+	}
+	var keys map[string]string
+	if storePath != "" {
+		if keys, err = store.Load(storePath); err != nil {
+			return nil, nil, err
+		}
+		if err := cfg.CheckBitcoinKeys(keys); err != nil {
+			return nil, nil, err
+		}
 	}
 	if len(first) == 0 {
-		return cfg, nil
+		return cfg, keys, nil
 	}
 	order := map[string][]string{}
 	for key, part := range first {
 		order[key] = []string{part}
 	}
 	if storePath != "" {
-		keys, err := store.Load(storePath)
-		if err != nil {
-			return nil, err
-		}
 		for _, key := range slices.Sorted(maps.Keys(first)) {
 			if keys[key] != "" {
-				return nil, fmt.Errorf("converting v0.14.18 key pools: the pool on %s.%s never sent the plain value %s, but a pool on %s now would once its other values are gone; store that value as %s.<name>, or delete it, or remove key_pool, then start again", key, first[key], key, key, key)
+				return nil, nil, fmt.Errorf("converting v0.14.18 key pools: the pool on %s.%s never sent the plain value %s, but a pool on %s now would once its other values are gone; store that value as %s.<name>, or delete it, or remove key_pool, then start again", key, first[key], key, key, key)
 			}
 			order[key] = append(order[key], otherValues(keys, key, first[key])...)
 		}
 	}
 	if !write {
 		fmt.Fprintf(out, "key pools naming one value (%s) are converted to name the key when the service starts\n", poolKeys(first))
-		return cfg, nil
+		return cfg, keys, nil
 	}
 	if err := dashboardpkg.PutValueOrder(metaPathOf(storePath), order); err != nil {
-		return nil, fmt.Errorf("converting key pools: %w", err)
+		return nil, nil, fmt.Errorf("converting key pools: %w", err)
 	}
 	cfg, err = policy.SaveAccess(rules, access)
 	if err != nil {
-		return nil, fmt.Errorf("converting key pools: %w", err)
+		return nil, nil, fmt.Errorf("converting key pools: %w", err)
 	}
 	fmt.Fprintf(out, "converted key pools to name the key, each first value kept first: %s\n", poolKeys(first))
-	return cfg, nil
+	return cfg, keys, nil
 }
 
 // otherValues are the names of key's stored values (key.part) other than

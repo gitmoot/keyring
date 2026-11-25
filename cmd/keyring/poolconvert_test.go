@@ -57,7 +57,7 @@ func TestUpgradeConvertsAPoolThatNamedOneValue(t *testing.T) {
 	}
 
 	// The service start converts it once, on disk.
-	cfg, err = loadConfig(rules, keysPath, true, &out)
+	cfg, _, err = loadConfig(rules, keysPath, true, &out)
 	if err != nil {
 		t.Fatalf("start with the old pool: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestUpgradeConvertsAPoolThatNamedOneValue(t *testing.T) {
 	// A second start changes nothing.
 	before, _ := os.ReadFile(accessPath)
 	out.Reset()
-	if _, err := loadConfig(rules, keysPath, true, &out); err != nil || out.Len() > 0 {
+	if _, _, err := loadConfig(rules, keysPath, true, &out); err != nil || out.Len() > 0 {
 		t.Fatalf("second start: %v %q", err, out.String())
 	}
 	if after, _ := os.ReadFile(accessPath); !bytes.Equal(before, after) {
@@ -145,7 +145,7 @@ func TestUpgradeRefusesPoolConversionsThatChangeWhatIsSent(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err = loadConfig(rules, keysPath, true, &bytes.Buffer{})
+			_, _, err = loadConfig(rules, keysPath, true, &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("start: %v", err)
 			}

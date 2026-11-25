@@ -68,6 +68,50 @@ func BitcoinSpendPath(base string) string {
 	return base + ".bitcoin-spend.json"
 }
 
+// bitcoinKeyRefused is the note of a call refused because its service, not
+// a Bitcoin signing service, would send a stored Bitcoin key.
+const bitcoinKeyRefused = "bitcoin key refused"
+
+// bitcoinValues are the values of keys that are Bitcoin private keys, nil
+// when there are none; Swap finds them once per snapshot.
+func bitcoinValues(keys map[string]string) map[string]bool {
+	var found map[string]bool
+	for _, value := range keys {
+		if _, ok := bitcoin.Inspect(value); ok {
+			if found == nil {
+				found = map[string]bool{}
+			}
+			found[value] = true
+		}
+	}
+	return found
+}
+
+// sendsBitcoinKey reports whether svc, other than a Bitcoin signing service,
+// would send a stored Bitcoin key: key, a value of pool, or a value it names
+// (extra headers, OAuth client secret). The settings put in force are
+// checked for this first (policy.CheckBitcoinKeys); this is the last line
+// before anything goes upstream.
+func (s *snapshot) sendsBitcoinKey(svc policy.Service, key string, pool []string) bool {
+	if len(s.bitcoinValues) == 0 || svc.Auth == policy.AuthBitcoinPSBTSign {
+		return false
+	}
+	if s.bitcoinValues[key] {
+		return true
+	}
+	for _, name := range pool {
+		if s.bitcoinValues[s.keys[name]] {
+			return true
+		}
+	}
+	for _, name := range svc.KeyNames() {
+		if s.bitcoinValues[s.keys[name]] {
+			return true
+		}
+	}
+	return false
+}
+
 type bitcoinSignRequest struct {
 	PSBT   string `json:"psbt"`
 	Inputs []int  `json:"inputs"`

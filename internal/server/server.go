@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/framing"
 	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
@@ -116,6 +117,10 @@ type snapshot struct {
 	// apns holds a token minter per apns service; one whose key and identity
 	// are unchanged is carried over by Swap, cached token included.
 	apns map[string]*apnsSigner
+	// bitcoinValues are the values of keys that are Bitcoin private keys
+	// (bitcoinValues); a service other than a Bitcoin signing service never
+	// sends one.
+	bitcoinValues map[string]bool
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -210,7 +215,7 @@ func (h *Handler) Swap(config *policy.Config, keys map[string]string) {
 
 // SwapWithOrder is Swap with a new value order, published together.
 func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, order map[string][]string) {
-	snap := &snapshot{config: config, keys: keys, order: order}
+	snap := &snapshot{config: config, keys: keys, order: order, bitcoinValues: bitcoinValues(keys)}
 	if svc, ok := config.Services["apple-ads"]; ok && svc.Auth == policy.AuthAppleAdsSign {
 		snap.appleAdsKey = parseAppleSigningKey(keys[svc.Key])
 	}
@@ -608,6 +613,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusServiceUnavailable, "key not loaded")
 			return
 		}
+	}
+	// The settings put in force never let a service other than a Bitcoin
+	// signing service use a Bitcoin key (policy.CheckBitcoinKeys); should
+	// one get through, it is refused here, before anything is sent or
+	// charged.
+	if snap.sendsBitcoinKey(svc, key, members) {
+		fail(http.StatusServiceUnavailable, bitcoinKeyRefused)
+		return
 	}
 	// A key that goes in a header must be a legal header value. Go refuses to
 	// send one with a line break or control character, and that used to come
@@ -1048,7 +1061,12 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 // oauth2 service, key is the refresh token: the test mints an access token
 // with it and the client secret in use.
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
-	resp, err := h.testRequest(ctx, h.snap.Load(), svc, key)
+	snap := h.snap.Load()
+	// key may come from the store on disk rather than snap: checked itself.
+	if _, ok := bitcoin.Inspect(key); ok && svc.Auth != policy.AuthBitcoinPSBTSign {
+		return 0, errors.New(bitcoinKeyRefused)
+	}
+	resp, err := h.testRequest(ctx, snap, svc, key)
 	if err != nil {
 		return 0, err
 	}
@@ -1060,6 +1078,9 @@ func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (
 func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Service, key string) (*http.Response, error) {
 	if svc.SignOnly() {
 		return nil, errors.New("sign-only service has no upstream test")
+	}
+	if snap.sendsBitcoinKey(svc, key, nil) {
+		return nil, errors.New(bitcoinKeyRefused)
 	}
 	if svc.TestPath == "" {
 		return nil, errors.New("the service has no test request")

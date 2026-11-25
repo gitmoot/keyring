@@ -16,8 +16,9 @@ import (
 // or the process list (#187). The owner keeps the backup: the keyring never
 // generates or shows a key. It prints what the owner can check against the
 // wallet: fingerprint, network and first receive addresses. An existing name
-// is never replaced.
-func bitcoinImport(storePath, network, name string, stdin io.Reader, stdout, stderr io.Writer) error {
+// is never replaced, and a name a service other than a Bitcoin signing
+// service would use is refused (checkBitcoinValue).
+func bitcoinImport(configPath, storePath, network, name string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if network == "" {
 		return errors.New("pass --network regtest, testnet or signet")
 	}
@@ -41,6 +42,9 @@ func bitcoinImport(storePath, network, name string, stdin io.Reader, stdout, std
 		// Describe's errors are fixed texts; never the value.
 		return err
 	}
+	if err := checkBitcoinValue(configPath, storePath, name, value); err != nil {
+		return err
+	}
 	if err := store.Set(storePath, name, value); err != nil {
 		return err
 	}
@@ -49,4 +53,25 @@ func bitcoinImport(storePath, network, name string, stdin io.Reader, stdout, std
 		fmt.Fprintf(stdout, "  %-17s %-7s %s\n", a.Path, a.Script, a.Address)
 	}
 	return nil
+}
+
+// checkBitcoinValue refuses to store value as name when it is a Bitcoin key
+// that a service other than a Bitcoin signing service in the settings of
+// configPath would then use (policy.CheckBitcoinKeys): a proxy service would
+// send it upstream, and the keyring would refuse those settings at its next
+// reload or start. Without the settings that cannot be checked, so a
+// Bitcoin key needs configPath.
+func checkBitcoinValue(configPath, storePath, name, value string) error {
+	if _, ok := bitcoin.Inspect(value); !ok {
+		return nil
+	}
+	if configPath == "" {
+		return fmt.Errorf("%s is a Bitcoin key: pass --config so keyring can check that only a Bitcoin signing service uses it", name)
+	}
+	cfg, keys, err := loadConfig(configPath, storePath, false, io.Discard)
+	if err != nil {
+		return err
+	}
+	keys[name] = value
+	return cfg.CheckBitcoinKeys(keys)
 }

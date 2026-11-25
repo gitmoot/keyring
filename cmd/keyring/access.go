@@ -196,6 +196,9 @@ func (rl reloader) reload() (*policy.Config, map[string]string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := cfg.CheckBitcoinKeys(keys); err != nil {
+		return nil, nil, err
+	}
 	var password admin.PasswordHash
 	if rl.dashboard != nil {
 		if password, err = admin.LoadPasswordFile(cfg.AdminPasswordFile); err != nil {

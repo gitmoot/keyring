@@ -31,7 +31,12 @@ type storeKeys struct {
 func (k storeKeys) Load() (map[string]string, error) { return store.Load(k.path) }
 
 func (k storeKeys) Set(name, value string) error {
-	return k.change(name, false, func() error { return store.Set(k.path, name, value) })
+	return k.change(name, false, func() error {
+		if err := k.refuseBitcoinKeys(map[string]string{name: value}); err != nil {
+			return err
+		}
+		return store.Set(k.path, name, value)
+	})
 }
 
 func (k storeKeys) Delete(name string) error {
@@ -41,10 +46,25 @@ func (k storeKeys) Delete(name string) error {
 func (k storeKeys) SetAll(values map[string]string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if err := k.refuseBitcoinKeys(values); err != nil {
+		return err
+	}
 	if err := store.SetAll(k.path, values); err != nil {
 		return err
 	}
 	return k.applyBundle(maps.Keys(values), false)
+}
+
+// refuseBitcoinKeys refuses, before they are written, values that would give
+// a service other than a Bitcoin signing service a Bitcoin key
+// (policy.CheckBitcoinKeys). Callers hold k.mu.
+func (k storeKeys) refuseBitcoinKeys(values map[string]string) error {
+	keys, err := store.Load(k.path)
+	if err != nil {
+		return err
+	}
+	maps.Copy(keys, values)
+	return k.proxy.Config().CheckBitcoinKeys(keys)
 }
 
 func (k storeKeys) DeleteAll(names []string) error {

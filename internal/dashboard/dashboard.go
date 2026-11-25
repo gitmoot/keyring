@@ -1167,6 +1167,13 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 			return
 		}
 	}
+	// A service may wait for this name already: no service but a Bitcoin
+	// signing service may get a Bitcoin key.
+	maps.Copy(keys, values)
+	if err := b.Proxy.Config().CheckBitcoinKeys(keys); err != nil {
+		b.renderNewKey(w, sid, http.StatusBadRequest, name, err.Error())
+		return
+	}
 	// The key notes hold the value order a key pool follows: they are
 	// written before the values are stored, so a pool never sends the new
 	// values in another order, and put back if storing fails.
@@ -1189,7 +1196,6 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 		b.fail(w, sid, err)
 		return
 	}
-	maps.Copy(keys, values)
 	b.Proxy.SwapWithOrder(b.Proxy.Config(), keys, valueOrder(meta))
 	fields := map[string]any{"key": name}
 	if _, plain := values[name]; !plain {
@@ -1622,12 +1628,7 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
-	msg := ""
-	if svc.Auth == policy.AuthBitcoinPSBTSign {
-		msg, err = b.saveBitcoinChecked(next, f.Service)
-	} else {
-		err = b.saveAndApply(next)
-	}
+	msg, err := b.saveChecked(next, f.Service)
 	if err != nil {
 		b.fail(w, sid, err)
 		return
@@ -1657,6 +1658,9 @@ func (b *Backend) apply() error {
 	}
 	keys, err := store.Load(b.StorePath)
 	if err != nil {
+		return err
+	}
+	if err := cfg.CheckBitcoinKeys(keys); err != nil {
 		return err
 	}
 	b.Proxy.Swap(cfg, keys)
@@ -1914,11 +1918,14 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		b.fail(w, sid, err)
 		return
 	}
+	keys[target] = value
+	if refusedBitcoinKey(w, r, name, b.Proxy.Config().CheckBitcoinKeys(keys)) {
+		return
+	}
 	if err := store.Set(b.StorePath, target, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	keys[target] = value
 	// Live at once with the running config, as upload does: nothing can fail
 	// after the value is stored, so the store and the keyring agree (#128).
 	b.Proxy.Swap(b.Proxy.Config(), keys)

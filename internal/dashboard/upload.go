@@ -168,11 +168,15 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		again(http.StatusConflict, "A key named "+name+" exists. Tick Replace to overwrite it, or pick another name.")
 		return
 	}
+	keys[name] = value
+	if err := b.Proxy.Config().CheckBitcoinKeys(keys); err != nil {
+		again(http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := store.Set(b.StorePath, name, value); err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	keys[name] = value
 	// The running config with the new value: keys parsed at load (APNs,
 	// signers) pick it up. Nothing here can fail after the value is stored,
 	// so the store and the running keyring never disagree.

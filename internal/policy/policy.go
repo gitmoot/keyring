@@ -411,6 +411,51 @@ func (b *Bitcoin) Rules() (*bitcoin.Rules, error) {
 	return bitcoin.NewRules(b.Network, b.Paths, b.Script, b.Sighash)
 }
 
+// BitcoinKeyError refuses settings in which a service other than a Bitcoin
+// signing service would use a stored Bitcoin private key: a proxy service
+// would send it upstream as its credential.
+type BitcoinKeyError struct {
+	Service string // the service that would use the key
+	Key     string // the store name of the key, never its value
+}
+
+func (e *BitcoinKeyError) Error() string {
+	return fmt.Sprintf("service %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", e.Service, e.Key)
+}
+
+// CheckBitcoinKeys returns a *BitcoinKeyError when a service other than a
+// bitcoin-psbt-sign one would use a value of keys that bitcoin.Inspect
+// recognises as a Bitcoin private key: one of its KeyNames, or, for a key
+// pool, any value of its key. Validation does not read the store, so every
+// place that puts settings and stored values in force together calls it
+// first, before anything is written.
+func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
+	var found []string
+	for name, value := range keys {
+		if _, ok := bitcoin.Inspect(value); ok {
+			found = append(found, name)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	slices.Sort(found)
+	for _, name := range slices.Sorted(maps.Keys(a.Services)) {
+		svc := a.Services[name]
+		if svc.Auth == AuthBitcoinPSBTSign {
+			continue
+		}
+		names := svc.KeyNames()
+		for _, key := range found {
+			base, _ := store.SplitPart(key)
+			if slices.Contains(names, key) || svc.KeyPool && base == svc.Key {
+				return &BitcoinKeyError{Service: name, Key: key}
+			}
+		}
+	}
+	return nil
+}
+
 // OAuth2 is the public half of an OAuth client: the refresh token and client
 // secret stay in the store.
 type OAuth2 struct {

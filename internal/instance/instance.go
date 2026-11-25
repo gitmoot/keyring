@@ -261,6 +261,9 @@ func (in *Instance) commit(next *State, key []byte) error {
 	if err != nil {
 		return badRequest("%v", err)
 	}
+	if err := cfg.CheckBitcoinKeys(next.Keys); err != nil {
+		return badRequest("%v", err)
+	}
 	sealed, err := seal(next, key)
 	if err != nil {
 		return err
