@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/policy"
 )
 
 const (
@@ -25,10 +27,6 @@ const (
 	// keyringHealth is the keyring's own health path.
 	keyringHealth = "/_keyring/health"
 )
-
-// http10Limit bounds the answer the relay holds for an HTTP/1.0 caller,
-// which only gets a complete answer with its length.
-const http10Limit = 32 << 20
 
 var (
 	roleName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -238,17 +236,18 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	var whole []byte // the complete answer for an HTTP/1.0 caller
-	if !r.ProtoAtLeast(1, 1) {
+	if !r.ProtoAtLeast(1, 1) && r.Method != http.MethodHead {
 		// An HTTP/1.0 reply has no chunks, so a closed connection is its
 		// only end and a cut stream would look complete. Such a caller
-		// gets the whole answer with its length, or a 502.
+		// gets the whole answer with its length, or a 502. (A HEAD reply
+		// has no body to cut and keeps the streaming path below.)
 		var err error
-		whole, err = io.ReadAll(io.LimitReader(resp.Body, http10Limit+1))
+		whole, err = io.ReadAll(io.LimitReader(resp.Body, policy.HTTP10AnswerLimit+1))
 		if err != nil {
 			http.Error(w, "relay: the keyring's answer broke off", http.StatusBadGateway)
 			return
 		}
-		if len(whole) > http10Limit {
+		if len(whole) > policy.HTTP10AnswerLimit {
 			http.Error(w, "relay: answer too large for an HTTP/1.0 caller", http.StatusBadGateway)
 			return
 		}

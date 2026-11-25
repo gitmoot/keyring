@@ -53,3 +53,25 @@ func TestRelayGivesHTTP10CallerWholeAnswerOrA502(t *testing.T) {
 		t.Fatalf("complete answer to an HTTP/1.0 caller: %d len %d %q", resp.StatusCode, resp.ContentLength, body)
 	}
 }
+
+func TestRelayAnswersHTTP10HeadAsIs(t *testing.T) {
+	keyring := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "42")
+	}))
+	defer keyring.Close()
+	front := httptest.NewServer(New(mustUpstream(t, keyring.URL), map[string]string{"phobos": tokenPhobos}))
+	defer front.Close()
+	conn, err := net.Dial("tcp", front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = io.WriteString(conn, "HEAD /phobos/files/a HTTP/1.0\r\nHost: x\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Length") != "42" {
+		t.Fatalf("HEAD to an HTTP/1.0 caller: %d, Content-Length %q", resp.StatusCode, resp.Header.Get("Content-Length"))
+	}
+}
