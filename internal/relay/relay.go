@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,10 @@ const (
 	// keyringHealth is the keyring's own health path.
 	keyringHealth = "/_keyring/health"
 )
+
+// http10Limit bounds the answer the relay holds for an HTTP/1.0 caller,
+// which only gets a complete answer with its length.
+const http10Limit = 32 << 20
 
 var (
 	roleName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -232,6 +237,22 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	var whole []byte // the complete answer for an HTTP/1.0 caller
+	if !r.ProtoAtLeast(1, 1) {
+		// An HTTP/1.0 reply has no chunks, so a closed connection is its
+		// only end and a cut stream would look complete. Such a caller
+		// gets the whole answer with its length, or a 502.
+		var err error
+		whole, err = io.ReadAll(io.LimitReader(resp.Body, http10Limit+1))
+		if err != nil {
+			http.Error(w, "relay: the keyring's answer broke off", http.StatusBadGateway)
+			return
+		}
+		if len(whole) > http10Limit {
+			http.Error(w, "relay: answer too large for an HTTP/1.0 caller", http.StatusBadGateway)
+			return
+		}
+	}
 	for name, values := range resp.Header {
 		skip := false
 		for _, h := range hopByHop {
@@ -245,6 +266,12 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, v := range values {
 			w.Header().Add(name, v)
 		}
+	}
+	if whole != nil {
+		w.Header().Set("Content-Length", strconv.Itoa(len(whole)))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(whole)
+		return
 	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
@@ -888,14 +889,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	forms := secretForms(append([]string{upstreamKey}, alsoRedact...)...)
-	for name, values := range resp.Header {
-		if reservedGoogleHeader(name) || hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
-			continue
-		}
-		for _, v := range values {
-			w.Header().Add(name, maskString(v, forms))
+	copyHeaders := func() {
+		for name, values := range resp.Header {
+			if reservedGoogleHeader(name) || hopByHop[http.CanonicalHeaderKey(name)] || strings.EqualFold(name, "Content-Length") || strings.EqualFold(name, "Content-Encoding") {
+				continue
+			}
+			for _, v := range values {
+				w.Header().Add(name, maskString(v, forms))
+			}
 		}
 	}
+	if !r.ProtoAtLeast(1, 1) {
+		// An HTTP/1.0 reply has no chunks, so a closed connection is its
+		// only end and a cut stream would look complete. Such a caller
+		// gets the whole answer with its length, or a 502.
+		var body bytes.Buffer
+		upstream := &io.LimitedReader{R: resp.Body, N: http10Limit + 1}
+		red := newRedactor(&body, forms)
+		_, err := io.Copy(red, upstream)
+		if err == nil {
+			err = red.Close()
+		}
+		if err != nil {
+			fail(http.StatusBadGateway, "upstream read failed")
+			return
+		}
+		if upstream.N == 0 {
+			fail(http.StatusBadGateway, "answer too large for an HTTP/1.0 caller")
+			return
+		}
+		copyHeaders()
+		w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
+		w.WriteHeader(resp.StatusCode)
+		rec.Status = resp.StatusCode
+		n, _ := w.Write(body.Bytes())
+		rec.Bytes = int64(n)
+		return
+	}
+	copyHeaders()
 	w.WriteHeader(resp.StatusCode)
 	rec.Status = resp.StatusCode
 	flusher, _ := w.(http.Flusher)
@@ -934,6 +965,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 }
+
+// http10Limit bounds the answer the keyring holds for an HTTP/1.0 caller,
+// which only gets a complete answer with its length.
+const http10Limit = 32 << 20
 
 var errBadQuery = errors.New("malformed query string")
 
