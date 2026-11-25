@@ -51,7 +51,8 @@ networks instead, and a reveal request is refused (`?error=never-shown`).
 ## 2. The service
 
 **On the dashboard** (Keys → the key → Connect to a service): the page of a
-Bitcoin key offers a Bitcoin form instead of the API one: service name,
+key whose one value is a Bitcoin key (a key with several values keeps the API
+form; paste the settings there) offers a Bitcoin form instead: service name,
 network (regtest, testnet or signet), the path templates one per line
 (prefilled with BIP86 receive and change, `m/86'/1'/0'/0/*` and
 `m/86'/1'/0'/1/*`; add `m/84'/1'/0'/0/*` and `m/84'/1'/0'/1/*` for native

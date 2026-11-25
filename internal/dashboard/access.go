@@ -476,12 +476,35 @@ func (b *Backend) saveAndApply(next policy.AccessList) error {
 	if err != nil {
 		return err
 	}
+	return b.saveAndApplyKeys(next, keys)
+}
+
+// saveAndApplyKeys is saveAndApply with keys already loaded, for a caller
+// that checked the very values it puts in force. Callers hold b.Mu.
+func (b *Backend) saveAndApplyKeys(next policy.AccessList, keys map[string]string) error {
 	cfg, err := policy.SaveAccess(b.rules(), next)
 	if err != nil {
 		return err
 	}
 	b.Proxy.Swap(cfg, keys)
 	return nil
+}
+
+// saveBitcoinChecked saves next like saveAndApply when svc, a
+// bitcoin-psbt-sign service in it, can sign with its key in the same store
+// snapshot it puts in force; otherwise it returns the message to show and
+// saves nothing. Validation does not read the store, so a key that does not
+// fit (another network, a WIF key given paths) is refused here rather than
+// on the first PSBT. Callers hold b.Mu.
+func (b *Backend) saveBitcoinChecked(next policy.AccessList, svc policy.Service) (string, error) {
+	keys, err := store.Load(b.StorePath)
+	if err != nil {
+		return "", err
+	}
+	if msg := bitcoinKeyProblem(svc, keys); msg != "" {
+		return msg, nil
+	}
+	return "", b.saveAndApplyKeys(next, keys)
 }
 
 func (b *Backend) newAgentPage(w http.ResponseWriter, r *http.Request, sid string) {

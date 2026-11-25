@@ -6,6 +6,7 @@ package dashboard
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gitmoot/keyring/internal/admin"
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
@@ -1260,6 +1262,9 @@ type agentSettings struct {
 	// Bitcoin makes a "bitcoin-psbt-sign" service: network, paths or
 	// script, sighash (#201).
 	Bitcoin *policy.Bitcoin `json:"bitcoin,omitempty"`
+	// TestMethod is taken so a service copied from access.json pastes as
+	// it is; the dashboard does not change it (see testMethodKept).
+	TestMethod string `json:"test_method,omitempty"`
 }
 
 // pasteHelp is what a refused paste is told the settings look like.
@@ -1284,12 +1289,15 @@ func decodeSettings(pasted string) (agentSettings, string) {
 	var named map[string]json.RawMessage
 	if json.Unmarshal([]byte(outer), &named) == nil && len(named) == 1 {
 		for name, inner := range named {
-			if settingsField(name) || !bytes.HasPrefix(bytes.TrimSpace(inner), []byte("{")) {
+			if !bytes.HasPrefix(bytes.TrimSpace(inner), []byte("{")) {
 				break
 			}
-			a, err := decodeStrict(string(inner))
-			if err != nil {
-				return agentSettings{}, pasteProblem(err)
+			a, innerErr := decodeStrict(string(inner))
+			if innerErr != nil {
+				if settingsField(name) {
+					break // flat settings with a bad field: their error says which
+				}
+				return agentSettings{}, pasteProblem(innerErr)
 			}
 			if a.Service != "" && a.Service != name {
 				return agentSettings{}, "The pasted settings name two services. Paste one service's settings."
@@ -1299,6 +1307,15 @@ func decodeSettings(pasted string) (agentSettings, string) {
 		}
 	}
 	return agentSettings{}, pasteProblem(err)
+}
+
+// testMethodKept returns the message for a pasted test_method other than
+// the one the service keeps (have; "" is GET): it is set in access.json.
+func testMethodKept(pasted, have string) string {
+	if pasted == "" || strings.EqualFold(pasted, cmp.Or(have, http.MethodGet)) {
+		return ""
+	}
+	return "The test method is set in access.json, not here: leave \"test_method\" out, or give the one shown on the service's page."
 }
 
 func decodeStrict(text string) (agentSettings, error) {
@@ -1429,7 +1446,12 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 	if f.Auth == policy.AuthBitcoinPSBTSign {
 		f.Bitcoin, formProblem = bitcoinFromForm(r)
 	}
-	again := func(status int, msg string) { b.renderKey(w, r, sid, status, name, f, msg) }
+	again := func(status int, msg string) {
+		if f.Pasted != "" {
+			f.Bitcoin = nil // refused pasted rules are not shown again
+		}
+		b.renderKey(w, r, sid, status, name, f, msg)
+	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		again(http.StatusForbidden, "Enter your dashboard password to connect the key.")
 		return
@@ -1455,6 +1477,10 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 			case part != "":
 				a.KeyPart = part
 			}
+		}
+		if msg := testMethodKept(a.TestMethod, ""); msg != "" {
+			again(http.StatusBadRequest, msg)
+			return
 		}
 		f.Service, f.Base, f.Auth, f.Scheme, f.Header, f.Param, f.TestPath, f.TLSPin = a.Service, a.Base, a.Auth, a.Scheme, a.Header, a.Param, a.TestPath, a.TLSPin
 		f.FixedHeaders, f.Project, f.ForwardRole, f.KeyPool = a.FixedHeaders, a.Project, a.ForwardRole, a.KeyPool != nil && *a.KeyPool
@@ -1557,20 +1583,18 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
+	msg := ""
 	if svc.Auth == policy.AuthBitcoinPSBTSign {
-		// Validation does not read the store; a key that cannot sign for
-		// the service (another network, a WIF key given paths) is refused
-		// now rather than on the first PSBT.
-		if msg, err := b.bitcoinKeyProblem(svc); err != nil {
-			b.fail(w, sid, err)
-			return
-		} else if msg != "" {
-			again(http.StatusBadRequest, msg)
-			return
-		}
+		msg, err = b.saveBitcoinChecked(next, svc)
+	} else {
+		err = b.saveAndApply(next)
 	}
-	if err := b.saveAndApply(next); err != nil {
+	if err != nil {
 		b.fail(w, sid, err)
+		return
+	}
+	if msg != "" {
+		again(http.StatusBadRequest, msg)
 		return
 	}
 	fields := map[string]any{"key": keyName, "service": f.Service, "base": f.Base}
@@ -1626,11 +1650,15 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	}
 	meta, _ := b.loadMeta()
 	info, never := neverShown(b.Proxy.Config(), row, values)
-	// A Bitcoin key connects to a bitcoin-psbt-sign service only, so its
-	// page offers that form instead of the API one (#201).
+	// A key whose one value is a Bitcoin key connects to a
+	// bitcoin-psbt-sign service only, so its page offers that form instead
+	// of the API one (#201). A key with several values keeps the API form,
+	// whatever its values are; Bitcoin settings for one of them are pasted.
 	var btc *bitcoinForm
-	if info != nil {
-		btc = bitcoinFormOf(f.Bitcoin, info.Kind == "WIF key")
+	if len(row.Parts) == 0 {
+		if one, ok := bitcoin.Inspect(values[name]); ok {
+			btc = bitcoinFormOf(f.Bitcoin, one.Kind == "WIF key")
+		}
 	}
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",

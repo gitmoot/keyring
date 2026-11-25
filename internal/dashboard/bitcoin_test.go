@@ -268,24 +268,27 @@ func TestBitcoinConnectFormForAWIFKey(t *testing.T) {
 // from docs/bitcoin.md.
 func TestBitcoinConnectTakesPastedSettingsInBothShapes(t *testing.T) {
 	const rules = `"bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"],"sighash":["default","all"]}`
-	for name, pasted := range map[string]string{
-		"settings":         `{"service":"btc-ord","auth":"bitcoin-psbt-sign",` + rules + `}`,
-		"access.json":      `{"btc-ord":{"auth":"bitcoin-psbt-sign","key":"BTC_ORD",` + rules + `}}`,
-		"access.json line": `"btc-ord": {"auth": "bitcoin-psbt-sign", "key": "BTC_ORD", ` + rules + `},`,
+	for name, tc := range map[string]struct{ service, pasted string }{
+		"settings":         {"btc-ord", `{"service":"btc-ord","auth":"bitcoin-psbt-sign",` + rules + `}`},
+		"access.json":      {"btc-ord", `{"btc-ord":{"auth":"bitcoin-psbt-sign","key":"BTC_ORD",` + rules + `}}`},
+		"access.json line": {"btc-ord", `"btc-ord": {"auth": "bitcoin-psbt-sign", "key": "BTC_ORD", ` + rules + `},`},
+		// Review of #204: a service may be named like a settings field.
+		"named bitcoin": {"bitcoin", `{"bitcoin":{"auth":"bitcoin-psbt-sign","key":"BTC_ORD",` + rules + `}}`},
+		"named auth":    {"auth", `"auth": {"auth": "bitcoin-psbt-sign", ` + rules + `}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
 			addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
-			w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {pasted}, "password": {password}})
+			w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {tc.pasted}, "password": {password}})
 			if w.Header().Get("Location") != "/keys/BTC_ORD?done=connected" {
 				t.Fatalf("connect: %d %s", w.Code, w.Body.String())
 			}
-			svc := e.proxy.Config().Services["btc-ord"]
+			svc := e.proxy.Config().Services[tc.service]
 			if svc.Key != "BTC_ORD" || svc.Bitcoin == nil || len(svc.Bitcoin.Paths) != 2 || !slices.Equal(svc.Bitcoin.Sighash, []string{"default", "all"}) {
 				t.Fatalf("saved service = %+v", svc)
 			}
-			grantBitcoin(e, "btc-ord")
-			if w := addresses(e, "btc-ord", "m/86'/1'/0'/1"); w.Code != http.StatusOK {
+			grantBitcoin(e, tc.service)
+			if w := addresses(e, tc.service, "m/86'/1'/0'/1"); w.Code != http.StatusOK {
 				t.Fatalf("addresses: %d %s", w.Code, w.Body.String())
 			}
 		})
@@ -305,6 +308,10 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		{"a bare name", `"btc-ord"`, "Paste one service&#39;s settings as JSON"},
 		{"mainnet", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","paths":["m/86'/0'/0'/0/*"]}}`, "mainnet is not supported"},
 		{"WIF rules for a tprv", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","script":"p2tr"}}`, "does not fit the service"},
+		// Review of #204: a key pasted into the wrong field is not shown back.
+		{"key in paths", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","` + bitcointest.Master + `"]}}`, "path 2: path must start with m"},
+		{"key as sighash", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"],"sighash":["` + bitcointest.WIF + `"]}}`, "sighash 1: want default"},
+		{"a test method", `{"btc-ord":{"auth":"bitcoin-psbt-sign","test_method":"POST","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}}`, "test method is set in access.json"},
 	} {
 		w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"pasted": {tc.pasted}, "password": {password}})
 		body := w.Body.String()
@@ -316,6 +323,50 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		}
 		assertNoBitcoinKey(t, body)
 	}
+	// Typed into the form by mistake: refused, and the form shows only the
+	// lines that are paths.
+	w := e.request("POST", "/keys/BTC_ORD/connect", url.Values{"auth": {"bitcoin-psbt-sign"}, "service": {"btc-ord"}, "network": {"regtest"},
+		"paths": {"m/86'/1'/0'/0/*\n" + bitcointest.Master}, "sighash": {"default", "all"}, "password": {password}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "m/86&#39;/1&#39;/0&#39;/0/*</textarea>") {
+		t.Fatalf("typed key in paths: %d", w.Code)
+	}
+	assertNoBitcoinKey(t, w.Body.String())
+}
+
+// A key with several values keeps the API form, whatever its values are
+// (review of #204): the Bitcoin form would not know which value it is for.
+func TestBitcoinFormOnlyForAOneValueKey(t *testing.T) {
+	e := newEnv(t)
+	for name, value := range map[string]string{"MIXED.1": bitcointest.Master, "MIXED.2": bitcointest.WIF} {
+		if err := store.Set(e.backend.StorePath, name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := e.request("GET", "/keys/MIXED", nil).Body.String()
+	if strings.Contains(page, `name="network"`) || !strings.Contains(page, `class="presetpick"`) {
+		t.Fatal("a key with several values got the Bitcoin form")
+	}
+	assertNoBitcoinKey(t, page)
+}
+
+// A service copied whole from access.json pastes with its own test method,
+// and only with it: the method is changed in access.json (review of #204).
+func TestPastedTestMethodIsKept(t *testing.T) {
+	e := newEnv(t)
+	base := e.proxy.Config().Services["api"].Base
+	entry := func(method string) string {
+		return `{"api":{"base":"` + base + `","key":"API_KEY","auth":"bearer","test_path":"/v1/check","test_method":"` + method + `"}}`
+	}
+	if w := e.edit("api", url.Values{"pasted": {entry("GET")}}); w.Header().Get("Location") != "/services/api?done=saved" {
+		t.Fatalf("paste with the kept method: %d %s", w.Code, w.Body.String())
+	}
+	before := e.accessBytes()
+	if w := e.edit("api", url.Values{"pasted": {entry("POST")}}); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "test method is set in access.json") {
+		t.Fatalf("paste with another method: %d", w.Code)
+	}
+	if !bytes.Equal(e.accessBytes(), before) {
+		t.Fatal("a refused paste changed the access file")
+	}
 }
 
 // The service page edits a bitcoin service's rules; the edit is audited by
@@ -324,7 +375,8 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 	e := newEnv(t)
 	addBitcoin(e)
 	page := e.request("GET", "/services/btc-ord", nil).Body.String()
-	if !strings.Contains(page, `name="paths"`) || !strings.Contains(page, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") || !strings.Contains(page, `<option selected>regtest</option>`) || strings.Contains(page, "changed in access.json") {
+	if !strings.Contains(page, `name="paths"`) || !strings.Contains(page, "m/84&#39;/1&#39;/0&#39;/0/*</textarea>") || !strings.Contains(page, `<option selected>regtest</option>`) || strings.Contains(page, "changed in access.json") ||
+		!strings.Contains(page, "without sats limits") {
 		t.Fatal("the service page offers no edit of the bitcoin rules")
 	}
 	before := e.accessBytes()
@@ -337,10 +389,14 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 		{"becomes a proxy", "stays one", url.Values{"auth": {"bearer"}, "base": {"https://api.example.com"}}},
 		{"pasted for another key", "another key", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}},
 		{"pasted without rules", "bitcoin", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign"}`}}},
+		{"key typed in paths", "path 3: path must start with m", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"regtest"}, "paths": {twoPaths + "\n" + bitcointest.Master}, "sighash": {"default", "all"}}},
+		{"key pasted in paths", "path 1: path must start with m", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["` + bitcointest.Master + `"]}}`}}},
 	} {
-		if w := e.edit("btc-ord", tc.form); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
+		w := e.edit("btc-ord", tc.form)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
 			t.Fatalf("%s: %d, want 400 with %q", tc.name, w.Code, tc.want)
 		}
+		assertNoBitcoinKey(t, w.Body.String())
 		if !bytes.Equal(e.accessBytes(), before) {
 			t.Fatalf("%s: a refused edit changed the access file", tc.name)
 		}

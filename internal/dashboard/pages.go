@@ -136,7 +136,6 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 <p class="hint">A Bitcoin signing service: an agent sends a PSBT and gets it back with this key's inputs signed. The key never leaves keyring and is never shown.</p>
 <label>Service name<input name="service" value="{{.Connect.Service}}" placeholder="e.g. btc-ord" autocapitalize="none" spellcheck="false"></label>
 {{template "bitcoinfields" .BitcoinForm}}
-{{if .Row.Parts}}<label>Value that is the key<select name="key_part">{{range .Row.Parts}}<option{{if eq .Name $.Connect.KeyPart}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>{{end}}
 <details><summary>Or paste settings</summary>
 <label>JSON like {"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest",{{if .BitcoinForm.WIF}}"script":"p2tr"{{else}}"paths":["m/86'/1'/0'/0/*","m/86'/1'/0'/1/*"]{{end}}}}<textarea name="pasted" spellcheck="false" autocapitalize="none"></textarea></label>
 <p class="hint">The service as access.json writes it works too: {"btc-ord":{"auth":"bitcoin-psbt-sign","key":"{{.Row.Name}}","bitcoin":{…}}}. A "key" in it must be {{.Row.Name}}. Pasted settings replace the fields above.</p>
@@ -378,7 +377,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <p class="hint">From the audit log, newest first, the last {{.SignatureDays}} days (up to 50). The audit never records a PSBT or a key.</p></div>{{end}}
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
-<p class="hint">{{if .BitcoinForm}}Changes the signing rules only. Agents with a grant for this service keep it, with the same paths and limits; the sats limits are on each agent's grant (Agents, then the service).{{else}}Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.{{end}}</p>
+<p class="hint">{{if .BitcoinForm}}Changes the signing rules and the project. Agents with their own grant for this service keep it, with the same paths and sats limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it and may sign with it, without sats limits (a project grant has none; give an agent its own grant for limits).{{else}}Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.{{end}}</p>
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/services/{{.Name}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Key<select name="key">{{range .Keys}}<option{{if eq . $.F.Key}} selected{{end}}>{{.}}</option>{{end}}</select></label>

@@ -86,8 +86,6 @@ func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 // whatever is posted.
 var (
 	bitcoinNetworks = []string{bitcoin.Regtest, bitcoin.Testnet, bitcoin.Signet}
-	// bitcoinSighashes in the forms' order: the default two first.
-	bitcoinSighashes = []string{"default", "all", "none", "single", "all|anyonecanpay", "none|anyonecanpay", "single|anyonecanpay"}
 	// defaultBitcoinPaths: BIP86 receive and change on test networks.
 	defaultBitcoinPaths = []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"}
 )
@@ -107,7 +105,8 @@ type bitcoinForm struct {
 }
 
 // bitcoinFormOf fills the form from settings, or with the defaults for a new
-// service when s is nil.
+// service when s is nil. Only lines that are paths are shown again: a
+// refused form may hold a key typed into the wrong field.
 func bitcoinFormOf(s *policy.Bitcoin, wif bool) *bitcoinForm {
 	if s == nil {
 		s = &policy.Bitcoin{Network: bitcoin.Regtest, Paths: defaultBitcoinPaths, Script: bitcoin.ScriptP2TR}
@@ -116,14 +115,20 @@ func bitcoinFormOf(s *policy.Bitcoin, wif bool) *bitcoinForm {
 	if len(sighash) == 0 {
 		sighash = bitcoin.DefaultSighash
 	}
-	f := &bitcoinForm{WIF: wif, Paths: strings.Join(s.Paths, "\n")}
+	var paths []string
+	for _, p := range s.Paths {
+		if _, err := bitcoin.ParsePath(p); err == nil {
+			paths = append(paths, p)
+		}
+	}
+	f := &bitcoinForm{WIF: wif, Paths: strings.Join(paths, "\n")}
 	for _, n := range bitcoinNetworks {
 		f.Networks = append(f.Networks, bitcoinChoice{n, n == s.Network})
 	}
 	for _, script := range []string{bitcoin.ScriptP2TR, bitcoin.ScriptP2WPKH} {
 		f.Scripts = append(f.Scripts, bitcoinChoice{script, script == s.Script})
 	}
-	for _, h := range bitcoinSighashes {
+	for _, h := range bitcoin.SighashChoices() {
 		f.Sighash = append(f.Sighash, bitcoinChoice{h, slices.Contains(sighash, h)})
 	}
 	return f
@@ -149,21 +154,18 @@ func bitcoinFromForm(r *http.Request) (*policy.Bitcoin, string) {
 	return s, ""
 }
 
-// bitcoinKeyProblem returns why the stored key svc names cannot sign for
-// it, or "". The texts are fixed and never carry the value.
-func (b *Backend) bitcoinKeyProblem(svc policy.Service) (string, error) {
-	keys, err := store.Load(b.StorePath)
-	if err != nil {
-		return "", err
-	}
+// bitcoinKeyProblem returns why the key svc names, in the store snapshot
+// keys, cannot sign for it, or "". The texts are fixed and never carry the
+// value. Callers have validated the config, so the rules are good.
+func bitcoinKeyProblem(svc policy.Service, keys map[string]string) string {
 	rules, err := svc.Bitcoin.Rules()
 	if err != nil {
-		return "bitcoin: " + err.Error(), nil
+		return "bitcoin: " + err.Error()
 	}
 	if _, err := bitcoin.ParseKey(keys[svc.Key], rules); err != nil {
-		return svc.Key + " cannot sign for this service: " + err.Error() + ".", nil
+		return svc.Key + " cannot sign for this service: " + err.Error() + "."
 	}
-	return "", nil
+	return ""
 }
 
 // bitcoinChanges names the Bitcoin settings an edit changed. No sighash

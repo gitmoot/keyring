@@ -177,7 +177,11 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	}
 	again := func(status int, msg string) {
 		// Refused pasted settings are not shown again: they may hold a value
-		// pasted by mistake (as Connect already does).
+		// pasted by mistake (as Connect already does). The Bitcoin fields
+		// show the stored rules then.
+		if f.Pasted != "" {
+			f.Bitcoin = nil
+		}
 		f.Pasted = ""
 		if svc, ok := b.Proxy.Config().Services[name]; ok {
 			f.FixedHeaders, f.ExtraHeaders = svc.FixedHeaders, formOf(name, svc).ExtraHeaders
@@ -194,7 +198,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	var keyPool *bool            // nil: keep the stored key_pool
 	var extra *map[string]string // nil: keep the stored extra headers
 	var oauth *policy.OAuth2     // pasted: replaces the OAuth settings
-	pastedKey := ""
+	pastedKey, pastedMethod := "", ""
 	if pasted {
 		a, msg := decodeSettings(f.Pasted)
 		if msg != "" {
@@ -207,7 +211,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		}
 		f.Base, f.Auth, f.Scheme, f.Header, f.Param, f.TestPath, f.TLSPin, f.Project = a.Base, a.Auth, a.Scheme, a.Header, a.Param, a.TestPath, a.TLSPin, a.Project
 		fixed, extra, oauth, forwardRole, keyPool = a.FixedHeaders, a.ExtraHeaders, a.OAuth2, a.ForwardRole, a.KeyPool
-		f.Bitcoin, pastedKey = a.Bitcoin, a.Key
+		f.Bitcoin, pastedKey, pastedMethod = a.Bitcoin, a.Key, a.TestMethod
 	} else if formProblem != "" {
 		again(http.StatusBadRequest, formProblem)
 		return
@@ -258,6 +262,10 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	// above; it is not repeated, as it may be a value pasted by mistake.
 	if pastedKey != "" && pastedKey != f.Key {
 		again(http.StatusBadRequest, "The pasted settings name another key in \"key\" than "+f.Key+". Pick the key under Key, or leave \"key\" out.")
+		return
+	}
+	if msg := testMethodKept(pastedMethod, cur.TestMethod); msg != "" {
+		again(http.StatusBadRequest, msg)
 		return
 	}
 	if f.Key != cur.Key || pool != cur.KeyPool {
@@ -361,17 +369,18 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		again(http.StatusBadRequest, err.Error())
 		return
 	}
+	msg := ""
 	if updated.Auth == policy.AuthBitcoinPSBTSign {
-		if msg, err := b.bitcoinKeyProblem(updated); err != nil {
-			b.fail(w, sid, err)
-			return
-		} else if msg != "" {
-			again(http.StatusBadRequest, msg)
-			return
-		}
+		msg, err = b.saveBitcoinChecked(next, updated)
+	} else {
+		err = b.saveAndApply(next)
 	}
-	if err := b.saveAndApply(next); err != nil {
+	if err != nil {
 		b.fail(w, sid, err)
+		return
+	}
+	if msg != "" {
+		again(http.StatusBadRequest, msg)
 		return
 	}
 	fields := map[string]any{"service": name, "key": updated.Key, "changed": changed}

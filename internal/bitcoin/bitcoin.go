@@ -41,16 +41,39 @@ const (
 	ScriptP2WPKH = "p2wpkh" // BIP84 native segwit v0
 )
 
-// Sighash names a service may allow. "default" is the taproot-only
-// SIGHASH_DEFAULT; a P2WPKH input without a sighash field signs ALL.
-var sighashNames = map[string]txscript.SigHashType{
-	"default":             txscript.SigHashDefault,
-	"all":                 txscript.SigHashAll,
-	"none":                txscript.SigHashNone,
-	"single":              txscript.SigHashSingle,
-	"all|anyonecanpay":    txscript.SigHashAll | txscript.SigHashAnyOneCanPay,
-	"none|anyonecanpay":   txscript.SigHashNone | txscript.SigHashAnyOneCanPay,
-	"single|anyonecanpay": txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+// sighashTypes are the sighash names a service may allow, in the order the
+// dashboard offers them. "default" is the taproot-only SIGHASH_DEFAULT; a
+// P2WPKH input without a sighash field signs ALL.
+var sighashTypes = []struct {
+	name string
+	t    txscript.SigHashType
+}{
+	{"default", txscript.SigHashDefault},
+	{"all", txscript.SigHashAll},
+	{"none", txscript.SigHashNone},
+	{"single", txscript.SigHashSingle},
+	{"all|anyonecanpay", txscript.SigHashAll | txscript.SigHashAnyOneCanPay},
+	{"none|anyonecanpay", txscript.SigHashNone | txscript.SigHashAnyOneCanPay},
+	{"single|anyonecanpay", txscript.SigHashSingle | txscript.SigHashAnyOneCanPay},
+}
+
+// SighashChoices lists the sighash names a service may allow, in order.
+func SighashChoices() []string {
+	names := make([]string, len(sighashTypes))
+	for i, s := range sighashTypes {
+		names[i] = s.name
+	}
+	return names
+}
+
+// sighashType returns the type a sighash name stands for.
+func sighashType(name string) (txscript.SigHashType, bool) {
+	for _, s := range sighashTypes {
+		if s.name == name {
+			return s.t, true
+		}
+	}
+	return 0, false
 }
 
 // DefaultSighash is what a service allows when it lists none.
@@ -222,29 +245,32 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 	// The addresses call names a path by its fixed part, so no two paths may
 	// share it (m/86'/1'/0'/0 and m/86'/1'/0'/0/* would make the answer
 	// depend on their order).
-	seen := map[string]string{}
-	for _, s := range paths {
+	seen := map[string]int{}
+	// Settings are named by their place in the list, never quoted: the
+	// messages reach the dashboard, and a key pasted into the wrong field
+	// must not be shown back.
+	for i, s := range paths {
 		path, err := ParsePath(s)
 		if err != nil {
-			return nil, fmt.Errorf("path %q: %w", s, err)
+			return nil, fmt.Errorf("path %d: %w", i+1, err)
 		}
 		lookup := formatPath(path.fixed)
 		if other, ok := seen[lookup]; ok {
-			return nil, fmt.Errorf("paths %q and %q are both looked up as %s: list one", other, s, lookup)
+			return nil, fmt.Errorf("paths %d and %d are both looked up as %s: list one", other, i+1, lookup)
 		}
-		seen[lookup] = s
+		seen[lookup] = i + 1
 		r.paths = append(r.paths, path)
 	}
 	if len(sighash) == 0 {
 		sighash = DefaultSighash
 	}
-	for _, name := range sighash {
-		t, ok := sighashNames[name]
+	for i, name := range sighash {
+		t, ok := sighashType(name)
 		if !ok {
-			return nil, fmt.Errorf("sighash %q: want default, all, none, single, or one of those three with |anyonecanpay", name)
+			return nil, fmt.Errorf("sighash %d: want default, all, none, single, or one of those three with |anyonecanpay", i+1)
 		}
 		if r.sighash[t] {
-			return nil, fmt.Errorf("sighash %q is listed twice", name)
+			return nil, fmt.Errorf("sighash %d is listed twice", i+1)
 		}
 		r.sighash[t] = true
 	}
