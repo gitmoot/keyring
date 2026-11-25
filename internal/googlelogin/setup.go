@@ -31,7 +31,7 @@ func (c *Controller) projectCommand(ctx context.Context, s *Snapshot, args ...st
 	}
 	if errors.Is(runErr, errLogin) {
 		invalid := *next
-		invalid.Ready, invalid.NeedsLogin = false, true
+		invalid.Ready, invalid.NeedsLogin, invalid.Refused = false, true, false
 		next = &invalid
 	}
 	if next != current {

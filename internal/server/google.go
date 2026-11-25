@@ -27,12 +27,79 @@ const googleTimeout = 30 * time.Second
 type googleCache struct {
 	mu      sync.Mutex
 	entries map[policy.GoogleAccount]*googleEntry
+	// seq numbers every use of a token, across accounts: answers are
+	// ordered by it (see googleAnswered).
+	seq uint64
 }
 
 type googleEntry struct {
 	oauthEntry
 	expires time.Time
 	renewal gcloudexec.RenewalTrace
+	// answered is the sequence number of the call whose answer set refused;
+	// answers to calls made before it change nothing.
+	answered uint64
+	// refused: Google answered 401 to the latest answered call. Only a
+	// later call it accepts clears it; a new token does not.
+	refused bool
+}
+
+// Google answered 401 to a call with a token gcloud minted (#184). The
+// messages are fixed text: never Google's body, the account or a token.
+const (
+	// GoogleRefusedContainer: the next Drive connection signs in again.
+	GoogleRefusedContainer = "Google refused the sign-in (HTTP 401, session invalid); open a new Drive link to sign in again"
+	googleRefusedHost      = "Google refused the gcloud token (HTTP 401); run gcloud auth login for this account"
+)
+
+// GoogleMint is the state of an account's token mint.
+type GoogleMint string
+
+const (
+	GoogleNotConfigured   GoogleMint = "not configured"
+	GoogleNotChecked      GoogleMint = "not checked"
+	GoogleRenewing        GoogleMint = "renewing"
+	GoogleMintFailed      GoogleMint = "failing"
+	GoogleRenewalRequired GoogleMint = "renewal required"
+	GoogleReady           GoogleMint = "ready"
+)
+
+// GoogleState is safe metadata about a Google account, never command
+// output or a token.
+type GoogleState struct {
+	Mint GoogleMint
+	// Failure is why the last mint failed (fixed text), for GoogleMintFailed.
+	Failure string
+	// Expires is the token's expiry, for GoogleReady.
+	Expires time.Time
+	// Refused: Google refuses the account's tokens (it answered 401 and has
+	// accepted no call since). gcloud still mints them, but the sign-in
+	// behind them must be made again. It is apart from the mint: a failed
+	// or new mint does not clear it.
+	Refused bool
+}
+
+// Failing is why the account cannot be used: its mint failing, else Google
+// refusing its tokens, with how to sign in again in a container (the next
+// Drive link) or on a host; "" for neither.
+func (s GoogleState) Failing(container bool) string {
+	switch {
+	case s.Mint == GoogleMintFailed:
+		return s.Failure
+	case !s.Refused:
+		return ""
+	case container:
+		return GoogleRefusedContainer
+	}
+	return googleRefusedHost
+}
+
+// Text is the dashboard's status line: Failing, else the mint state.
+func (s GoogleState) Text(container bool) string {
+	if why := s.Failing(container); why != "" {
+		return why
+	}
+	return string(s.Mint)
 }
 
 // GoogleRenewal returns a fixed-size, credential-free snapshot of the latest
@@ -52,30 +119,34 @@ func (h *Handler) GoogleRenewal(name string) (gcloudexec.RenewalRecord, bool) {
 }
 
 // GoogleStatus is safe dashboard metadata, never command output or a token.
-func (h *Handler) GoogleStatus(name string) (state string, expires time.Time) {
+func (h *Handler) GoogleStatus(name string) GoogleState {
 	a, ok := h.snap.Load().config.GoogleAccounts[name]
 	if !ok {
-		return "not configured", time.Time{}
+		return GoogleState{Mint: GoogleNotConfigured}
 	}
 	h.google.mu.Lock()
 	defer h.google.mu.Unlock()
 	e := h.google.entries[a]
 	if e == nil {
-		return "not checked", time.Time{}
+		return GoogleState{Mint: GoogleNotChecked}
 	}
-	if e.refreshing != nil {
-		return "renewing", time.Time{}
+	s := GoogleState{Refused: e.refused}
+	switch {
+	case e.refreshing != nil:
+		s.Mint = GoogleRenewing
+	case e.err != nil:
+		s.Mint, s.Failure = GoogleMintFailed, e.err.Error()
+	case e.token == "" || !h.now().Before(e.expires):
+		s.Mint = GoogleRenewalRequired
+	default:
+		s.Mint, s.Expires = GoogleReady, e.expires
 	}
-	if e.err != nil {
-		return e.err.Error(), time.Time{}
-	}
-	if e.token == "" || !h.now().Before(e.expires) {
-		return "renewal required", time.Time{}
-	}
-	return "ready", e.expires
+	return s
 }
 
-func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleAccount) (string, error) {
+// googleToken returns a token for a call and the call's sequence number,
+// which orders Google's answer to it (googleAnswered).
+func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleAccount) (string, uint64, error) {
 	c := &h.google
 	for {
 		c.mu.Lock()
@@ -90,8 +161,10 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 		now := h.now()
 		if e.token != "" && now.Before(e.refreshAt) {
 			token := e.token
+			c.seq++
+			seq := c.seq
 			c.mu.Unlock()
-			return token, nil
+			return token, seq, nil
 		}
 		if wait := e.refreshing; wait != nil {
 			c.mu.Unlock()
@@ -99,13 +172,13 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 			case <-wait:
 				continue
 			case <-ctx.Done():
-				return "", errors.New("gcloud request canceled")
+				return "", 0, errors.New("gcloud request canceled")
 			}
 		}
 		if e.err != nil && now.Before(e.retryAt) {
 			err := e.err
 			c.mu.Unlock()
-			return "", err
+			return "", 0, err
 		}
 		done := make(chan struct{})
 		e.refreshing = done
@@ -127,6 +200,7 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 		h.recordGoogleAttempt(name, a, h.now(), err)
 		c.mu.Lock()
 		now = h.now()
+		var seq uint64
 		if err != nil {
 			e.token, e.err, e.retryAt = "", err, now.Add(oauthRetry)
 			e.expires = time.Time{}
@@ -134,19 +208,56 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 			e.token, e.err = token, nil
 			e.expires = now.Add(lifetime)
 			e.refreshAt = now.Add(lifetime - min(oauthEarly, lifetime/2))
+			c.seq++
+			seq = c.seq
 		}
 		e.refreshing = nil
 		close(done)
 		c.mu.Unlock()
-		return token, err
+		return token, seq, err
 	}
 }
 
-func (h *Handler) dropGoogleToken(a policy.GoogleAccount, token string) {
+// googleAnswerSave bounds how long a proxied answer waits for the container
+// to seal Google's answer before it is returned.
+const googleAnswerSave = 10 * time.Second
+
+// googleAnswered records Google's answer to call seq, sent with token, for
+// the account's health: a 401 marks it refused and a later accepted call
+// clears it, whichever token each call used. Answers are ordered by the
+// call's sequence number: one to a call made before the latest recorded
+// answer's call changes nothing. Apart from that, a 401 drops the token if
+// the entry still holds it, so the next call mints a new one. Credentials
+// are never removed here. The container's controller also seals the answer
+// (SetGoogleRefusal) before googleAnswered returns, within googleAnswerSave.
+func (h *Handler) googleAnswered(ctx context.Context, a policy.GoogleAccount, token string, seq uint64, status int) {
+	var refused bool
+	switch {
+	case status == http.StatusUnauthorized:
+		refused = true
+	case status < 400:
+	default:
+		return
+	}
 	h.google.mu.Lock()
-	defer h.google.mu.Unlock()
-	if e := h.google.entries[a]; e != nil && e.token == token {
+	e := h.google.entries[a]
+	if e == nil {
+		h.google.mu.Unlock()
+		return
+	}
+	if refused && e.token == token {
 		e.token = ""
+	}
+	if seq < e.answered {
+		h.google.mu.Unlock()
+		return
+	}
+	e.answered, e.refused = seq, refused
+	h.google.mu.Unlock()
+	if h.googleRefusal != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), googleAnswerSave)
+		defer cancel()
+		h.googleRefusal(ctx, a, refused, seq)
 	}
 }
 

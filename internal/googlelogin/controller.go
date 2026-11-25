@@ -32,6 +32,10 @@ type View struct {
 	// take an existing project (see ChooseProject). Only the consent page
 	// of that flow sees it.
 	ProjectChoosable bool `json:"-"`
+	// Refused: Google refuses the connected login's tokens (it answered 401
+	// and has accepted no call since), whatever the phase shows. Status
+	// sets it.
+	Refused bool `json:"-"`
 }
 
 type job struct {
@@ -62,6 +66,17 @@ type Controller struct {
 	executable   string
 	root         string
 	client       *http.Client
+	// answer is Google's latest answer for a ready login's tokens. It
+	// counts in this process even when sealing it failed.
+	answer *answer
+}
+
+// answer is Google's answer to a call with a binding's token: refused (401)
+// or accepted. seq orders answers; an older one never overrides a newer one.
+type answer struct {
+	binding policy.GoogleAccount
+	refused bool
+	seq     uint64
 }
 
 func New(save func(context.Context, string, *Snapshot) error) *Controller {
@@ -109,13 +124,15 @@ func (c *Controller) Restore(next *Snapshot) error {
 	return err
 }
 
-func stateView(s *Snapshot) View {
+func stateView(s *Snapshot, refused bool) View {
 	v := View{Phase: "disconnected"}
 	if s == nil {
 		return v
 	}
 	v.Account, v.Project = s.Account, s.Project
 	switch {
+	case s.Ready && refused:
+		v.Phase = "reconnect_required"
 	case s.Ready:
 		v.Phase = "connected"
 	case s.NeedsLogin || s.Account == "":
@@ -126,10 +143,25 @@ func stateView(s *Snapshot) View {
 	return v
 }
 
+// refusedLocked reports whether Google refuses the tokens of s, a ready
+// login: the latest answer seen for its binding in this process, else the
+// sealed one. c.mu is held.
+func (c *Controller) refusedLocked(s *Snapshot) bool {
+	if s == nil || !s.Ready {
+		return false
+	}
+	if a := c.answer; a != nil && a.binding == s.Binding() {
+		return a.refused
+	}
+	return s.Refused
+}
+
 func (c *Controller) Status() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v := stateView(c.state)
+	refused := c.refusedLocked(c.state)
+	v := stateView(c.state, refused)
+	v.Refused = refused
 	if c.closing {
 		v.Phase, v.Busy = "disconnecting", true
 	} else if c.job != nil && !c.job.done {
@@ -265,6 +297,67 @@ func (c *Controller) chooseLocked(ctx context.Context, project string) error {
 	return c.save(ctx, current.Generation, &next)
 }
 
+// RecordRefusal records Google's answer to call seq, made with a token of the
+// connected login: refused (it answered 401) or accepted. seq orders the
+// answers; one to a call made before the latest recorded one's is ignored. A
+// changed answer is sealed before RecordRefusal returns (within ctx), so it
+// survives a restart and failed token mints and is saved with the response
+// that carried it. Status reports a refusal until Google accepts a call
+// again, and the next connection signs in again instead of keeping the
+// refused login. Credentials are kept. If sealing fails, the answer still
+// counts in this process and the next answer seals it. An answer that
+// changes neither the latest answer nor the sealed one costs one lock.
+func (c *Controller) RecordRefusal(ctx context.Context, binding policy.GoogleAccount, refused bool, seq uint64) {
+	c.mu.Lock()
+	s := c.state
+	if c.closing || s == nil || !s.Ready || s.Binding() != binding {
+		c.mu.Unlock()
+		return
+	}
+	prev := c.answer
+	if prev != nil && prev.binding == binding && prev.seq > seq {
+		c.mu.Unlock()
+		return
+	}
+	c.answer = &answer{binding, refused, seq}
+	// A seal of the previous answer may still run: its result is checked
+	// against this answer once it is done.
+	unchanged := s.Refused == refused && (prev == nil || prev.binding != binding || prev.refused == refused)
+	c.mu.Unlock()
+	if !unchanged {
+		c.sealRefusal(ctx)
+	}
+}
+
+// sealRefusal seals the latest answer for the ready login, serialized with
+// the other SDK writers. It returns once ctx is done even while the save
+// still waits for the instance transaction; that save then fails on ctx.
+func (c *Controller) sealRefusal(ctx context.Context) {
+	if c.acquire(ctx) != nil {
+		return
+	}
+	c.mu.Lock()
+	s := c.state
+	refused := c.refusedLocked(s)
+	c.mu.Unlock()
+	if s == nil || !s.Ready || s.Refused == refused {
+		<-c.ops
+		return
+	}
+	next := *s
+	next.Refused = refused
+	saved := make(chan struct{})
+	go func() {
+		defer func() { <-c.ops }()
+		defer close(saved)
+		_ = c.save(ctx, s.Generation, &next)
+	}()
+	select {
+	case <-saved:
+	case <-ctx.Done():
+	}
+}
+
 func (c *Controller) acquire(ctx context.Context) error {
 	select {
 	case c.ops <- struct{}{}:
@@ -327,12 +420,17 @@ func (c *Controller) connect(ctx context.Context, j *job) {
 }
 
 func (c *Controller) connectLocked(ctx context.Context, j *job) error {
-	current := c.snapshot()
-	if current != nil && current.Ready {
+	c.mu.Lock()
+	current := c.state
+	refused := c.refusedLocked(current)
+	c.mu.Unlock()
+	// A refused login signs in again: gcloud would keep minting tokens
+	// Google refuses.
+	if current != nil && current.Ready && !refused {
 		return nil
 	}
 	next := current
-	if current == nil || current.NeedsLogin || current.Account == "" || len(current.Files["credentials.db"]) == 0 {
+	if current == nil || refused || current.NeedsLogin || current.Account == "" || len(current.Files["credentials.db"]) == 0 {
 		var random [16]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return err
@@ -446,7 +544,8 @@ func (c *Controller) Token(ctx context.Context, binding policy.GoogleAccount, tr
 	}
 	if errors.Is(runErr, errLogin) {
 		invalid := *next
-		invalid.Ready, invalid.NeedsLogin = false, true
+		// NeedsLogin already asks for the sign-in a refusal asked for.
+		invalid.Ready, invalid.NeedsLogin, invalid.Refused = false, true, false
 		next = &invalid
 	}
 	if next != s {

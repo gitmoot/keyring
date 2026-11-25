@@ -933,18 +933,18 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	var accounts []googleRow
 	cfg := b.Proxy.Config()
 	for name, a := range cfg.GoogleAccounts {
-		status, expires := b.Proxy.GoogleStatus(name)
-		row := googleRow{Name: name, Account: a.Account, Status: status}
+		google := b.Proxy.GoogleStatus(name)
+		row := googleRow{Name: name, Account: a.Account, Status: google.Text(cfg.ContainerMode)}
 		history := b.Proxy.GoogleHistory(name)
 		row.History, row.HistoryUnavailable = history.Incidents, history.Unavailable
 		if !history.LastSuccess.IsZero() {
 			row.LastSuccess = history.LastSuccess.UTC().Format(time.RFC3339)
 		}
-		if n := len(history.Incidents); status == "not checked" && n != 0 && history.Incidents[n-1].Outcome == "active" {
+		if n := len(history.Incidents); google.Mint == server.GoogleNotChecked && n != 0 && history.Incidents[n-1].Outcome == "active" {
 			row.Status = "Last recorded failure: " + history.Incidents[n-1].Failure.Error()
 		}
-		if !expires.IsZero() {
-			row.Expires = expires.UTC().Format(time.RFC3339)
+		if !google.Expires.IsZero() && !google.Refused {
+			row.Expires = google.Expires.UTC().Format(time.RFC3339)
 		}
 		for service, svc := range cfg.Services {
 			if svc.Auth == policy.AuthGcloud && svc.GoogleAccount == name {

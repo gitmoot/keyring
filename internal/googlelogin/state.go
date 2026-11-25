@@ -28,10 +28,14 @@ type Snapshot struct {
 	Project    string `json:"project,omitempty"`
 	// ProjectChosen: the owner named an existing project of the account.
 	// Setup only checks it; it never creates or replaces it.
-	ProjectChosen bool              `json:"project_chosen,omitempty"`
-	Ready         bool              `json:"ready,omitempty"`
-	NeedsLogin    bool              `json:"needs_login,omitempty"`
-	Files         map[string][]byte `json:"files,omitempty"`
+	ProjectChosen bool `json:"project_chosen,omitempty"`
+	Ready         bool `json:"ready,omitempty"`
+	NeedsLogin    bool `json:"needs_login,omitempty"`
+	// Refused: Google answered 401 to a call with this ready login's token
+	// and has accepted none since. gcloud still mints tokens, but the
+	// sign-in must be made again; the next connection does that.
+	Refused bool              `json:"refused,omitempty"`
+	Files   map[string][]byte `json:"files,omitempty"`
 }
 
 func validGeneration(value string) bool {
@@ -93,6 +97,9 @@ func (s *Snapshot) Validate() error {
 	}
 	if s.Ready && (s.NeedsLogin || s.Account == "" || s.Project == "" || len(s.Files["credentials.db"]) == 0) {
 		return errors.New("incomplete Google login")
+	}
+	if s.Refused && !s.Ready {
+		return errors.New("only a ready Google login can be refused")
 	}
 	return nil
 }

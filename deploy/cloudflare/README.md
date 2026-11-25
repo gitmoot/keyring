@@ -491,6 +491,23 @@ proxy requests. `GET /admin/instances/<id>/services` reports the four services a
 connected only after login/project setup is saved, with a safe failure hint;
 it exposes no Google account, project, authorization URL, code, or credential.
 
+gcloud can keep minting access tokens that Google refuses, for example with
+"Active session is invalid" after the account signed out everywhere or changed
+its password. A Google 401 to any proxied call therefore drops that token (the
+next call mints a new one) and records the refusal, sealed with the login: all
+four services report `connected: false` with `failing: "Google refused the
+sign-in (HTTP 401, session invalid); open a new Drive link to sign in again"`
+(`reconnect_required` in the container's `/status`, Google phase
+`reconnect_required`). Only a call Google accepts clears it; a container restart
+or a failed token mint does not. Credentials are kept until the next connection:
+a new `drive` link then signs in again (same account; the project is kept)
+instead of reporting the refused login as connected. The refusal is sealed
+before the proxied 401 is returned (waiting at most 10 seconds), so the Worker's
+state fetch after that response already carries it; if it cannot be sealed in
+time, the running container still reports it and the next link still signs in
+again. Answers to concurrent calls count in the order the calls took their
+token: a late answer to an earlier call never overrides a later call's.
+
 SDK credentials are bounded opaque database snapshots (256 KiB total), in a
 dedicated field of the instance's encrypted state, never in forwarded keys.
 Only the fixed image executable and a generated private directory beneath

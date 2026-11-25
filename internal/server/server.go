@@ -75,6 +75,9 @@ type Handler struct {
 	googleHistory googleHistory
 	// Set before serving: the container seals SDK changes before token use.
 	googleCommand func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)
+	// Set before serving in the container: seals Google's answer to call
+	// seq (refused on 401, accepted below 400) with the login, within ctx.
+	googleRefusal func(ctx context.Context, a policy.GoogleAccount, refused bool, seq uint64)
 
 	auditMu   sync.Mutex
 	workspace workspace.Boundary // fixed before serving in container mode
@@ -84,6 +87,12 @@ type Handler struct {
 // File-mode hosts keep the existing isolated subprocess path.
 func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)) {
 	h.googleCommand = command
+}
+
+// SetGoogleRefusal installs the container's record of Google refusing (401)
+// or accepting the tokens of a binding, before serving.
+func (h *Handler) SetGoogleRefusal(record func(ctx context.Context, a policy.GoogleAccount, refused bool, seq uint64)) {
+	h.googleRefusal = record
 }
 
 type snapshot struct {
@@ -658,6 +667,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamKey, alsoRedact := key, []string(nil)
+	var googleSeq uint64 // orders Google's answer to this call
 	if svc.Auth == policy.AuthOAuth2 {
 		refresh, secret := oauthSecrets(svc, snap.keys)
 		if selected != nil {
@@ -702,7 +712,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header := outboundHeader(r.Header, svc)
 	if svc.Auth == policy.AuthGcloud {
 		account := snap.config.GoogleAccounts[svc.GoogleAccount]
-		token, err := h.googleToken(r.Context(), svc.GoogleAccount, account)
+		token, seq, err := h.googleToken(r.Context(), svc.GoogleAccount, account)
 		if err != nil {
 			h.refund(roleName, service, access.DailyRequests, start)
 			var failure *GoogleFailure
@@ -720,7 +730,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusServiceUnavailable, "Google connection changed during renewal")
 			return
 		}
-		upstreamKey = token
+		upstreamKey, googleSeq = token, seq
 		if account.QuotaProject != "" {
 			header.Set("X-Goog-User-Project", account.QuotaProject)
 		}
@@ -830,9 +840,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.dropAccessToken(svc, refresh, secret, upstreamKey)
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		// Invalidate only the token used; never replay an ambiguous write.
-		h.dropGoogleToken(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey)
+	if svc.Auth == policy.AuthGcloud {
+		// A 401 invalidates only the token used and marks the account
+		// refused; never replay an ambiguous write.
+		h.googleAnswered(r.Context(), snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey, googleSeq, resp.StatusCode)
 	}
 	// The transport already decoded gzip. Any other encoding would hide an
 	// echoed key from the redactor, so such a reply is not passed on.
@@ -998,13 +1009,14 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 		header.Set(name, value)
 	}
 	var googleAccount policy.GoogleAccount
+	var googleSeq uint64 // orders Google's answer to this call
 	if svc.Auth == policy.AuthGcloud {
 		googleAccount = snap.config.GoogleAccounts[svc.GoogleAccount]
-		token, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
+		token, seq, err := h.googleToken(ctx, svc.GoogleAccount, googleAccount)
 		if err != nil {
 			return nil, err
 		}
-		key = token
+		key, googleSeq = token, seq
 		if googleAccount.QuotaProject != "" {
 			header.Set("X-Goog-User-Project", googleAccount.QuotaProject)
 		}
@@ -1024,8 +1036,8 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 		}
 		return nil, errors.New("service unreachable")
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		h.dropGoogleToken(googleAccount, key)
+	if svc.Auth == policy.AuthGcloud {
+		h.googleAnswered(ctx, googleAccount, key, googleSeq, resp.StatusCode)
 	}
 	return resp, nil
 }

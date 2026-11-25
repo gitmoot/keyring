@@ -105,7 +105,7 @@ func TestGoogleRenewalCauseAndSecrecy(t *testing.T) {
 				if !strings.HasPrefix(response.Header().Get("Content-Type"), "text/plain") {
 					t.Fatal("diagnostic body changed transport")
 				}
-				status, _ := h.GoogleStatus("personal")
+				status := h.GoogleStatus("personal").Text(false)
 				_, persisted := readGoogleHistoryForTest(t, path)
 				combined := response.Body.String() + fmt.Sprint(response.Header()) + audit.String() + status + string(persisted)
 				for _, secret := range []string{stdoutSecret, stderrSecret, codeSecret, "https://accounts.google.com/", "access_token="} {
@@ -423,7 +423,7 @@ func TestGoogleUnsafeHistoryIsNotReadOrOverwritten(t *testing.T) {
 			if err != nil || !bytes.Equal(before, after) {
 				t.Fatal("unsafe history or symlink target was overwritten")
 			}
-			state, _ := restarted.GoogleStatus("personal")
+			state := restarted.GoogleStatus("personal").Text(false)
 			if strings.Contains(state+response.Body.String()+audit.String(), secret) {
 				t.Fatal("unsafe history leaked through status/log/response")
 			}

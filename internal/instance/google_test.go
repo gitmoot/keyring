@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/googlelogin"
+	"github.com/gitmoot/keyring/internal/server"
 )
 
 // Exercise the public admin transaction, not copies of the service definitions.
@@ -181,4 +183,73 @@ func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
 	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["quota_project"] != nil {
 		t.Fatalf("status exposed the project: %v", google)
 	}
+}
+
+// Status reports the Google services as needing a reconnect from the
+// controller's record of Google refusing the login: a refusal sealed with the
+// login, even from a proxy that never saw the 401 (as after a container
+// restart), and one whose seal did not finish in time (#184). Waiting for
+// the seal is bounded even while the instance transaction is busy.
+func TestContainerGoogleSealedRefusalStatus(t *testing.T) {
+	in, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(in.Close)
+	x := &inst{t: t, in: in, admin: in.AdminHandler()}
+	x.must("POST", "/create", map[string]any{"id": "person", "data_key": newKey(t), "listen": freeAddr(t)})
+	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	x.must("POST", "/google-drive", map[string]any{})
+	login := &googlelogin.Snapshot{Generation: strings.Repeat("b", 32), Account: "person@example.test", Project: "owned-project-1", Ready: true,
+		Files: map[string][]byte{"credentials.db": []byte("synthetic-credential")}}
+	check := func(step string, refused bool) {
+		t.Helper()
+		status := x.must("GET", "/status", nil)
+		reconnect, _ := status["reconnect_required"].(map[string]any)
+		failing, _ := status["failing"].(map[string]any)
+		for _, name := range []string{"drive", "google-me-drive", "google-me-upload", "google-me-sheets"} {
+			if (reconnect[name] == true) != refused || (failing[name] == server.GoogleRefusedContainer) != refused {
+				t.Fatalf("%s %s: reconnect=%v failing=%v", step, name, reconnect[name], failing[name])
+			}
+		}
+		want := map[bool]string{false: "connected", true: "reconnect_required"}[refused]
+		if phase := status["google"].(map[string]any)["phase"]; phase != want {
+			t.Fatalf("%s: phase %v", step, phase)
+		}
+	}
+	expected := ""
+	for _, refused := range []bool{false, true} {
+		next := *login
+		next.Refused = refused
+		if err := in.saveGoogle(context.Background(), expected, &next); err != nil {
+			t.Fatal(err)
+		}
+		expected = login.Generation
+		check(map[bool]string{false: "sealed login", true: "sealed refusal"}[refused], refused)
+	}
+	in.google.RecordRefusal(context.Background(), login.Binding(), false, 1)
+	check("accepted call", false)
+	// The seal waits for the instance transaction; the answer's deadline
+	// bounds the wait, and the late save then fails on it.
+	in.mu.Lock()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		in.google.RecordRefusal(ctx, login.Binding(), true, 2)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		in.mu.Unlock()
+		<-returned
+		t.Fatal("the refusal seal waited for the busy instance transaction past its deadline")
+	}
+	sealed := in.state.Google.Refused
+	in.mu.Unlock()
+	if sealed {
+		t.Fatal("a late seal saved the refusal")
+	}
+	check("unsealed refusal", true)
 }
