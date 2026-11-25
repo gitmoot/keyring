@@ -16,7 +16,7 @@ curl http://127.0.0.1:7700/_relay/health       # is the keyring reachable?
 
 The relay replaces any caller-supplied role token with the role's own. It refuses plain http except to a tailnet or loopback address. If the keyring is unreachable, calls fail with 502 `keyring unreachable ... never fall back to local keys`. Install steps are in `deploy/keyring-relay.service`.
 
-A reply that breaks off at the keyring is passed on to the caller as a broken connection, never a clean end, so a cut streamed answer cannot pass for a complete one (for HTTP/1.1 callers; an HTTP/1.0 reply ends by closing the connection either way).
+A reply that breaks off at the keyring is passed on to the caller as a broken connection, never a clean end, so a cut streamed answer cannot pass for a complete one. An HTTP/1.0 caller gets the whole answer at once with its `Content-Length`, or 502 if it breaks off or passes 32 MiB.
 
 ## Relay in a Docker container
 
