@@ -103,17 +103,19 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{if eq .Notice "uploaded"}}<p class="notice">Key file stored{{with .Meta.Kind}}: {{.}}{{end}}{{with .Meta.Fingerprint}}, fingerprint {{.}}{{end}}. Connect it to a service below.</p>{{else if eq .Notice "added"}}<p class="notice">Key added.</p>{{else if eq .Notice "connected"}}<p class="notice">Connected. Give agents access under Agents.</p>{{else if eq .Notice "renamed"}}<p class="notice">Key renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-added"}}<p class="notice">Value added, last in the list.</p>{{else if eq .Notice "value-labelled"}}<p class="notice">Label saved.</p>{{else if eq .Notice "value-moved"}}<p class="notice">Order saved. A key pool tries the values in this order.</p>{{else if eq .Notice "value-renamed"}}<p class="notice">Value renamed. Services that used it now use the new name.</p>{{else if eq .Notice "value-removed"}}<p class="notice">Value removed.</p>{{else if .Notice}}<p class="notice">Key {{.Notice}}.</p>{{end}}
 {{if eq .Error "password"}}<p class="error">Enter your dashboard password to do that.</p>{{else if eq .Error "part"}}<p class="error">Pick the value to replace.</p>{{else if eq .Error "value"}}<p class="error">Paste the new value, on one line.</p>{{else if eq .Error "value-control"}}<p class="error">The value has a line break or control character inside it, so it was not saved. Paste only the key itself.</p>{{else if eq .Error "in-use"}}<p class="error">Agents still use this key. Tick the box to delete it anyway.</p>{{else if eq .Error "no-test"}}<p class="error">No service using this key has a test request.</p>{{else if eq .Error "no-value"}}<p class="error">This key has no stored value.</p>{{else if eq .Error "changed"}}<p class="error">The key's values or the service changed during the test, so its result was not kept. Run it again.</p>{{end}}
 {{with .EditError}}<p class="error">{{.}}</p>{{end}}
+{{if eq .Error "never-shown"}}<p class="error">A Bitcoin key is never shown, not even here. Keep your own backup of it.</p>{{end}}
 <div class="head"><a class="back" href="/keys">Keys</a><h1 class="mono">{{.Row.Name}}</h1>{{template "status" .Row}}</div>
 <div class="card"><dl>
 {{if .Row.Parts}}<dt>Values</dt><dd>{{range .Row.Parts}}<span class="chip mono">{{.Name}}</span>{{with .Label}} · {{.}}{{end}} {{if .HasValue}}<span class="masked">••••••••</span>{{else}}<span class="mute">none stored</span>{{end}}{{if .Pooled}} <span class="pill {{.PoolClass}}">{{.PoolStatus}}</span> <span class="mute">{{.CallsToday}} today · {{.CallsWeek}} in 7 days{{if .FailuresToday}} · {{.FailuresToday}} refused today{{end}}{{with .LastUsed}} · last {{.}}{{end}}</span>{{end}}<br>{{end}}<span class="mute">never shown</span>{{if and (gt (len .Row.Parts) 0) (index .Row.Parts 0).Pooled}}<br><span class="hint">Key pool: each call uses the first value in this list that is not set aside; a value the provider refuses (bad key, no credit, rate limit) is set aside for a while and the call goes out again with the next.</span>{{end}}</dd>
 {{else}}<dt>Value</dt><dd>{{if .Row.HasValue}}<span class="masked">••••••••</span>{{with .Row.Label}} · {{.}}{{end}} <span class="mute">never shown</span>{{else}}none stored{{end}}</dd>{{end}}
 {{with .Meta.Kind}}<dt>File</dt><dd>{{.}}{{with $.Meta.Fingerprint}} · <code>{{.}}</code>{{end}}</dd>{{end}}
+{{with .Bitcoin}}<dt>Bitcoin key</dt><dd>{{.Kind}} · {{.Networks}}{{with .Fingerprint}} · fingerprint <code>{{.}}</code>{{end}} · <span class="mute">never shown</span></dd>{{end}}
 <dt>Services</dt><dd>{{range .Row.Services}}<a class="chip" href="/services/{{.}}">{{.}}</a>{{else}}<span class="mute">not connected yet</span>{{end}}</dd>
 <dt>Agents</dt><dd>{{range .Row.UsedBy}}<a class="chip" href="/agents/{{.}}">{{.}}</a>{{else}}<span class="mute">none</span>{{end}}</dd>
 <dt>Last used</dt><dd>{{with .Row.LastUsed}}{{.}}{{else}}never{{end}} · {{.Row.CallsToday}} today</dd>
 {{if not .Meta.CheckedAt.IsZero}}<dt>Tested</dt><dd>{{.Meta.CheckedAt.Format "2006-01-02 15:04"}} UTC</dd>{{end}}
 </dl>
-{{if .Row.AnyValue}}<details class="inline"><summary>Show {{if .Row.Parts}}values{{else}}value{{end}}</summary><form method="post" action="/keys/{{.Row.Name}}/reveal"><input type="hidden" name="csrf" value="{{.CSRF}}">{{template "password" .}}<div class="actions"><button class="ghost">Show</button></div></form></details>{{end}}
+{{if and .Row.AnyValue (not .NeverShown)}}<details class="inline"><summary>Show {{if .Row.Parts}}values{{else}}value{{end}}</summary><form method="post" action="/keys/{{.Row.Name}}/reveal"><input type="hidden" name="csrf" value="{{.CSRF}}">{{template "password" .}}<div class="actions"><button class="ghost">Show</button></div></form></details>{{end}}
 {{if .Testable}}<form method="post" action="/keys/{{.Row.Name}}/test" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Test now</button></form>{{end}}
 </div>
 
@@ -246,7 +248,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 {{with .Via}}<p class="hint">{{$.Form.Role}} can already use this service through its grant for the whole project <a href="/projects/{{.}}">{{.}}</a>, with the limits shown below. Saving here makes a grant for this service only, which then applies instead of the project grant. Switching it off here does not take the access away; remove the project grant on the project page.</p>{{end}}
 <form method="post" action="/access/{{.Form.Role}}/{{.Form.Service}}"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label class="switch"><input type="checkbox" name="on" value="yes"{{if .Form.On}} checked{{end}}> <span>{{.Form.Role}} may use {{.Form.Service}}</span></label>
-<details{{if or (ne .Form.Mode "full") (ne .Form.Paths "/") .Form.Daily .Form.Expires}} open{{end}}><summary>{{if and (eq .Form.Mode "full") (eq .Form.Paths "/") (not .Form.Daily) (not .Form.Expires)}}Full access · Limit access{{else}}Limited access{{end}}</summary>
+<details{{if or (ne .Form.Mode "full") (ne .Form.Paths "/") .Form.Daily .Form.Expires .Form.MaxSatsTx .Form.MaxSatsDay}} open{{end}}><summary>{{if and (eq .Form.Mode "full") (eq .Form.Paths "/") (not .Form.Daily) (not .Form.Expires) (not .Form.MaxSatsTx) (not .Form.MaxSatsDay)}}Full access · Limit access{{else}}Limited access{{end}}</summary>
 <p class="lbl">Allowed</p>
 <div class="seg" role="radiogroup" aria-label="Allowed methods">
 <label><input type="radio" name="mode" value="read"{{if eq .Form.Mode "read"}} checked{{end}}><span>Read only</span></label>
@@ -259,6 +261,9 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <p class="hint">/ allows everything; /v1 allows /v1 and below.</p>
 <div class="two"><label>Daily limit<input name="daily" inputmode="numeric" value="{{.Form.Daily}}" placeholder="none"></label>
 <label>Ends on (UTC)<input type="date" name="expires" value="{{.Form.Expires}}"></label></div>
+{{if .Bitcoin}}<div class="two"><label>Max sats per PSBT<input name="max_sats_tx" inputmode="numeric" value="{{.Form.MaxSatsTx}}" placeholder="none"></label>
+<label>Max sats per day (UTC)<input name="max_sats_day" inputmode="numeric" value="{{.Form.MaxSatsDay}}" placeholder="none"></label></div>
+<p class="hint">Counted per signed PSBT: outputs that do not pay back to this key, plus the fee. Paths: /sign-psbt signs, /addresses lists addresses.</p>{{end}}
 </details>
 {{template "password" .}}<div class="actions"><button>Save</button><a class="btn ghost" href="/agents/{{.Form.Role}}">Cancel</a></div></form></div>
 {{template "bottom"}}{{end}}
@@ -329,7 +334,25 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 {{if .F.KeyPool}}<dt>Key pool</dt><dd>every value of <span class="mono">{{.F.Key}}</span>, in the key's list order; each value's state and use are on the <a href="/keys/{{.F.KeyBase}}">key's page</a></dd>{{end}}
 {{if .F.ForwardRole}}<dt>Agent name</dt><dd>sent as <span class="mono">X-Keyring-Role</span></dd>{{end}}
 {{if .F.ExtraHeaders}}<dt>Extra secret headers</dt><dd class="mono">{{range .F.ExtraHeaders}}{{.}}<br>{{end}}</dd>{{end}}
+{{with .Bitcoin}}<dt>Network</dt><dd>{{.Network}}</dd>
+<dt>Signs for</dt><dd class="mono">{{range .Paths}}{{.}}<br>{{end}}{{with .Script}}{{.}} (one WIF key){{end}}</dd>
+<dt>Sighash</dt><dd class="mono">{{if .Sighash}}{{range .Sighash}}{{.}} {{end}}{{else}}default all{{end}}</dd>
+<dt>Calls</dt><dd class="mono">POST /_keyring/bitcoin/{{$.Name}}/sign-psbt<br>GET /_keyring/bitcoin/{{$.Name}}/addresses?path=…</dd>{{end}}
+{{with .BitcoinKeyError}}<dt>Bitcoin key</dt><dd><span class="pill warn">cannot sign</span> {{.}}</dd>{{end}}
+{{with .BitcoinFingerprint}}<dt>Fingerprint</dt><dd class="mono">{{.}} <span class="mute">key never shown</span></dd>{{end}}
 </dl></div>
+{{if .BitcoinWatch}}<div class="card"><h2>Watch-only</h2>
+<div class="tablewrap"><table class="t"><thead><tr><th>Path</th><th>Descriptor</th><th>First address</th></tr></thead><tbody>
+{{range .BitcoinWatch}}<tr><td class="mono">{{.Path}}</td><td class="mono">{{.Descriptor}}</td><td class="mono">{{.FirstAddress}}</td></tr>{{end}}
+</tbody></table></div>
+<p class="hint">Public keys only: import a descriptor watch-only to check addresses and balances.</p></div>{{end}}
+{{if eq .Kind "bitcoin-psbt-sign"}}<div class="card"><h2>Signatures</h2>
+{{with .SignaturesError}}<p class="error">{{.}}</p>{{end}}
+{{if .Signatures}}<div class="tablewrap"><table class="t"><thead><tr><th>Time (UTC)</th><th>Agent</th><th>Network</th><th>Txid</th><th>Inputs</th><th class="num">External sats</th><th class="num">Fee sats</th><th>Status</th></tr></thead><tbody>
+{{range .Signatures}}<tr><td class="mono">{{.Time}}</td><td>{{.Role}}</td><td>{{.Network}}</td><td class="mono">{{.Txid}}</td><td class="mono">{{range $i, $n := .Inputs}}{{if $i}}, {{end}}{{$n}}{{end}}</td><td class="num">{{.ExternalSats}}</td><td class="num">{{.FeeSats}}</td><td><span class="pill ok">signed</span></td></tr>{{end}}
+</tbody></table></div>
+{{else if not .SignaturesError}}<p class="mute">No signatures in the last {{.SignatureDays}} days.</p>{{end}}
+<p class="hint">From the audit log, newest first, the last {{.SignatureDays}} days (up to 50). The audit never records a PSBT or a key.</p></div>{{end}}
 {{if .Editable}}
 <div class="card"><h2>Edit</h2>
 <p class="hint">Changes the settings only. Agents with their own grant for this service keep it, with the same methods, paths and limits. Changing the project changes which whole-project grants reach it: agents with a grant for the old project lose this service, those with one for the new project gain it. The key is sent to the base URL below, so check it.</p>

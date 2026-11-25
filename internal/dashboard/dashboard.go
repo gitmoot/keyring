@@ -359,7 +359,8 @@ func spark(week [7]int) []int {
 // isFull reports whether an access is what "give this agent this API"
 // gives: every method and path, no limit, no end.
 func isFull(a policy.Access) bool {
-	return sameSet(a.Methods, fullMethods) && len(a.Paths) == 1 && a.Paths[0] == "/" && a.DailyRequests == 0 && a.Expires == nil
+	return sameSet(a.Methods, fullMethods) && len(a.Paths) == 1 && a.Paths[0] == "/" && a.DailyRequests == 0 && a.Expires == nil &&
+		a.BitcoinMaxSatsPerTx == 0 && a.BitcoinMaxSatsPerDay == 0
 }
 
 // providerOf names the API a service calls, from the built-in presets.
@@ -375,6 +376,9 @@ func providerOf(svc policy.Service) string {
 	}
 	if svc.Auth == policy.AuthMinisignSign {
 		return "minisign (sign only)"
+	}
+	if svc.Auth == policy.AuthBitcoinPSBTSign {
+		return "Bitcoin PSBT (sign only)"
 	}
 	for _, p := range presets {
 		if strings.TrimSuffix(svc.Base, "/") == strings.TrimSuffix(p.Base, "/") {
@@ -1501,10 +1505,16 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 		if row.Name == name {
 			meta, _ := b.loadMeta()
 			errCode := r.URL.Query().Get("error")
+			values, err := store.Load(b.StorePath)
+			if err != nil {
+				b.fail(w, sid, err)
+				return
+			}
+			info, never := neverShown(b.Proxy.Config(), row, values)
 			b.render(w, status, "key", sid, map[string]any{
 				"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
 				"Notice": r.URL.Query().Get("done"), "Error": errCode, "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
-				"Connect": f, "Presets": presetOptions(),
+				"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never,
 			})
 			return
 		}

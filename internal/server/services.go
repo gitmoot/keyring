@@ -71,6 +71,8 @@ func serviceCall(name string, s policy.Service) string {
 		return "POST " + ed25519SignPrefix + name
 	case policy.AuthMinisignSign:
 		return "POST " + minisignPrefix + name
+	case policy.AuthBitcoinPSBTSign:
+		return "POST " + bitcoinPrefix + name + "/" + bitcoinSignAction
 	case policy.AuthEgressProxy, policy.AuthGcloudLogin:
 		return ""
 	}

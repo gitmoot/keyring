@@ -61,6 +61,10 @@ func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) 
 		b.fail(w, sid, err)
 		return
 	}
+	if _, never := neverShown(b.Proxy.Config(), row, keys); never {
+		http.Redirect(w, r, "/keys/"+name+"?error=never-shown", http.StatusSeeOther)
+		return
+	}
 	var values []revealedValue
 	var shown []string
 	for i, full := range row.valueNames() {

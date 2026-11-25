@@ -37,6 +37,8 @@ type AuditRow struct {
 	Note    string `json:"note,omitempty"`
 	// Admin is a dashboard event (login, key added, ...).
 	Admin string `json:"admin,omitempty"`
+	// Bitcoin is a PSBT signature (#187).
+	Bitcoin *BitcoinAudit `json:"bitcoin,omitempty"`
 }
 
 // AuditFilter narrows a search: exact service and role, path substring.

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -267,6 +268,13 @@ func (in *Instance) commit(next *State, key []byte) error {
 	}
 	if in.proxy == nil {
 		in.proxy = server.New(cfg, next.Keys, in.opt.Audit)
+		if in.opt.StatePath != "" {
+			// Without a state file there is no disk: bitcoin daily limits
+			// then refuse rather than reset on restart.
+			if err := in.proxy.OpenBitcoinSpend(filepath.Join(filepath.Dir(in.opt.StatePath), server.BitcoinSpendFile)); err != nil {
+				fmt.Fprintf(in.opt.Log, "bitcoin daily totals unavailable: %v\n", err)
+			}
+		}
 		in.consent = consent.New(in.proxy.Config, instanceKeys{in}, in.opt.Audit)
 		if in.google != nil {
 			in.proxy.SetGoogleCommand(in.google.Token)
