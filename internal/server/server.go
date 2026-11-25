@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/framing"
 	"github.com/gitmoot/keyring/internal/gcloudexec"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
@@ -904,21 +905,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// only end and a cut stream would look complete. Such a caller
 		// gets the whole answer with its length, or a 502. (A HEAD reply
 		// has no body to cut and keeps the streaming path below.)
-		var body bytes.Buffer
-		upstream := &io.LimitedReader{R: resp.Body, N: policy.HTTP10AnswerLimit + 1}
-		red := newRedactor(&body, forms)
+		// Both what is read and what masking makes of it are capped, so
+		// the buffer never grows past the limit.
+		body := &cappedBuffer{max: framing.HTTP10AnswerLimit}
+		upstream := &io.LimitedReader{R: resp.Body, N: framing.HTTP10AnswerLimit + 1}
+		red := newRedactor(body, forms)
 		_, err := io.Copy(red, upstream)
 		if err == nil {
 			err = red.Close()
 		}
-		if err != nil {
-			fail(http.StatusBadGateway, "upstream read failed")
+		if errors.Is(err, errAnswerTooLarge) || (err == nil && upstream.N == 0) {
+			fail(http.StatusBadGateway, "answer too large for an HTTP/1.0 caller")
 			return
 		}
-		// Masking may lengthen the answer, so the limit applies to what
-		// would be sent as well as to what was read.
-		if upstream.N == 0 || body.Len() > policy.HTTP10AnswerLimit {
-			fail(http.StatusBadGateway, "answer too large for an HTTP/1.0 caller")
+		if err != nil {
+			fail(http.StatusBadGateway, "upstream read failed")
 			return
 		}
 		copyHeaders()
@@ -1517,6 +1518,22 @@ func remoteAddr(hostport string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return addr.Unmap(), true
+}
+
+// errAnswerTooLarge is cappedBuffer's refusal to grow past its limit.
+var errAnswerTooLarge = errors.New("answer too large")
+
+// cappedBuffer holds at most max bytes; a write past that is refused whole.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errAnswerTooLarge
+	}
+	return b.Buffer.Write(p)
 }
 
 type countingWriter struct {
