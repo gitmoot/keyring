@@ -902,6 +902,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sink := &countingWriter{w: w}
 	red := newRedactor(sink, forms)
 	buf := make([]byte, 32<<10)
+	upstreamBroke := false
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -916,6 +917,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			if readErr != io.EOF {
 				rec.Note = "upstream read failed"
+				upstreamBroke = true
 			}
 			break
 		}
@@ -925,6 +927,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	rec.Bytes = sink.n
+	if upstreamBroke {
+		// A cut upstream stream must reach the caller as a broken
+		// connection, never a clean end that looks complete. The deferred
+		// audit write still runs while the abort unwinds.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 var errBadQuery = errors.New("malformed query string")

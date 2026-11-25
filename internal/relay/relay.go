@@ -259,8 +259,13 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			}
 		}
-		if readErr != nil {
+		if readErr == io.EOF {
 			return
+		}
+		if readErr != nil {
+			// Pass a cut stream on as a broken connection, never a
+			// clean end that looks complete.
+			panic(http.ErrAbortHandler)
 		}
 	}
 }
