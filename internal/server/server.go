@@ -4,7 +4,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
@@ -1524,17 +1523,28 @@ func remoteAddr(hostport string) (netip.Addr, bool) {
 var errAnswerTooLarge = errors.New("answer too large")
 
 // cappedBuffer holds at most max bytes; a write past that is refused whole.
+// Its capacity never exceeds max either, so a full answer keeps no more than
+// max bytes of memory. Only Write, Len and Bytes exist: nothing bypasses the cap.
 type cappedBuffer struct {
-	bytes.Buffer
+	buf []byte
 	max int
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > b.max {
+	if len(b.buf)+len(p) > b.max {
 		return 0, errAnswerTooLarge
 	}
-	return b.Buffer.Write(p)
+	if need := len(b.buf) + len(p); need > cap(b.buf) {
+		grown := make([]byte, len(b.buf), min(max(2*cap(b.buf), need, 4096), b.max))
+		copy(grown, b.buf)
+		b.buf = grown
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
 }
+
+func (b *cappedBuffer) Len() int      { return len(b.buf) }
+func (b *cappedBuffer) Bytes() []byte { return b.buf }
 
 type countingWriter struct {
 	w io.Writer
