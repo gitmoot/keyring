@@ -589,8 +589,9 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		c.APITokenSHA256 = "" // a token hash, like the roles' hashes, is not shown
 		consentView = &c
 	}
-	// Why a service's refresh failed, for oauth2 services whose last
-	// refresh failed (never a token).
+	// Why a service's credential is failing: an oauth2 refresh failure, or
+	// a Google account that cannot mint or whose tokens Google refuses
+	// (never a token).
 	failing := map[string]string{}
 	reconnect := map[string]bool{}
 	for name, svc := range s.Services {
@@ -603,11 +604,14 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 				reconnect[name] = true
 			}
 		} else if svc.Auth == policy.AuthGcloud || svc.Auth == policy.AuthGcloudLogin {
-			why, _ := in.proxy.GoogleStatus(svc.GoogleAccount)
+			why, _, refused := in.proxy.GoogleStatus(svc.GoogleAccount)
 			switch why {
 			case "not configured", "not checked", "renewing", "renewal required", "ready":
 			default:
 				failing[name] = why
+			}
+			if refused {
+				reconnect[name] = true
 			}
 		}
 	}

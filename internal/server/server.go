@@ -830,9 +830,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.dropAccessToken(svc, refresh, secret, upstreamKey)
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		// Invalidate only the token used; never replay an ambiguous write.
-		h.dropGoogleToken(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey)
+	if svc.Auth == policy.AuthGcloud {
+		// A 401 invalidates only the token used and marks the account
+		// refused; never replay an ambiguous write.
+		h.googleAnswered(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey, resp.StatusCode)
 	}
 	// The transport already decoded gzip. Any other encoding would hide an
 	// echoed key from the redactor, so such a reply is not passed on.
@@ -1024,8 +1025,8 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 		}
 		return nil, errors.New("service unreachable")
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		h.dropGoogleToken(googleAccount, key)
+	if svc.Auth == policy.AuthGcloud {
+		h.googleAnswered(googleAccount, key, resp.StatusCode)
 	}
 	return resp, nil
 }

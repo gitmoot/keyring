@@ -242,7 +242,7 @@ interface Reply {
 	unlocked?: boolean;
 	keys?: string[];
 	services?: Record<string, { key: string; auth?: string; google_account?: string; extra_headers?: Record<string, string> }>;
-	google?: { phase: string; busy: boolean; error?: string };
+	google?: { phase: string; busy: boolean; error?: string; step?: string };
 	failing?: Record<string, string>;
 	reconnect_required?: Record<string, boolean>;
 	roles?: Record<string, { access?: Record<string, unknown>; expires?: string }>;
@@ -604,12 +604,15 @@ export class KeyringInstance extends DurableObject<Env> {
 		return this.withInstance(async (m) => {
 			const s = await this.adminJSON(m, "GET", "/status");
 			const keys = new Set<string>(s.keys ?? []);
+			// A failed setup names its step: "google_command_failed (project_create)".
+			const googleError = s.google?.error ? s.google.error + (s.google.step ? ` (${s.google.step})` : "") : undefined;
 			const list = Object.entries(s.services ?? {})
 				.map(([name, svc]) => {
 					const google = svc.google_account === "me" && (svc.auth === "gcloud" || svc.auth === "gcloud-login");
 					const credentialsPresent = keys.has(svc.key) && Object.values(svc.extra_headers ?? {}).every((key) => keys.has(key));
-					return { name, connected: google ? s.google?.phase === "connected" : credentialsPresent && !s.reconnect_required?.[name],
-						failing: google ? s.google?.error ?? s.failing?.[name] ?? (s.google?.phase === "connected" ? null : "Google connection is not ready") : s.failing?.[name] ?? null };
+					// Google refusing the account's tokens (401) is not connected, even with a sealed login.
+					return { name, connected: google ? s.google?.phase === "connected" && !s.reconnect_required?.[name] : credentialsPresent && !s.reconnect_required?.[name],
+						failing: google ? googleError ?? s.failing?.[name] ?? (s.google?.phase === "connected" ? null : "Google connection is not ready") : s.failing?.[name] ?? null };
 				})
 				.sort((a, b) => a.name.localeCompare(b.name));
 			return { body: { services: list } };

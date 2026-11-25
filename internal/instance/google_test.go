@@ -1,12 +1,16 @@
 package instance
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gitmoot/keyring/internal/googlelogin"
 )
 
 // Exercise the public admin transaction, not copies of the service definitions.
@@ -103,5 +107,52 @@ func TestContainerGoogleProvisioning(t *testing.T) {
 	var view map[string]any
 	if json.Unmarshal(raw, &view) != nil || view["phase"] != "disconnected" || view["account"] != nil || view["quota_project"] != nil {
 		t.Fatalf("unsafe connection metadata: %s", raw)
+	}
+}
+
+// The admin side may name an existing project for the retained sign-in's
+// setup; {} stays the provisioning contract and unknown fields stay refused.
+func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
+	in, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(in.Close)
+	x := &inst{t: t, in: in, admin: in.AdminHandler()}
+	x.must("POST", "/create", map[string]any{"id": "person", "data_key": newKey(t), "listen": freeAddr(t)})
+	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	for _, tc := range []struct {
+		body any
+		code int
+	}{
+		{map[string]any{"project": "Not_A_Project"}, http.StatusBadRequest},
+		{map[string]any{"other": "field"}, http.StatusBadRequest},
+		// No Google sign-in yet: nothing to set the project for.
+		{map[string]any{"project": "owned-project-1"}, http.StatusConflict},
+		{map[string]any{}, http.StatusOK},
+	} {
+		if code, _ := x.call("POST", "/google-drive", tc.body); code != tc.code {
+			t.Fatalf("%v: %d; want %d", tc.body, code, tc.code)
+		}
+	}
+	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["phase"] != "disconnected" {
+		t.Fatalf("refused project choice changed the connection: %v", google)
+	}
+	// A sign-in whose setup failed (Google's project limit) is retained.
+	signedIn := &googlelogin.Snapshot{Generation: strings.Repeat("a", 32), Account: "person@example.test", Project: "drivekey-aaaaaaaaaaaaaaaaaaaa",
+		Files: map[string][]byte{"credentials.db": []byte("synthetic-credential")}}
+	if err := in.saveGoogle(context.Background(), "", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	in.google.SetState(signedIn)
+	x.must("POST", "/google-drive", map[string]any{"project": "owned-project-1"})
+	in.mu.Lock()
+	sealed := *in.state.Google
+	in.mu.Unlock()
+	if sealed.Project != "owned-project-1" || !sealed.ProjectChosen || sealed.Ready || sealed.Account != signedIn.Account {
+		t.Fatalf("chosen project not sealed for setup: %+v", sealed)
+	}
+	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["quota_project"] != nil {
+		t.Fatalf("status exposed the project: %v", google)
 	}
 }

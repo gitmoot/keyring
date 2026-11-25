@@ -407,3 +407,41 @@ func TestContainerGoogleRenewalBeyondHostBudget(t *testing.T) {
 		t.Fatalf("cached request launched another SDK renewal: calls=%q err=%v", calls, err)
 	}
 }
+
+// Google can refuse every token gcloud still mints ("Active session is
+// invalid", #184). The account must report failing and needing a reconnect
+// until Google accepts a call again, and each refusal must force a new mint.
+func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
+	h, audit, _, checks, _ := googleFixture(t)
+	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 200 {
+		t.Fatalf("first call: %d", w.Code)
+	}
+	if state, _, reconnect := h.GoogleStatus("personal"); state != "ready" || reconnect {
+		t.Fatalf("accepted token: %q reconnect=%v", state, reconnect)
+	}
+	// The fixture's Google answers every write with 401.
+	for round := range 2 {
+		if w := call(h, "POST", "/personal/files", "role-personal", nil); w.Code != 401 {
+			t.Fatalf("refused call %d: %d", round, w.Code)
+		}
+		if checks.Load() != int32(round+1) {
+			t.Fatalf("refused call %d: %d mints; a refused token must not be reused", round, checks.Load())
+		}
+		state, expires, reconnect := h.GoogleStatus("personal")
+		if state != googleRefusedHost || !reconnect || !expires.IsZero() {
+			t.Fatalf("refused call %d: %q reconnect=%v", round, state, reconnect)
+		}
+	}
+	if state, _, reconnect := h.GoogleStatus("business"); reconnect || state != "not checked" {
+		t.Fatalf("other account marked: %q", state)
+	}
+	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 200 || checks.Load() != 3 {
+		t.Fatalf("call after refusal: %d with %d mints", w.Code, checks.Load())
+	}
+	if state, _, reconnect := h.GoogleStatus("personal"); state != "ready" || reconnect {
+		t.Fatalf("accepted call did not clear the refusal: %q reconnect=%v", state, reconnect)
+	}
+	if strings.Contains(audit.String(), "synthetic-") {
+		t.Fatal("audit exposed a credential")
+	}
+}

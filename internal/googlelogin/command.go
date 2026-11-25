@@ -26,6 +26,22 @@ const (
 	errTerms   commandError = "cloud_terms_not_accepted"
 	errRate    commandError = "rate_limited"
 	errCommand commandError = "google_command_failed"
+	// errProjectHidden: Google answers a deleted-for-good project and one
+	// this account cannot reach identically (see setup).
+	errProjectHidden commandError = "project_not_visible"
+	// errProjectTaken: projects create refused the ID; Google never reuses
+	// one, even after the project is deleted.
+	errProjectTaken commandError = "project_id_in_use"
+	// errProjectInactive: the project is deleted or pending deletion.
+	errProjectInactive commandError = "project_not_active"
+	// errProjectRefused: even a fresh project ID was refused at create.
+	errProjectRefused commandError = "project_not_accessible"
+	// errProjectLimit: the account may not create more projects. Deleted
+	// projects keep counting for 30 days; a new ID never helps.
+	errProjectLimit commandError = "project_limit_reached"
+	// errProjectNotFound: a project the owner named is not ACTIVE-visible
+	// to this account.
+	errProjectNotFound commandError = "project_not_found"
 )
 
 // Raw SDK output never becomes an error, log entry or HTTP response.
@@ -41,8 +57,16 @@ func classifyCommand(data []byte) error {
 		gcloudexec.ClassifyReauth(text).Required,
 		has("you do not currently have an active account selected"):
 		return errLogin
+	// "You've reached your project limit", "... allotted project quota",
+	// metric projects_count. Before rate limits: waiting never ends it.
+	case has("project limit"), has("project quota"), has("projects_count"):
+		return errProjectLimit
 	case has("resource_exhausted"), has("quota exceeded"), has("'status': 429"):
 		return errRate
+	case has("does not have permission to access projects instance"):
+		return errProjectHidden
+	case has("already in use by another project"), has("requested entity already exists"):
+		return errProjectTaken
 	default:
 		return errCommand
 	}

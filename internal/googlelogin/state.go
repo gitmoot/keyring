@@ -23,12 +23,15 @@ var databaseNames = [...]string{"credentials.db", "access_tokens.db", "default_c
 // Configuration text is regenerated, not imported from an arbitrary gcloud
 // configuration that could select another credential source or executable.
 type Snapshot struct {
-	Generation string            `json:"generation"`
-	Account    string            `json:"account,omitempty"`
-	Project    string            `json:"project,omitempty"`
-	Ready      bool              `json:"ready,omitempty"`
-	NeedsLogin bool              `json:"needs_login,omitempty"`
-	Files      map[string][]byte `json:"files,omitempty"`
+	Generation string `json:"generation"`
+	Account    string `json:"account,omitempty"`
+	Project    string `json:"project,omitempty"`
+	// ProjectChosen: the owner named an existing project of the account.
+	// Setup only checks it; it never creates or replaces it.
+	ProjectChosen bool              `json:"project_chosen,omitempty"`
+	Ready         bool              `json:"ready,omitempty"`
+	NeedsLogin    bool              `json:"needs_login,omitempty"`
+	Files         map[string][]byte `json:"files,omitempty"`
 }
 
 func validGeneration(value string) bool {
@@ -77,7 +80,7 @@ func (s *Snapshot) Validate() error {
 			return errors.New("invalid Google login account")
 		}
 	}
-	if s.Project != "" && !validProject(s.Project) {
+	if s.Project != "" && !validProject(s.Project) || s.ProjectChosen && s.Project == "" {
 		return errors.New("invalid Google project")
 	}
 	total := 0

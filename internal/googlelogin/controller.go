@@ -25,6 +25,9 @@ type View struct {
 	Busy    bool   `json:"busy"`
 	URL     string `json:"-"`
 	Error   string `json:"error,omitempty"`
+	// Step is the fixed name of the project setup command that failed
+	// (project_describe, project_create, services_enable, access_token).
+	Step string `json:"step,omitempty"`
 }
 
 type job struct {
@@ -125,7 +128,7 @@ func (c *Controller) Status() View {
 	} else if c.job != nil && !c.job.done {
 		v.Phase, v.Busy = c.job.view.Phase, true
 	} else if c.job != nil && c.job.done && (c.state == nil || !c.state.Ready) {
-		v.Error = c.job.view.Error
+		v.Error, v.Step = c.job.view.Error, c.job.view.Step
 	}
 	return v
 }
@@ -182,6 +185,46 @@ func (c *Controller) Submit(id, code string) error {
 	return nil
 }
 
+// ErrProjectID refuses a project ID that is not in Google's format.
+var ErrProjectID = errors.New("enter a Google Cloud project ID: 6-30 lowercase letters, digits or hyphens, starting with a letter and not ending with a hyphen")
+
+// ErrProjectNotChoosable: a project can only be chosen for a retained sign-in
+// whose setup has not finished, while no connection runs.
+var ErrProjectNotChoosable = errors.New("a project can be chosen only after Google sign-in, before Drive is connected, while no connection runs")
+
+// ChooseProject makes setup use an existing project the account owns
+// instead of creating one: Google limits how many projects an account may
+// create, and deleted ones count for 30 days. The ID is not secret; it is
+// sealed like a generated one. Setup then only checks it is ACTIVE and
+// reachable, enables the APIs and probes; it never creates or replaces it.
+func (c *Controller) ChooseProject(ctx context.Context, project string) error {
+	if !validProject(project) {
+		return ErrProjectID
+	}
+	busy := func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.closing || c.job != nil && !c.job.done
+	}
+	if busy() {
+		return ErrProjectNotChoosable
+	}
+	if err := c.acquire(ctx); err != nil {
+		return err
+	}
+	defer func() { <-c.ops }()
+	current := c.snapshot()
+	if busy() || current == nil || current.Ready || current.Account == "" {
+		return ErrProjectNotChoosable
+	}
+	if current.Project == project && current.ProjectChosen {
+		return nil
+	}
+	next := *current
+	next.Project, next.ProjectChosen = project, true
+	return c.save(ctx, current.Generation, &next)
+}
+
 func (c *Controller) acquire(ctx context.Context) error {
 	select {
 	case c.ops <- struct{}{}:
@@ -212,6 +255,10 @@ func (c *Controller) finish(j *job, err error) {
 	j.view.Phase = "connected"
 	if err != nil {
 		j.view.Phase = "failed"
+		var failed stepError
+		if errors.As(err, &failed) {
+			j.view.Step = failed.step
+		}
 		var classified commandError
 		if errors.As(err, &classified) {
 			j.view.Error = string(classified)
@@ -250,7 +297,7 @@ func (c *Controller) connectLocked(ctx context.Context, j *job) error {
 		if current != nil {
 			next.Account = current.Account
 			if current.Project != "" {
-				next.Project = current.Project
+				next.Project, next.ProjectChosen = current.Project, current.ProjectChosen
 			}
 		}
 		c.mu.Lock()

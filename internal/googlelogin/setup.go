@@ -2,6 +2,8 @@ package googlelogin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -63,27 +65,39 @@ func (c *Controller) retryProjectCommand(ctx context.Context, s *Snapshot, args 
 	}
 }
 
-func (c *Controller) setup(ctx context.Context, s *Snapshot) error {
-	lifecycle, err := c.projectCommand(ctx, s, "projects", "describe", s.Project, "--format=value(lifecycleState)")
+// stepError names the setup command that failed. The name is fixed text;
+// the command's output never reaches it.
+type stepError struct {
+	step string
+	err  error
+}
+
+func (e stepError) Error() string { return e.step + ": " + e.err.Error() }
+
+func (e stepError) Unwrap() error { return e.err }
+
+func atStep(step string, err error) error {
 	if err == nil {
-		if strings.TrimSpace(string(lifecycle)) != "ACTIVE" {
-			return commandError("project_not_active")
-		}
-	} else {
-		if errors.Is(err, errLogin) || errors.Is(err, errTerms) || ctx.Err() != nil {
-			return err
-		}
-		if err := c.retryProjectCommand(ctx, s, "projects", "create", s.Project, "--name=drivekey"); err != nil {
-			return err
-		}
+		return nil
+	}
+	return stepError{step, err}
+}
+
+func (c *Controller) setup(ctx context.Context, s *Snapshot) error {
+	if err := c.ensureProject(ctx, s); err != nil {
+		return err
+	}
+	// A fresh project ID may have been sealed above.
+	if current := c.snapshot(); current != nil && current.Generation == s.Generation {
+		s = current
 	}
 	if err := c.retryProjectCommand(ctx, s, "services", "enable", "drive.googleapis.com", "sheets.googleapis.com", "--project="+s.Project); err != nil {
-		return err
+		return atStep("services_enable", err)
 	}
 	for attempt := 0; attempt < 12; attempt++ {
 		token, err := c.projectCommand(ctx, s, "auth", "print-access-token", s.Account)
 		if err != nil {
-			return err
+			return atStep("access_token", err)
 		}
 		err = c.probe(ctx, s, strings.TrimSpace(string(token)))
 		if err == nil {
@@ -97,6 +111,79 @@ func (c *Controller) setup(ctx context.Context, s *Snapshot) error {
 		}
 	}
 	return commandError("api_disabled")
+}
+
+// ensureProject makes sure the retained project is ACTIVE, creating it on
+// first use. Google answers describe for a project deleted for good and for
+// one this account cannot reach with the same "does not have permission to
+// access projects instance [id] (or it may not exist)", and create with the
+// same "already in use by another project" for both: the two cases cannot be
+// told apart, so do not try. Either way the retained ID is unusable for this
+// account, and Drive files live in the account, not the project, so a fresh
+// project ID is created once. A fresh ID refused again is not retried.
+func (c *Controller) ensureProject(ctx context.Context, s *Snapshot) error {
+	if s.ProjectChosen {
+		// The owner's own project: check it, never create or replace it.
+		err := c.describeProject(ctx, s)
+		if errors.Is(err, errProjectHidden) {
+			return atStep("project_describe", errProjectNotFound)
+		}
+		return err
+	}
+	// A new ID answers describe as hidden too; any describe failure other
+	// than login or terms may be a project not created yet.
+	err := c.describeProject(ctx, s)
+	if err == nil || errors.Is(err, errProjectInactive) || errors.Is(err, errLogin) || errors.Is(err, errTerms) || ctx.Err() != nil {
+		return err
+	}
+	err = c.retryProjectCommand(ctx, s, "projects", "create", s.Project, "--name=drivekey")
+	if !errors.Is(err, errProjectTaken) {
+		return atStep("project_create", err)
+	}
+	// The first describe may have failed for a passing reason while the
+	// project is ours: ask once more before giving the ID up.
+	if err := c.describeProject(ctx, s); !errors.Is(err, errProjectHidden) {
+		return err
+	}
+	fresh, err := c.freshProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	err = c.retryProjectCommand(ctx, fresh, "projects", "create", fresh.Project, "--name=drivekey")
+	if errors.Is(err, errProjectTaken) {
+		err = errProjectRefused
+	}
+	return atStep("project_create", err)
+}
+
+func (c *Controller) describeProject(ctx context.Context, s *Snapshot) error {
+	lifecycle, err := c.projectCommand(ctx, s, "projects", "describe", s.Project, "--format=value(lifecycleState)")
+	if err != nil {
+		return atStep("project_describe", err)
+	}
+	if strings.TrimSpace(string(lifecycle)) != "ACTIVE" {
+		return atStep("project_describe", errProjectInactive)
+	}
+	return nil
+}
+
+// freshProject seals a new project ID before it is created, as the first
+// connection does, so a retry after a crash reuses the same ID.
+func (c *Controller) freshProject(ctx context.Context, s *Snapshot) (*Snapshot, error) {
+	current := c.snapshot()
+	if current == nil || current.Generation != s.Generation {
+		return nil, errors.New("Google connection was replaced")
+	}
+	var random [10]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return nil, err
+	}
+	next := *current
+	next.Project = "drivekey-" + hex.EncodeToString(random[:])
+	if err := c.save(ctx, s.Generation, &next); err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 func (c *Controller) probe(ctx context.Context, s *Snapshot, token string) error {
