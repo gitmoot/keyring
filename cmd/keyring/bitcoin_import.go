@@ -57,10 +57,10 @@ func bitcoinImport(configPath, storePath, network, name string, stdin io.Reader,
 
 // checkBitcoinValue refuses to store value as name when it is a Bitcoin key
 // that a service other than a Bitcoin signing service in the settings of
-// configPath would then use (policy.CheckBitcoinKeys): a proxy service would
-// send it upstream, and the keyring would refuse those settings at its next
-// reload or start. Without the settings that cannot be checked, so a
-// Bitcoin key needs configPath.
+// configPath would then use (policy.CheckAddedBitcoinKeys): a proxy service
+// would send it upstream, and the keyring could only refuse those calls.
+// Without the settings that cannot be checked, so a Bitcoin key needs
+// configPath.
 func checkBitcoinValue(configPath, storePath, name, value string) error {
 	if !bitcoin.IsKey(value) {
 		return nil
@@ -68,10 +68,15 @@ func checkBitcoinValue(configPath, storePath, name, value string) error {
 	if configPath == "" {
 		return fmt.Errorf("%s is a Bitcoin key: pass --config so keyring can check that only a Bitcoin signing service uses it", name)
 	}
-	cfg, keys, err := loadConfig(configPath, storePath, false, io.Discard)
+	cfg, before, err := loadConfig(configPath, storePath, false, io.Discard)
 	if err != nil {
 		return err
 	}
-	keys[name] = value
-	return cfg.CheckBitcoinKeys(keys)
+	keys := map[string]string{name: value}
+	for k, v := range before {
+		if k != name {
+			keys[k] = v
+		}
+	}
+	return cfg.CheckAddedBitcoinKeys(keys, cfg.AccessList, before)
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"maps"
 	"net"
 	"net/http"
 	"slices"
@@ -31,7 +30,7 @@ type storeKeys struct {
 func (k storeKeys) Load() (map[string]string, error) { return store.Load(k.path) }
 
 func (k storeKeys) Set(name, value string) error {
-	return k.set(map[string]string{name: value}, func() error { return store.Set(k.path, name, value) })
+	return k.set(map[string]string{name: value})
 }
 
 func (k storeKeys) Delete(name string) error {
@@ -39,26 +38,21 @@ func (k storeKeys) Delete(name string) error {
 }
 
 func (k storeKeys) SetAll(values map[string]string) error {
-	return k.set(values, func() error { return store.SetAll(k.path, values) })
+	return k.set(values)
 }
 
-// set stores values with write and puts them in force. The store is read
-// once and values put in; that map is checked before anything is written,
-// so no service but a Bitcoin signing service gets a Bitcoin key
-// (policy.CheckBitcoinKeys), and the same map goes into the proxy.
-func (k storeKeys) set(values map[string]string, write func() error) error {
+// set stores values and puts them in force. The store write itself checks
+// the map it is about to write, so the change gives no service but a Bitcoin
+// signing service a Bitcoin key (server.Handler.CheckBitcoinChange), and
+// that same map is written and swapped into the proxy (store.SetChecked).
+func (k storeKeys) set(values map[string]string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	keys, err := store.Load(k.path)
-	if err != nil {
-		return err
-	}
-	maps.Copy(keys, values)
 	cfg := k.proxy.Config()
-	if err := cfg.CheckBitcoinKeys(keys); err != nil {
-		return err
-	}
-	if err := write(); err != nil {
+	keys, err := store.SetChecked(k.path, values, func(keys map[string]string) error {
+		return k.proxy.CheckBitcoinChange(cfg.AccessList, keys)
+	})
+	if err != nil {
 		return err
 	}
 	k.proxy.Swap(cfg, keys)

@@ -686,3 +686,79 @@ func TestOAuthDisconnectDuringRenewalDoesNotForward(t *testing.T) {
 		t.Fatalf("new grant cannot reach upstream: status %d, calls %d", code, len(forwarded))
 	}
 }
+
+// sealedWith returns in's state, changed by change, sealed with in's data
+// key: a state as an older keyring version could have sealed it.
+func sealedWith(t *testing.T, in *Instance, change func(*State)) string {
+	t.Helper()
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	s := in.state.clone()
+	change(s)
+	blob, err := seal(s, in.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(blob)
+}
+
+// A sealed state accepted before #204 may give a proxy service a Bitcoin
+// key. It still unlocks: that service's calls are refused before anything
+// is sent and status says why, other changes and deleting the key work, and
+// a change that adds such a use is still refused (round 5 of #204).
+func TestSealedBitcoinKeyOfAProxyServiceUnlocks(t *testing.T) {
+	var calls sync.Mutex
+	upstream := 0
+	up := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Lock()
+		upstream++
+		calls.Unlock()
+	}))
+	t.Cleanup(up.Close)
+	x := newInst(t, "")
+	key := newKey(t)
+	listen, token := x.setUp("erin", key, up.URL, "erin-value")
+	sealed := sealedWith(t, x.in, func(s *State) { s.Keys["API_KEY"] = bitcointest.WIF })
+	x.in.Close()
+
+	y := newInst(t, "")
+	y.must("POST", "/unlock", map[string]any{"data_key": key, "state": sealed})
+	if code, _ := proxyGet(t, listen, token, "/api/v1/x"); code != http.StatusServiceUnavailable {
+		t.Fatalf("call on the Bitcoin key: %d", code)
+	}
+	calls.Lock()
+	sent := upstream
+	calls.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d upstream calls", sent)
+	}
+	failing, _ := y.must("GET", "/status", nil)["failing"].(map[string]any)
+	if why, _ := failing["api"].(string); why != "service api: API_KEY is a Bitcoin key; it can only be used by a Bitcoin signing service" {
+		t.Fatalf("status failing: %v", failing)
+	}
+	y.must("PUT", "/keys/OTHER", map[string]any{"value": "other-value"})
+	if code, _ := y.call("PUT", "/keys/API_KEY", map[string]any{"value": bitcointest.Master}); code != http.StatusBadRequest {
+		t.Fatalf("another Bitcoin key for api: %d", code)
+	}
+	y.must("DELETE", "/keys/API_KEY", nil)
+	if failing, _ := y.must("GET", "/status", nil)["failing"].(map[string]any); failing["api"] != nil {
+		t.Fatalf("still failing after the key was deleted: %v", failing)
+	}
+	if code, _ := y.call("PUT", "/keys/API_KEY", map[string]any{"value": bitcointest.WIF}); code != http.StatusBadRequest {
+		t.Fatalf("a Bitcoin key for api again: %d", code)
+	}
+	y.must("PUT", "/keys/API_KEY", map[string]any{"value": "erin-value"})
+	if code, _ := proxyGet(t, listen, token, "/api/v1/x"); code != http.StatusOK {
+		t.Fatalf("call after the fix: %d", code)
+	}
+	assertNoBitcoinKeyIn(t, y.audit.String())
+}
+
+func assertNoBitcoinKeyIn(t *testing.T, s string) {
+	t.Helper()
+	for _, secret := range []string{bitcointest.WIF[:20], bitcointest.Master[:20]} {
+		if strings.Contains(s, secret) {
+			t.Fatal("a Bitcoin key in the output")
+		}
+	}
+}

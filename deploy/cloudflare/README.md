@@ -405,7 +405,10 @@ bounded `revoke_error` diagnostic when remote revocation fails.
 Missing generation returns 428; stale generation returns 409
 `account_binding_changed`. Disconnected/unverified bindings return 409
 `account_disconnected` / `account_identity_unverified`. Identity hydration reports
-`account_reconnect_required` when its refresh grant is rejected. Account failures
+`account_reconnect_required` when its refresh grant is rejected. An account
+whose stored refresh token is a Bitcoin key (a state sealed before v0.15.3)
+lists as `reconnect_required` with its services failing `bitcoin_key_refused`;
+its calls are refused before any provider request. Account failures
 use `{error:<fixed code>}`; ordinary proxy errors retain their existing format.
 Re-list and obtain a new approval rather than retrying a write against another binding.
 Old unqualified service routes stay pinned to the original default, even after

@@ -31,8 +31,9 @@ func metaPathOf(storePath string) string {
 // check) the conversion is checked in memory only; the service writes it
 // when it starts. The key notes are written before the access file, so a
 // failure in between is redone at the next start. With a store, its keys are
-// returned, and settings that let a service other than a Bitcoin signing
-// service use a stored Bitcoin key are refused before anything is written.
+// returned. A stored Bitcoin key that a service other than a Bitcoin signing
+// service would use does not stop the load: check refuses it, serve warns
+// (bitcoinKeyWarnings) and the proxy refuses those calls.
 func loadConfig(configPath, storePath string, write bool, out io.Writer) (*policy.Config, map[string]string, error) {
 	rules, err := policy.LoadRules(configPath)
 	if err != nil {
@@ -56,9 +57,6 @@ func loadConfig(configPath, storePath string, write bool, out io.Writer) (*polic
 	var keys map[string]string
 	if storePath != "" {
 		if keys, err = store.Load(storePath); err != nil {
-			return nil, nil, err
-		}
-		if err := cfg.CheckBitcoinKeys(keys); err != nil {
 			return nil, nil, err
 		}
 	}

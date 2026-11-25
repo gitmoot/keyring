@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,10 +161,10 @@ func TestConsentRefusesABitcoinKeyForAProxyService(t *testing.T) {
 	}
 }
 
-// Settings written by hand that bind a bearer service to a Bitcoin key are
-// refused when they are loaded: keyring check, the service start and a
-// reload, which keeps the settings in force.
-func TestBitcoinKeyOfAProxyServiceIsRefusedAtLoad(t *testing.T) {
+// A store that already gives a proxy service a Bitcoin key fails keyring
+// check, but serve and a reload load it and warn: one bad credential never
+// stops the keyring, and the proxy refuses those calls (round 5 of #204).
+func TestBitcoinKeyOfAProxyServiceIsWarnedAtLoad(t *testing.T) {
 	rules, storePath := bitcoinRules(t)
 	if err := store.Set(storePath, "API_KEY", "sk-api-0123456789"); err != nil {
 		t.Fatal(err)
@@ -173,7 +174,8 @@ func TestBitcoinKeyOfAProxyServiceIsRefusedAtLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys, _ := store.Load(storePath)
-	h := server.New(cfg, keys, &bytes.Buffer{})
+	var audit bytes.Buffer
+	h := server.New(cfg, keys, &audit)
 	rl := reloader{configPath: rules, storePath: storePath, fixed: cfg.Rules, handler: h}
 
 	if err := store.Set(storePath, "API_KEY", bitcointest.WIF); err != nil {
@@ -183,17 +185,31 @@ func TestBitcoinKeyOfAProxyServiceIsRefusedAtLoad(t *testing.T) {
 	if err := check(rules, storePath, &out); err == nil || err.Error() != bitcoinKeyRefusal {
 		t.Fatalf("check: %v", err)
 	}
-	if _, _, err := rl.reload(); err == nil || err.Error() != bitcoinKeyRefusal {
+	const warning = "warning: " + bitcoinKeyRefusal + "; its calls are refused until the key or the service is changed"
+	// serve loads as loadConfig does, then logs bitcoinKeyWarnings.
+	served, servedKeys, err := loadConfig(rules, storePath, true, &out)
+	if err != nil {
+		t.Fatalf("serve's load: %v", err)
+	}
+	if w := bitcoinKeyWarnings(served, servedKeys); len(w) != 1 || w[0] != warning {
+		t.Fatalf("serve's warnings: %q", w)
+	}
+	next, nextKeys, err := rl.reload()
+	if err != nil || h.Config() != next {
 		t.Fatalf("reload: %v", err)
 	}
-	if h.Config() != cfg {
-		t.Fatal("a refused reload changed the settings in force")
+	if w := bitcoinKeyWarnings(next, nextKeys); len(w) != 1 || w[0] != warning {
+		t.Fatalf("reload's warnings: %q", w)
 	}
-	var stderr bytes.Buffer
-	if err := serve(rules, storePath, &stderr); err == nil || err.Error() != bitcoinKeyRefusal {
-		t.Fatalf("serve: %v", err)
+	req := httptest.NewRequest("GET", "/api/v1/x", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Keyring-Token", "tok-phobos")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 503 || !strings.Contains(audit.String(), `"note":"bitcoin key refused"`) {
+		t.Fatalf("call on the loaded Bitcoin key: %d %s", rec.Code, audit.String())
 	}
-	assertNoCLIBitcoinKey(t, out.String()+stderr.String())
+	assertNoCLIBitcoinKey(t, out.String()+rec.Body.String()+audit.String())
 }
 
 func assertNoCLIBitcoinKey(t *testing.T, output string) {

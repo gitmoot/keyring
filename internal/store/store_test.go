@@ -102,3 +102,38 @@ func TestSetAllRejectsPartialCredentialBundle(t *testing.T) {
 		}
 	}
 }
+
+// SetChecked writes and returns the very map its check saw, writes nothing
+// when the check refuses, and asks to try again rather than overwrite a
+// change made after its read.
+func TestSetChecked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := Set(path, "A", "a"); err != nil {
+		t.Fatal(err)
+	}
+	var checked map[string]string
+	written, err := SetChecked(path, map[string]string{"B": "b"}, func(keys map[string]string) error {
+		checked = keys
+		return nil
+	})
+	disk, _ := Load(path)
+	if err != nil || !reflect.DeepEqual(written, map[string]string{"A": "a", "B": "b"}) || !reflect.DeepEqual(written, checked) || !reflect.DeepEqual(disk, written) {
+		t.Fatalf("written %v, checked %v, on disk %v, %v", written, checked, disk, err)
+	}
+	refusal := os.ErrPermission
+	if _, err := SetChecked(path, map[string]string{"C": "c"}, func(map[string]string) error { return refusal }); err != refusal {
+		t.Fatalf("refused: %v", err)
+	}
+	if after, _ := Load(path); !reflect.DeepEqual(after, disk) {
+		t.Fatalf("a refused update wrote %v", after)
+	}
+	_, err = SetChecked(path, map[string]string{"D": "d"}, func(map[string]string) error {
+		return Set(path, "E", "e") // another writer, between the read and the write
+	})
+	if err == nil || !strings.Contains(err.Error(), "try again") {
+		t.Fatalf("changed store: %v", err)
+	}
+	if after, _ := Load(path); after["D"] != "" || after["E"] != "e" {
+		t.Fatalf("the other writer's change was lost: %v", after)
+	}
+}

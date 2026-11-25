@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -91,18 +92,48 @@ func Names(path string) ([]string, error) {
 
 // Set adds or replaces one key.
 func Set(path, name, value string) error {
-	if !ValidName(name) {
-		return fmt.Errorf("invalid key name %q: use letters, digits and _", name)
+	_, err := SetChecked(path, map[string]string{name: value}, nil)
+	return err
+}
+
+// errChanged refuses a write over a store another writer changed after it
+// was read.
+var errChanged = errors.New("the key store changed while saving; try again")
+
+// SetChecked adds or replaces values in one atomic store update. The store is
+// read once; check, when set, gets the whole map that will be written and
+// can refuse it; that same map is written and returned, so a caller can put
+// in force exactly what was checked and stored. If the store changed between
+// the read and the write, nothing is written and the error asks to try again.
+func SetChecked(path string, values map[string]string, check func(map[string]string) error) (map[string]string, error) {
+	for name, value := range values {
+		if !ValidName(name) {
+			return nil, fmt.Errorf("invalid key name %q: use letters, digits and _", name)
+		}
+		if value == "" {
+			return nil, errors.New("empty value")
+		}
 	}
-	if value == "" {
-		return errors.New("empty value")
-	}
-	keys, err := Load(path)
+	read, err := Load(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	keys[name] = value
-	return save(path, keys)
+	keys := maps.Clone(read)
+	maps.Copy(keys, values)
+	if check != nil {
+		if err := check(keys); err != nil {
+			return nil, err
+		}
+	}
+	if now, err := Load(path); err != nil {
+		return nil, err
+	} else if !maps.Equal(now, read) {
+		return nil, errChanged
+	}
+	if err := save(path, keys); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 // Delete removes one key. Deleting a missing key is an error, so a typo is
@@ -126,14 +157,8 @@ func SetAll(path string, values map[string]string) error {
 			return errors.New("invalid credential bundle")
 		}
 	}
-	keys, err := Load(path)
-	if err != nil {
-		return err
-	}
-	for name, value := range values {
-		keys[name] = value
-	}
-	return save(path, keys)
+	_, err := SetChecked(path, values, nil)
+	return err
 }
 
 // DeleteAll removes the named credentials together, including partial bundles.

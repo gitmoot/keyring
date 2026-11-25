@@ -169,7 +169,7 @@ func (b *Backend) uploadKey(w http.ResponseWriter, r *http.Request, sid string) 
 		return
 	}
 	keys[name] = value
-	if err := b.Proxy.Config().CheckBitcoinKeys(keys); err != nil {
+	if err := b.Proxy.CheckBitcoinChange(b.Proxy.Config().AccessList, keys); err != nil {
 		again(http.StatusBadRequest, err.Error())
 		return
 	}

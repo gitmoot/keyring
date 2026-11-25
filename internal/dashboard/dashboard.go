@@ -326,6 +326,25 @@ func (r keyRow) valueNames() []string {
 	return out
 }
 
+// soleValue is the stored name (KEY, or KEY.part) of row's one stored value;
+// ok is false when it has none or several. Connect's page and its
+// submission both use it: settings that leave the value out mean it.
+func (r keyRow) soleValue() (name string, ok bool) {
+	var stored []string
+	if r.baseStored {
+		stored = append(stored, r.Name)
+	}
+	for _, p := range r.Parts {
+		if p.HasValue {
+			stored = append(stored, p.Full)
+		}
+	}
+	if len(stored) != 1 {
+		return "", false
+	}
+	return stored[0], true
+}
+
 // grant is an agent's access to a key, for the chips in the keys table.
 type grant struct {
 	Role string
@@ -1170,7 +1189,7 @@ func (b *Backend) addKey(w http.ResponseWriter, r *http.Request, sid string) {
 	// A service may wait for this name already: no service but a Bitcoin
 	// signing service may get a Bitcoin key.
 	maps.Copy(keys, values)
-	if err := b.Proxy.Config().CheckBitcoinKeys(keys); err != nil {
+	if err := b.Proxy.CheckBitcoinChange(b.Proxy.Config().AccessList, keys); err != nil {
 		b.renderNewKey(w, sid, http.StatusBadRequest, name, err.Error())
 		return
 	}
@@ -1534,28 +1553,22 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		return
 	}
 	keyName := name
+	sole, hasSole := row.soleValue()
+	_, solePart := store.SplitPart(sole)
 	switch {
 	case f.KeyPool && f.KeyPart != "":
 		again(http.StatusBadRequest, "Leave key_part out: a key pool uses the values of "+name+" in list order.")
 		return
 	case f.KeyPool:
 		// The pool names the key itself; its values are tried in list order.
-	case f.KeyPart == "" && row.baseStored && !slices.ContainsFunc(row.Parts, func(p keyPart) bool { return p.HasValue }):
+	case f.KeyPart == "" && hasSole && solePart == "":
 		// The plain value is the one stored value (services may name values
 		// not stored yet): settings that leave the value out mean it, as the
 		// page that offers them does.
 	case len(row.Parts) > 0:
 		// Settings that leave the value out mean the one stored value.
-		if f.KeyPart == "" && !row.baseStored {
-			var only []string
-			for _, p := range row.Parts {
-				if p.HasValue {
-					only = append(only, p.Name)
-				}
-			}
-			if len(only) == 1 {
-				f.KeyPart = only[0]
-			}
+		if f.KeyPart == "" && hasSole {
+			f.KeyPart = solePart
 		}
 		has := map[string]bool{}
 		for _, p := range row.Parts {
@@ -1650,7 +1663,8 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 }
 
 // apply loads the saved access file and keys and swaps them into the proxy,
-// with the running rules. Callers hold b.Mu.
+// with the running rules, as a reload does: a stored Bitcoin key a proxy
+// service would use is refused at request time. Callers hold b.Mu.
 func (b *Backend) apply() error {
 	access, err := policy.LoadAccess(b.rules().AccessFile)
 	if err != nil {
@@ -1662,9 +1676,6 @@ func (b *Backend) apply() error {
 	}
 	keys, err := store.Load(b.StorePath)
 	if err != nil {
-		return err
-	}
-	if err := cfg.CheckBitcoinKeys(keys); err != nil {
 		return err
 	}
 	b.Proxy.Swap(cfg, keys)
@@ -1705,15 +1716,9 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	// info describes it.
 	var btc *bitcoinForm
 	btcPart := ""
-	var stored []string
-	for _, full := range row.valueNames() {
-		if _, ok := values[full]; ok {
-			stored = append(stored, full)
-		}
-	}
-	if len(stored) == 1 && info != nil {
+	if sole, ok := row.soleValue(); ok && info != nil {
 		btc = bitcoinFormOf(f.Bitcoin, info.WIF)
-		_, btcPart = store.SplitPart(stored[0])
+		_, btcPart = store.SplitPart(sole)
 	}
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
@@ -1923,7 +1928,7 @@ func (b *Backend) replaceKey(w http.ResponseWriter, r *http.Request, sid string)
 		return
 	}
 	keys[target] = value
-	if refusedBitcoinKey(w, r, name, b.Proxy.Config().CheckBitcoinKeys(keys)) {
+	if refusedBitcoinKey(w, r, name, b.Proxy.CheckBitcoinChange(b.Proxy.Config().AccessList, keys)) {
 		return
 	}
 	if err := store.Set(b.StorePath, target, value); err != nil {

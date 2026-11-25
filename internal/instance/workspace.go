@@ -129,20 +129,34 @@ func (s *State) validateWorkspace(container bool) error {
 	return nil
 }
 
-// checkBitcoinKeys refuses a state in which anything but a Bitcoin signing
-// service would send a stored Bitcoin key: a key the services name
-// (policy.CheckBitcoinKeys), or the refresh token of a Workspace account,
-// which the Workspace services send though no service names it.
-func (s *State) checkBitcoinKeys(cfg *policy.Config) error {
-	if err := cfg.CheckBitcoinKeys(s.Keys); err != nil {
-		return err
+// bitcoinKeyUse is something in a state that would send a stored Bitcoin key
+// though it is not a Bitcoin signing service: a service naming the key
+// (policy.BitcoinKeyUses), or a Workspace account whose refresh key holds
+// one, which the Workspace services send though no service names it.
+type bitcoinKeyUse struct {
+	service string // the service, or "" for a Workspace account
+	account string // the Workspace account ID, when service is ""
+	key     string // the store name of the key, never its value
+	why     string
+}
+
+func (u bitcoinKeyUse) same(o bitcoinKeyUse) bool {
+	return u.service == o.service && u.account == o.account && u.key == o.key
+}
+
+// bitcoinKeyUses lists every bitcoinKeyUse of s: services first, by name,
+// then Workspace accounts, by ID.
+func (s *State) bitcoinKeyUses(cfg *policy.Config) []bitcoinKeyUse {
+	var uses []bitcoinKeyUse
+	for _, u := range cfg.BitcoinKeyUses(s.Keys) {
+		uses = append(uses, bitcoinKeyUse{service: u.Service, key: u.Key, why: u.Error()})
 	}
 	for _, id := range slices.Sorted(maps.Keys(s.WorkspaceAccounts)) {
 		if a := s.WorkspaceAccounts[id]; bitcoin.IsKey(s.Keys[a.Key]) {
-			return fmt.Errorf("Workspace account %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", a.Alias, a.Key)
+			uses = append(uses, bitcoinKeyUse{account: id, key: a.Key, why: fmt.Sprintf("Workspace account %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", a.Alias, a.Key)})
 		}
 	}
-	return nil
+	return uses
 }
 
 // reconcileWorkspace invalidates approvals when an existing admin writer
@@ -228,11 +242,19 @@ func (in *Instance) viewLocked(a workspace.Record) workspace.View {
 			v.Status = "identity_pending"
 		}
 	}
+	_, bitcoinRefused := in.bitcoinKeyUse(func(u bitcoinKeyUse) bool { return u.account == a.ID })
 	for _, name := range v.AffectedServices {
 		svc := s.Services[name]
 		svc.Key = a.Key
 		failure := ""
-		if connected && svc.OAuth2 != nil && in.proxy.WorkspaceRejected(svc, s.Keys[a.Key], s.Keys[svc.OAuth2.ClientSecretKey]) {
+		switch {
+		case connected && bitcoinRefused:
+			// Loaded with the state: refused at request time until the
+			// owner replaces or deletes the key.
+			failure = "bitcoin_key_refused"
+			v.Status = "reconnect_required"
+			v.Connected = false
+		case connected && svc.OAuth2 != nil && in.proxy.WorkspaceRejected(svc, s.Keys[a.Key], s.Keys[svc.OAuth2.ClientSecretKey]):
 			failure = "account_reconnect_required"
 			v.Status = "reconnect_required"
 			v.Connected = false

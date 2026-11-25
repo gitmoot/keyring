@@ -424,12 +424,41 @@ func (e *BitcoinKeyError) Error() string {
 }
 
 // CheckBitcoinKeys returns a *BitcoinKeyError when a service other than a
-// bitcoin-psbt-sign one would use a value of keys that bitcoin.Inspect
-// recognises as a Bitcoin private key: one of its KeyNames, or, for a key
-// pool, any value of its key. Validation does not read the store, so every
-// place that puts settings and stored values in force together calls it
-// first, before anything is written.
+// bitcoin-psbt-sign one would use a value of keys that bitcoin.IsKey
+// recognises as a Bitcoin private key (BitcoinKeyUses). Validation does not
+// read the store, so every place that changes settings or stored values
+// calls it, or CheckAddedBitcoinKeys, before anything is written.
 func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
+	if uses := a.BitcoinKeyUses(keys); len(uses) > 0 {
+		return &uses[0]
+	}
+	return nil
+}
+
+// CheckAddedBitcoinKeys is CheckBitcoinKeys for a change from the settings
+// before with the stored values beforeKeys: it refuses only a use the change
+// adds. A use already in force (settings and a store loaded as they are) is
+// refused at request time instead; it never blocks another change, nor the
+// change that fixes it. A use is kept when the same service uses the same
+// key name, holding the same value.
+func (a AccessList) CheckAddedBitcoinKeys(keys map[string]string, before AccessList, beforeKeys map[string]string) error {
+	uses := a.BitcoinKeyUses(keys)
+	if len(uses) == 0 {
+		return nil
+	}
+	kept := before.BitcoinKeyUses(beforeKeys)
+	for _, u := range uses {
+		if !slices.Contains(kept, u) || beforeKeys[u.Key] != keys[u.Key] {
+			return &u
+		}
+	}
+	return nil
+}
+
+// BitcoinKeyUses lists, by service then key name, every use of a stored
+// Bitcoin private key by a service other than a bitcoin-psbt-sign one: one
+// of its KeyNames, or, for a key pool, any value of its key.
+func (a AccessList) BitcoinKeyUses(keys map[string]string) []BitcoinKeyError {
 	var found []string
 	for name, value := range keys {
 		if bitcoin.IsKey(value) {
@@ -440,6 +469,7 @@ func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
 		return nil
 	}
 	slices.Sort(found)
+	var uses []BitcoinKeyError
 	for _, name := range slices.Sorted(maps.Keys(a.Services)) {
 		svc := a.Services[name]
 		if svc.Auth == AuthBitcoinPSBTSign {
@@ -449,11 +479,11 @@ func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
 		for _, key := range found {
 			base, _ := store.SplitPart(key)
 			if slices.Contains(names, key) || svc.KeyPool && base == svc.Key {
-				return &BitcoinKeyError{Service: name, Key: key}
+				uses = append(uses, BitcoinKeyError{Service: name, Key: key})
 			}
 		}
 	}
-	return nil
+	return uses
 }
 
 // OAuth2 is the public half of an OAuth client: the refresh token and client

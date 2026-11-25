@@ -169,7 +169,7 @@ func (b *Backend) moveValues(moves, add map[string]string, notes func(meta map[s
 	if len(services) > 0 {
 		inForce = next
 	}
-	if err := inForce.CheckBitcoinKeys(after); err != nil {
+	if err := b.Proxy.CheckBitcoinChange(inForce, after); err != nil {
 		return nil, err
 	}
 	before, err := b.loadMeta()

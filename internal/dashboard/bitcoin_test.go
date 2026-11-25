@@ -569,3 +569,39 @@ func TestBitcoinKeyOnlyForABitcoinSigningService(t *testing.T) {
 		unchanged(what)
 	}
 }
+
+// A Bitcoin key a proxy service already uses when the keyring loads (stored
+// before v0.15.3, or by hand) is refused at request time; it blocks no other
+// change and can be replaced, while a change adding another such use is
+// still refused (round 5 of #204).
+func TestBitcoinKeyInForceBlocksNoOtherChange(t *testing.T) {
+	e := newEnv(t)
+	base := e.proxy.Config().Services["api"].Base
+	e.withService("waiting", policy.Service{Base: base, Key: "LATER", Auth: policy.AuthBearer})
+	if err := store.Set(e.backend.StorePath, "API_KEY", bitcointest.WIF); err != nil {
+		t.Fatal(err)
+	}
+	e.backend.Mu.Lock()
+	err := e.backend.apply()
+	e.backend.Mu.Unlock()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if w := e.request("POST", "/keys", url.Values{"name": {"OTHER"}, "value": {"sk-other-0123456789"}, "password": {password}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("an unrelated key: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.request("POST", "/keys", url.Values{"name": {"LATER"}, "value": {bitcointest.WIF}, "password": {password}}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a Bitcoin key for another proxy service: %d", w.Code)
+	}
+	w := e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {bitcointest.Master}, "password": {password}})
+	if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther || !strings.Contains(loc, "error=bitcoin-key") {
+		t.Fatalf("another Bitcoin key for api: %d %s", w.Code, loc)
+	}
+	w = e.request("POST", "/keys/API_KEY/replace", url.Values{"value": {"sk-api-0123456789"}, "password": {password}})
+	if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther || strings.Contains(loc, "error=") {
+		t.Fatalf("the fix: %d %s", w.Code, loc)
+	}
+	if keys, _ := store.Load(e.backend.StorePath); keys["API_KEY"] != "sk-api-0123456789" || keys["OTHER"] == "" || keys["LATER"] != "" {
+		t.Fatal("wrong keys stored")
+	}
+}

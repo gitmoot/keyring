@@ -192,6 +192,16 @@ func (h *Handler) clientFor(svc policy.Service) *http.Client {
 // Config returns the settings in use.
 func (h *Handler) Config() *policy.Config { return h.snap.Load().config }
 
+// CheckBitcoinChange refuses settings next with stored values keys when,
+// compared with the settings and keys in use, they add a use of a stored
+// Bitcoin key by a service other than a Bitcoin signing service
+// (policy.CheckAddedBitcoinKeys). A use already in force is refused at
+// request time instead, and blocks no change.
+func (h *Handler) CheckBitcoinChange(next policy.AccessList, keys map[string]string) error {
+	in := h.snap.Load()
+	return next.CheckAddedBitcoinKeys(keys, in.config.AccessList, in.keys)
+}
+
 // SetValueOrder sets each key's list order of its value names (key ->
 // parts), which key pools try in that order from the next call on.
 func (h *Handler) SetValueOrder(order map[string][]string) {
@@ -614,10 +624,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The settings put in force never let a service other than a Bitcoin
-	// signing service use a Bitcoin key (policy.CheckBitcoinKeys); should
-	// one get through, it is refused here, before anything is sent or
-	// charged.
+	// Changes never let a service other than a Bitcoin signing service use
+	// a Bitcoin key (policy.CheckBitcoinKeys), but settings and a store
+	// loaded as they are (serve, a reload, an unlocked instance) may: such
+	// a call is refused here, before anything is sent or charged.
 	if snap.sendsBitcoinKey(svc, key, members) {
 		fail(http.StatusServiceUnavailable, bitcoinKeyRefused)
 		return

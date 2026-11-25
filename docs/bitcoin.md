@@ -51,16 +51,23 @@ networks instead, and a reveal request is refused (`?error=never-shown`).
 
 **A Bitcoin key is only ever used by a `bitcoin-psbt-sign` service.** Any
 other service would send its key upstream as a credential, so keyring refuses
-settings in which one would use a stored Bitcoin key: its `key`, a value of
-its key pool, an extra header or an OAuth client secret. The refusal reads
-`service api: BTC_ORD is a Bitcoin key; it can only be used by a Bitcoin
-signing service` and nothing is saved. It is checked wherever settings and
-keys meet: the dashboard's Connect, service, key and upload forms, `keyring
-check`, the service start and a reload (refused, the settings in force are
-kept), the instance admin API, consent links, and `keyring set` and
-`keyring bitcoin-import`, which need `--config` to store a Bitcoin key. Should
-such settings get past all of these, the call is answered 503 with the audit
-note `bitcoin key refused` and nothing goes upstream.
+changes in which one would use a stored Bitcoin key: its `key`, a value of
+its key pool, an extra header, an OAuth client secret, or the refresh token of
+a Workspace account. The refusal reads `service api: BTC_ORD is a Bitcoin key;
+it can only be used by a Bitcoin signing service` and nothing is saved. It is
+checked wherever settings and keys change together: the dashboard's Connect,
+service, key and upload forms, the instance admin API, consent links, and
+`keyring set` and `keyring bitcoin-import`, which need `--config` to store a
+Bitcoin key. `keyring check` refuses such settings too.
+
+Settings and keys that already hold such a use (written by hand, or stored
+before v0.15.3) still load, so one bad credential never stops the keyring or
+locks an instance: the service start and a reload log a warning naming the
+service and key, an unlocked instance logs it and its status lists the
+service (or the Workspace account, `bitcoin_key_refused`) as failing. Every
+such call is answered 503 with the audit note `bitcoin key refused`, and an
+OAuth refresh is refused, so nothing goes upstream. Replace or delete the key,
+or change the service, to fix it; other changes keep working meanwhile.
 
 ## 2. The service
 

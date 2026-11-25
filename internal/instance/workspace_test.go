@@ -135,6 +135,53 @@ func TestWorkspaceAccountKeyRefusesABitcoinKey(t *testing.T) {
 	}
 }
 
+// A sealed state accepted before #204 may hold a Bitcoin key as a secondary
+// Workspace account's refresh token. It still unlocks, and the other
+// accounts keep working: that account's calls are refused before any
+// provider request, its listing says why, its key can be deleted, and a
+// change that stores such a key again is refused (round 5 of #204).
+func TestSealedBitcoinKeyOfAWorkspaceAccountUnlocks(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	personal := f.hydrate(f.migrate())
+	work := f.connect(f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any), "work")
+	id := accountField(work, "account_id")
+	f.in.mu.Lock()
+	key := f.in.state.WorkspaceAccounts[id].Key
+	f.in.mu.Unlock()
+	sealed := sealedWith(t, f.in, func(s *State) { s.Keys[key] = bitcointest.WIF })
+	f.in.Close()
+	in, err := New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.in, f.admin = in, in.AdminHandler()
+	f.must("POST", "/unlock", map[string]any{"data_key": f.key, "state": sealed}, "")
+
+	events := f.provider.snapshot()
+	code, _, err := f.proxy("GET", qualified(work, "/gmail/gmail/v1/users/me/profile"), accountField(work, "binding_generation"))
+	if err != nil || code/100 == 2 {
+		t.Fatalf("call on the Bitcoin key: %d %v", code, err)
+	}
+	if !reflect.DeepEqual(events, f.provider.snapshot()) {
+		t.Fatalf("the provider was asked: %v", f.provider.snapshot()[len(events):])
+	}
+	listed := f.listed(id)
+	gmail, _ := listed["services"].(map[string]any)["gmail"].(map[string]any)
+	if listed["status"] != "reconnect_required" || gmail["failing"] != "bitcoin_key_refused" {
+		t.Fatalf("account listing: %v", listed)
+	}
+	f.expectIdentity(personal, "personal@example.test")
+	f.must("PUT", "/keys/UNRELATED", map[string]string{"value": "unrelated"}, "")
+	if code, _ := f.call("PUT", "/keys/"+key, map[string]any{"value": bitcointest.Master}, ""); code != 400 {
+		t.Fatalf("another Bitcoin key for the account: %d", code)
+	}
+	f.must("DELETE", "/keys/"+key, nil, "")
+	if code, _ := f.call("PUT", "/keys/"+key, map[string]any{"value": bitcointest.WIF}, ""); code != 400 {
+		t.Fatalf("a Bitcoin key for the account again: %d", code)
+	}
+	assertNoBitcoinKeyIn(t, f.audit.String())
+}
+
 type workspaceProvider struct {
 	mu           sync.Mutex
 	events       []string

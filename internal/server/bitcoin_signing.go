@@ -89,9 +89,9 @@ func bitcoinValues(keys map[string]string) map[string]bool {
 
 // sendsBitcoinKey reports whether svc, other than a Bitcoin signing service,
 // would send a stored Bitcoin key: key, a value of pool, or a value it names
-// (extra headers, OAuth client secret). The settings put in force are
-// checked for this first (policy.CheckBitcoinKeys); this is the last line
-// before anything goes upstream.
+// (extra headers, OAuth client secret). Changes are checked for this first
+// (policy.CheckBitcoinKeys), settings and a store loaded as they are are not;
+// this is the last line before anything goes upstream.
 func (s *snapshot) sendsBitcoinKey(svc policy.Service, key string, pool []string) bool {
 	if len(s.bitcoinValues) == 0 || svc.Auth == policy.AuthBitcoinPSBTSign {
 		return false

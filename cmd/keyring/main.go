@@ -265,6 +265,10 @@ func check(configPath, storePath string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A check refuses what serve only warns about (bitcoinKeyWarnings).
+	if err := cfg.CheckBitcoinKeys(keys); err != nil {
+		return err
+	}
 	fmt.Fprintf(stdout, "rules ok: %d services, %d roles\n", len(cfg.Services), len(cfg.Roles))
 	if cfg.AdminListen != "" {
 		fmt.Fprintf(stdout, "dashboard: http://%s\n", cfg.AdminListen)
@@ -309,6 +313,9 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	}
 	if missing := missingKeys(cfg, keys); len(missing) > 0 {
 		fmt.Fprintf(stderr, "warning: keys not in the store (their services answer 503): %s\n", strings.Join(missing, ", "))
+	}
+	for _, w := range bitcoinKeyWarnings(cfg, keys) {
+		fmt.Fprintln(stderr, w)
 	}
 	audit, err := openAudit(cfg.AuditLog)
 	if err != nil {
@@ -412,6 +419,11 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 					missing = missingKeys(next, keys)
 				}
 				fmt.Fprintln(stderr, reloadMessage(next, err, missing))
+				if err == nil {
+					for _, w := range bitcoinKeyWarnings(next, keys) {
+						fmt.Fprintln(stderr, w)
+					}
+				}
 			}
 		}
 	}()

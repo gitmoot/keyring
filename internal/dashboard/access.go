@@ -481,10 +481,11 @@ func (b *Backend) saveAndApply(next policy.AccessList) error {
 
 // saveAndApplyKeys is saveAndApply with keys already loaded, for a caller
 // that checked the very values it puts in force. It saves nothing and
-// returns a *policy.BitcoinKeyError when a service other than a Bitcoin
-// signing service would use a stored Bitcoin key. Callers hold b.Mu.
+// returns a *policy.BitcoinKeyError when the change would have a service
+// other than a Bitcoin signing service use a stored Bitcoin key
+// (server.Handler.CheckBitcoinChange). Callers hold b.Mu.
 func (b *Backend) saveAndApplyKeys(next policy.AccessList, keys map[string]string) error {
-	if err := next.CheckBitcoinKeys(keys); err != nil {
+	if err := b.Proxy.CheckBitcoinChange(next, keys); err != nil {
 		return err
 	}
 	cfg, err := policy.SaveAccess(b.rules(), next)
