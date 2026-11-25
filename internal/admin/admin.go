@@ -385,20 +385,36 @@ func randomToken() string {
 
 // js is the dashboard's only script, and the pages work without it: a copy
 // button for a token shown once (data-copy="ID"), a button that adds one more
-// row of form fields (data-addrow="ID" copies the last row of that element, up
-// to data-max rows; hidden without the script), and selects that act when
-// changed (data-autosubmit submits the form; a form with data-pathpick opens
-// its action with the chosen value in place of the final "-").
+// row of form fields (data-addrow="ID" copies the first row of that element,
+// emptied, with its details closed and its data-removerow button shown, up to
+// data-max rows; hidden without the script), a data-removerow button that
+// removes its data-row, and selects that act when changed (data-autosubmit
+// submits the form; a form with data-pathpick opens its action with the
+// chosen value in place of the final "-"). A field that fails the browser's
+// check inside closed details opens them, so it can be seen.
 const js = `document.querySelectorAll("[data-addrow]").forEach(function (b) { b.hidden = false; });
+document.addEventListener("invalid", function (e) {
+  var d = e.target.closest("details");
+  if (d) d.open = true;
+}, true);
 document.addEventListener("click", function (e) {
   var add = e.target.closest("[data-addrow]");
   if (add) {
     var box = document.getElementById(add.dataset.addrow), max = Number(add.dataset.max) || 0;
-    var row = box.lastElementChild.cloneNode(true);
+    var row = box.firstElementChild.cloneNode(true);
     row.querySelectorAll("input").forEach(function (i) { i.value = ""; });
+    row.querySelectorAll("details").forEach(function (d) { d.open = false; });
+    row.querySelectorAll("[data-removerow]").forEach(function (b) { b.hidden = false; });
     box.appendChild(row);
     row.querySelector("input").focus();
     if (max && box.children.length >= max) add.hidden = true;
+    return;
+  }
+  var rm = e.target.closest("[data-removerow]");
+  if (rm) {
+    var gone = rm.closest("[data-row]"), id = gone.parentElement.id;
+    gone.remove();
+    document.querySelectorAll('[data-addrow="' + id + '"]').forEach(function (b) { b.hidden = false; b.focus(); });
     return;
   }
   var b = e.target.closest("[data-copy]");
@@ -501,6 +517,8 @@ dl{display:grid;grid-template-columns:96px 1fr;gap:8px 12px;margin:0}dt{color:va
 .masked{letter-spacing:2px;color:var(--mute)}code{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 details>summary{cursor:pointer;font-weight:600;list-style:none;padding:4px 0;margin-bottom:10px}details>summary::-webkit-details-marker{display:none}details>summary::before{content:"▸ ";color:var(--mute)}details[open]>summary::before{content:"▾ "}
 .card details{border-top:1px solid var(--line);padding-top:10px;margin-bottom:10px}details.card>summary{margin-bottom:0}details.card[open]>summary{margin-bottom:12px}
+.vrow+.vrow{border-top:1px solid var(--line);padding-top:14px}.vline{display:flex;gap:8px;align-items:flex-end}.vline label{flex:1;min-width:0}.vline button{margin-bottom:14px;padding:0 14px}
+.card details.more{border:0;padding:0;margin:-8px 0 14px}.more>summary{font-weight:400;font-size:14px;color:var(--mute);padding:2px 0;margin-bottom:6px}.addrow{margin:-4px 0 16px}
 .danger>summary{color:var(--bad)}hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}@media (max-width:420px){.two{grid-template-columns:1fr}}
 .check{display:flex;align-items:center;gap:10px;color:var(--text);font-size:15px;margin-bottom:12px}.check input{width:22px;height:22px;min-height:0;margin:0;flex:none;accent-color:var(--brand)}

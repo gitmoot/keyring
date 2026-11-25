@@ -77,12 +77,13 @@ First failure: {{.FirstFailure.UTC.Format "2006-01-02T15:04:05Z"}}; last failure
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
 <form method="post" action="/keys"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Name<input name="name" value="{{.Name}}" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENROUTER_API_KEY" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
-<p class="hint">Paste one key per row. Names are optional; values are numbered 1, 2, 3.</p>
-<div id="value-rows">{{range $i, $n := .PartRows}}<div class="two"><label>Value<input type="password" name="value" autocomplete="off" placeholder="{{if eq $i 0}}paste it here; it is never shown again{{else}}optional{{end}}"></label>
-<label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
-<label>Value name (optional)<input name="part" value="{{$n}}" pattern="[a-z0-9_]{1,32}" placeholder="e.g. id; empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div>{{end}}</div>
-<div class="actions"><button type="button" class="ghost" data-addrow="value-rows" data-max="{{.MaxParts}}" hidden>Add another value</button></div>
-<p class="hint">One value without a name is the key's value. With more, each is stored as a numbered value of the key (or under its name, such as id and secret for Modal), and a key pool tries them in this order. Up to {{.MaxParts}} values; more can be added on the key's page.</p>
+<div id="value-rows"><div class="vrow" data-row><div class="vline"><label>Value<input type="password" name="value" autocomplete="off" placeholder="paste it here; it is never shown again"></label>
+<button type="button" class="ghost" data-removerow aria-label="Remove this value" hidden>×</button></div>
+<details class="more"><summary>Label or name</summary><div class="two"><label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
+<label>Value name (optional)<input name="part" pattern="[a-z0-9_]{1,32}" placeholder="e.g. id; empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div></details></div></div>
+<div class="actions addrow"><button type="button" class="ghost" data-addrow="value-rows" data-max="{{.MaxParts}}" aria-label="Add another value" hidden>+ Add value</button></div>
+<p class="hint">Paste the key. Use + for a key with several values (they are tried in order).</p>
+<noscript><p class="hint">Without JavaScript one value is added here; add more on the key's page under Add a value.</p></noscript>
 {{template "password" .}}
 <div class="actions"><button>Add key</button><a class="btn ghost" href="/keys">Cancel</a></div>
 </form></div>
@@ -158,8 +159,8 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 <p class="hint">It goes last in the list. Without a name it gets the next number{{if not .Row.Parts}}; this key's value becomes value 1 and services using {{.Row.Name}} change to {{.Row.Name}}.1{{end}}.</p>
 <form method="post" action="/keys/{{.Row.Name}}/add-value"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label>Value<input type="password" name="value" autocomplete="off" required></label>
-<div class="two"><label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
-<label>Value name (optional)<input name="part" pattern="[a-z0-9_]{1,32}" placeholder="empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div>
+<details class="more"><summary>Label or name</summary><div class="two"><label>Label (optional)<input name="label" maxlength="80" placeholder="e.g. Jerry's Max account" autocomplete="off"></label>
+<label>Value name (optional)<input name="part" pattern="[a-z0-9_]{1,32}" placeholder="empty: numbered" autocapitalize="none" autocomplete="off" spellcheck="false"></label></div></details>
 {{template "password" .}}<div class="actions"><button class="ghost">Add value</button></div></form></div>
 
 {{if .Row.Parts}}<details class="card" id="values"><summary>Order and labels</summary>
