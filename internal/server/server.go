@@ -899,12 +899,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if !r.ProtoAtLeast(1, 1) {
+	if !r.ProtoAtLeast(1, 1) && r.Method != http.MethodHead {
 		// An HTTP/1.0 reply has no chunks, so a closed connection is its
 		// only end and a cut stream would look complete. Such a caller
-		// gets the whole answer with its length, or a 502.
+		// gets the whole answer with its length, or a 502. (A HEAD reply
+		// has no body to cut and keeps the streaming path below.)
 		var body bytes.Buffer
-		upstream := &io.LimitedReader{R: resp.Body, N: http10Limit + 1}
+		upstream := &io.LimitedReader{R: resp.Body, N: policy.HTTP10AnswerLimit + 1}
 		red := newRedactor(&body, forms)
 		_, err := io.Copy(red, upstream)
 		if err == nil {
@@ -914,7 +915,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusBadGateway, "upstream read failed")
 			return
 		}
-		if upstream.N == 0 {
+		// Masking may lengthen the answer, so the limit applies to what
+		// would be sent as well as to what was read.
+		if upstream.N == 0 || body.Len() > policy.HTTP10AnswerLimit {
 			fail(http.StatusBadGateway, "answer too large for an HTTP/1.0 caller")
 			return
 		}
@@ -922,8 +925,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 		w.WriteHeader(resp.StatusCode)
 		rec.Status = resp.StatusCode
-		n, _ := w.Write(body.Bytes())
+		n, err := w.Write(body.Bytes())
 		rec.Bytes = int64(n)
+		if err != nil {
+			rec.Note = "client went away"
+		}
 		return
 	}
 	copyHeaders()
@@ -965,10 +971,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 }
-
-// http10Limit bounds the answer the keyring holds for an HTTP/1.0 caller,
-// which only gets a complete answer with its length.
-const http10Limit = 32 << 20
 
 var errBadQuery = errors.New("malformed query string")
 
