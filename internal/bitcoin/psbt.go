@@ -236,14 +236,20 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 		plan.matches = append(plan.matches, m)
 		plan.types = append(plan.types, t)
 	}
-	var narrow []int // inputs whose signature commits only to their own amount
+	// narrow is the input whose signature commits only to its own amount:
+	// -1 when there is none, -2 when there are several.
+	narrow := -1
 	for n, i := range plan.inputs {
 		if plan.matches[n].kind != ScriptP2TR || plan.types[n]&txscript.SigHashAnyOneCanPay != 0 {
-			narrow = append(narrow, i)
+			if narrow != -1 {
+				narrow = -2
+				break
+			}
+			narrow = i
 		}
 	}
 	for i, pin := range packet.Inputs {
-		if len(narrow) == 0 || len(narrow) == 1 && narrow[0] == i {
+		if narrow == -1 || narrow == i {
 			continue
 		}
 		prev, nw := tx.TxIn[i].PreviousOutPoint, pin.NonWitnessUtxo
