@@ -556,3 +556,44 @@ func TestGoogleAnswersOrderedByCall(t *testing.T) {
 		}
 	}
 }
+
+// Account health follows the latest call whichever token it used, and a 401
+// drops the token it refused whatever order the answers arrive in (#184).
+func TestGoogleAnswersAcrossTokens(t *testing.T) {
+	h, _, _, _, _ := googleFixture(t)
+	ctx := context.Background()
+	a := h.snap.Load().config.GoogleAccounts["personal"]
+	take := func() (string, uint64) {
+		t.Helper()
+		token, seq, err := h.googleToken(ctx, "personal", a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token, seq
+	}
+	entry := func() (string, bool) {
+		h.google.mu.Lock()
+		defer h.google.mu.Unlock()
+		e := h.google.entries[a]
+		return e.token, e.refused
+	}
+	first, refusedCall := take()
+	_, laterCall := take()
+	h.googleAnswered(ctx, a, first, refusedCall, http.StatusUnauthorized)
+	// gcloud minted another token before the later call's answer arrived.
+	h.google.mu.Lock()
+	h.google.entries[a].token = "synthetic-reminted"
+	h.google.mu.Unlock()
+	h.googleAnswered(ctx, a, first, laterCall, http.StatusOK)
+	if token, refused := entry(); refused || token != "synthetic-reminted" {
+		t.Fatalf("acceptance with a replaced token: refused=%v, token kept=%v", refused, token == "synthetic-reminted")
+	}
+	// A newer call's acceptance arrives before an older call's 401.
+	token, olderCall := take()
+	_, newerCall := take()
+	h.googleAnswered(ctx, a, token, newerCall, http.StatusOK)
+	h.googleAnswered(ctx, a, token, olderCall, http.StatusUnauthorized)
+	if token, refused := entry(); refused || token != "" {
+		t.Fatalf("late 401: refused=%v, token dropped=%v", refused, token == "")
+	}
+}

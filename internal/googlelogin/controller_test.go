@@ -210,10 +210,10 @@ func TestRefusedLoginSignsInAgain(t *testing.T) {
 		t.Fatal("an accepted call on a healthy login changed it")
 	}
 	c.RecordRefusal(ctx, binding, true, 2)
-	if s := saved(); !s.Refused || !s.Ready || s.Generation != connected.Generation || string(s.Files["credentials.db"]) != string(connected.Files["credentials.db"]) || c.Status().Phase != "reconnect_required" || !c.Refused() {
+	if s := saved(); !s.Refused || !s.Ready || s.Generation != connected.Generation || string(s.Files["credentials.db"]) != string(connected.Files["credentials.db"]) || c.Status().Phase != "reconnect_required" || !c.Status().Refused {
 		t.Fatalf("refused login: sealed=%v ready=%v generation kept=%v phase=%s", s.Refused, s.Ready, s.Generation == connected.Generation, c.Status().Phase)
 	}
-	if c.RecordRefusal(ctx, binding, false, 3); saved().Refused || c.Status().Phase != "connected" || c.Refused() {
+	if c.RecordRefusal(ctx, binding, false, 3); saved().Refused || c.Status().Phase != "connected" || c.Status().Refused {
 		t.Fatalf("accepted call left sealed=%v phase=%s", saved().Refused, c.Status().Phase)
 	}
 	c.RecordRefusal(ctx, binding, true, 4)
@@ -233,8 +233,8 @@ func TestRefusedLoginSignsInAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted.SetState(saved())
-	if phase := restarted.Status().Phase; phase != "reconnect_required" || !restarted.Refused() {
-		t.Fatalf("restart lost the refusal: %s", phase)
+	if v := restarted.Status(); v.Phase != "reconnect_required" || !v.Refused {
+		t.Fatalf("restart lost the refusal: %+v", v)
 	}
 	// A new link signs in again instead of reporting the refused login.
 	again := connectFixture(t, c, "again")
@@ -242,7 +242,7 @@ func TestRefusedLoginSignsInAgain(t *testing.T) {
 		t.Fatalf("new sign-in: new generation=%v refused=%v ready=%v same account=%v same project=%v", again.Generation != connected.Generation, again.Refused, again.Ready, again.Account == connected.Account, again.Project == connected.Project)
 	}
 	// Answers for the replaced login change nothing.
-	if c.RecordRefusal(ctx, binding, true, 5); saved() != again || c.Refused() {
+	if c.RecordRefusal(ctx, binding, true, 5); saved() != again || c.Status().Refused {
 		t.Fatal("an answer for the replaced login was recorded")
 	}
 }
@@ -274,7 +274,7 @@ func TestUnsealedRefusalStillSignsInAgain(t *testing.T) {
 	if saved().Refused {
 		t.Fatal("fixture sealed the refusal despite the failed save")
 	}
-	if !c.Refused() || c.Status().Phase != "reconnect_required" {
+	if v := c.Status(); !v.Refused || v.Phase != "reconnect_required" {
 		t.Fatalf("unsealed refusal not reported: %s", c.Status().Phase)
 	}
 	if err := c.Start("again", c.Epoch(), ""); err != nil {
@@ -286,7 +286,7 @@ func TestUnsealedRefusalStillSignsInAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitView(t, c, "again", "connected")
-	if again := saved(); again.Generation == connected.Generation || again.Refused || c.Refused() {
+	if again := saved(); again.Generation == connected.Generation || again.Refused || c.Status().Refused {
 		t.Fatal("new sign-in did not replace the refused login")
 	}
 }
@@ -300,8 +300,8 @@ func TestRefusalAnswersOrderedByCall(t *testing.T) {
 		ctx := context.Background()
 		c.RecordRefusal(ctx, binding, later, 2)
 		c.RecordRefusal(ctx, binding, !later, 1)
-		if saved().Refused != later || c.Refused() != later {
-			t.Fatalf("later call refused=%v: sealed=%v status=%v after an earlier call's answer", later, saved().Refused, c.Refused())
+		if saved().Refused != later || c.Status().Refused != later {
+			t.Fatalf("later call refused=%v: sealed=%v status=%v after an earlier call's answer", later, saved().Refused, c.Status().Refused)
 		}
 	}
 }

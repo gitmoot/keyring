@@ -36,14 +36,11 @@ type googleEntry struct {
 	oauthEntry
 	expires time.Time
 	renewal gcloudexec.RenewalTrace
-	// last is the latest token minted. A 401 drops token but not last, so
-	// answers to calls still in flight with it are recorded in order.
-	last string
 	// answered is the sequence number of the call whose answer set refused;
 	// answers to calls made before it change nothing.
 	answered uint64
-	// refused: Google answered 401 to the latest answered call made with
-	// last. Only a later call it accepts clears it; a new token does not.
+	// refused: Google answered 401 to the latest answered call. Only a
+	// later call it accepts clears it; a new token does not.
 	refused bool
 }
 
@@ -208,7 +205,7 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 			e.token, e.err, e.retryAt = "", err, now.Add(oauthRetry)
 			e.expires = time.Time{}
 		} else {
-			e.token, e.last, e.err = token, token, nil
+			e.token, e.err = token, nil
 			e.expires = now.Add(lifetime)
 			e.refreshAt = now.Add(lifetime - min(oauthEarly, lifetime/2))
 			c.seq++
@@ -225,14 +222,14 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 // to seal Google's answer before it is returned.
 const googleAnswerSave = 10 * time.Second
 
-// googleAnswered records Google's answer to call seq, sent with token. A 401
-// drops the token if the entry still holds it, so the next call mints a new
-// one, and marks the account refused; a later accepted call clears it.
-// Answers are ordered by the call's sequence number: one to a call made
-// before the latest recorded answer's call, or with a token older than the
-// latest minted, changes nothing. Credentials are never removed here. The
-// container's controller also seals the answer (SetGoogleRefusal) before
-// googleAnswered returns, within googleAnswerSave.
+// googleAnswered records Google's answer to call seq, sent with token, for
+// the account's health: a 401 marks it refused and a later accepted call
+// clears it, whichever token each call used. Answers are ordered by the
+// call's sequence number: one to a call made before the latest recorded
+// answer's call changes nothing. Apart from that, a 401 drops the token if
+// the entry still holds it, so the next call mints a new one. Credentials
+// are never removed here. The container's controller also seals the answer
+// (SetGoogleRefusal) before googleAnswered returns, within googleAnswerSave.
 func (h *Handler) googleAnswered(ctx context.Context, a policy.GoogleAccount, token string, seq uint64, status int) {
 	var refused bool
 	switch {
@@ -244,14 +241,18 @@ func (h *Handler) googleAnswered(ctx context.Context, a policy.GoogleAccount, to
 	}
 	h.google.mu.Lock()
 	e := h.google.entries[a]
-	if e == nil || e.last != token || seq < e.answered {
+	if e == nil {
+		h.google.mu.Unlock()
+		return
+	}
+	if refused && e.token == token {
+		e.token = ""
+	}
+	if seq < e.answered {
 		h.google.mu.Unlock()
 		return
 	}
 	e.answered, e.refused = seq, refused
-	if refused && e.token == token {
-		e.token = ""
-	}
 	h.google.mu.Unlock()
 	if h.googleRefusal != nil {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), googleAnswerSave)

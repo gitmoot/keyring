@@ -32,6 +32,10 @@ type View struct {
 	// take an existing project (see ChooseProject). Only the consent page
 	// of that flow sees it.
 	ProjectChoosable bool `json:"-"`
+	// Refused: Google refuses the connected login's tokens (it answered 401
+	// and has accepted no call since), whatever the phase shows. Status
+	// sets it.
+	Refused bool `json:"-"`
 }
 
 type job struct {
@@ -152,18 +156,12 @@ func (c *Controller) refusedLocked(s *Snapshot) bool {
 	return s.Refused
 }
 
-// Refused reports whether Google refuses the connected login's tokens (it
-// answered 401 and has accepted no call since).
-func (c *Controller) Refused() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.refusedLocked(c.state)
-}
-
 func (c *Controller) Status() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v := stateView(c.state, c.refusedLocked(c.state))
+	refused := c.refusedLocked(c.state)
+	v := stateView(c.state, refused)
+	v.Refused = refused
 	if c.closing {
 		v.Phase, v.Busy = "disconnecting", true
 	} else if c.job != nil && !c.job.done {
@@ -332,22 +330,32 @@ func (c *Controller) RecordRefusal(ctx context.Context, binding policy.GoogleAcc
 }
 
 // sealRefusal seals the latest answer for the ready login, serialized with
-// the other SDK writers.
+// the other SDK writers. It returns once ctx is done even while the save
+// still waits for the instance transaction; that save then fails on ctx.
 func (c *Controller) sealRefusal(ctx context.Context) {
 	if c.acquire(ctx) != nil {
 		return
 	}
-	defer func() { <-c.ops }()
 	c.mu.Lock()
 	s := c.state
 	refused := c.refusedLocked(s)
 	c.mu.Unlock()
 	if s == nil || !s.Ready || s.Refused == refused {
+		<-c.ops
 		return
 	}
 	next := *s
 	next.Refused = refused
-	_ = c.save(ctx, s.Generation, &next)
+	saved := make(chan struct{})
+	go func() {
+		defer func() { <-c.ops }()
+		defer close(saved)
+		_ = c.save(ctx, s.Generation, &next)
+	}()
+	select {
+	case <-saved:
+	case <-ctx.Done():
+	}
 }
 
 func (c *Controller) acquire(ctx context.Context) error {

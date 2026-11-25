@@ -601,8 +601,8 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 	}
 	// The container's only Google account ("me") is the sealed login: the
 	// controller knows whether Google refuses it, even across restarts and
-	// failed mints.
-	loginRefused := in.google != nil && in.google.Refused()
+	// failed mints. It comes from the same snapshot as the phase.
+	loginRefused := googleView != nil && googleView.Refused
 	failing := map[string]string{}
 	reconnect := map[string]bool{}
 	for name, svc := range s.Services {
