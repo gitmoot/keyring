@@ -105,7 +105,9 @@ the dashboard status reads "Google refused the gcloud token (HTTP 401); run
 gcloud auth login for this account" until Google accepts a call again; a failed
 or new mint does not clear it. On a host this mark lives in the running proxy
 (a restart forgets it until the next 401); in the container it is sealed with
-the Drive login. Nothing is deleted and the 401 alone is not treated as a login
+the Drive login before the 401 is returned. Answers to concurrent calls count in
+the order the calls took their token, so a late answer to an earlier call never
+overrides a later call's. Nothing is deleted and the 401 alone is not treated as a login
 requirement. Only a confirmed reauthentication requirement asks the owner
 to sign in; runtime, network and unknown failures must not be treated as login
 problems. Host logout alone does not erase an already minted in-memory access

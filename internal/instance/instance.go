@@ -599,9 +599,10 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		view.Account, view.Project = "", ""
 		googleView = &view
 	}
-	// The container's only Google account ("me") is the sealed login: its
-	// refusal survives restarts and failed mints.
-	sealedRefusal := googleView != nil && googleView.Phase == "reconnect_required"
+	// The container's only Google account ("me") is the sealed login: the
+	// controller knows whether Google refuses it, even across restarts and
+	// failed mints.
+	loginRefused := in.google != nil && in.google.Refused()
 	failing := map[string]string{}
 	reconnect := map[string]bool{}
 	for name, svc := range s.Services {
@@ -614,16 +615,14 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 				reconnect[name] = true
 			}
 		} else if svc.Auth == policy.AuthGcloud || svc.Auth == policy.AuthGcloudLogin {
-			why, _, refused := in.proxy.GoogleStatus(svc.GoogleAccount)
-			switch why {
-			case "not configured", "not checked", "renewing", "renewal required", "ready":
-				if in.google != nil && (refused || sealedRefusal) {
-					failing[name] = server.GoogleRefusedContainer
-				}
-			default:
+			google := in.proxy.GoogleStatus(svc.GoogleAccount)
+			if in.google != nil {
+				google.Refused = loginRefused
+			}
+			if why := google.Failing(in.google != nil); why != "" {
 				failing[name] = why
 			}
-			if refused || sealedRefusal {
+			if google.Refused {
 				reconnect[name] = true
 			}
 		}

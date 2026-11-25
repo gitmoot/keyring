@@ -193,58 +193,36 @@ func TestLoginTermsRetryRefreshAndRestore(t *testing.T) {
 	}
 }
 
-// Google refusing a connected login's tokens (401) is sealed: it survives a
-// restart and failed mints and is cleared only by an accepted call, and the
-// next connection signs in again with the same account and project instead
-// of reporting the refused login as connected (#184).
+// Google refusing a connected login's tokens (401) is sealed before
+// RecordRefusal returns: it survives a restart and failed mints and is
+// cleared only by an accepted call, and the next connection signs in again
+// with the same account and project instead of reporting the refused login
+// as connected (#184).
 func TestRefusedLoginSignsInAgain(t *testing.T) {
 	c, saved, _ := controllerFixture(t)
-	waitSaved := func(what string, ok func(*Snapshot) bool) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for !ok(saved()) {
-			if time.Now().After(deadline) {
-				t.Fatalf("%s was not sealed: refused=%v ready=%v", what, saved().Refused, saved().Ready)
-			}
-			time.Sleep(time.Millisecond)
-		}
+	ctx := context.Background()
+	connected := connectFixture(t, c, "browser")
+	if saved() != connected {
+		t.Fatal("connection not sealed")
 	}
-	idle := func() bool {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return !c.refusing
-	}
-	if err := c.Start("browser", c.Epoch(), ""); err != nil {
-		t.Fatal(err)
-	}
-	waitView(t, c, "browser", "awaiting_code")
-	if err := c.Submit("browser", "fixture-code"); err != nil {
-		t.Fatal(err)
-	}
-	waitView(t, c, "browser", "connected")
-	connected := saved()
 	binding := connected.Binding()
-	if c.RecordRefusal(binding, false); !idle() || saved() != connected {
+	if c.RecordRefusal(ctx, binding, false, 1); saved() != connected {
 		t.Fatal("an accepted call on a healthy login changed it")
 	}
-	c.RecordRefusal(binding, true)
-	waitSaved("refusal", func(s *Snapshot) bool { return s.Refused })
-	if s := saved(); !s.Ready || s.Generation != connected.Generation || string(s.Files["credentials.db"]) != string(connected.Files["credentials.db"]) || c.Status().Phase != "reconnect_required" {
-		t.Fatalf("refused login: ready=%v generation kept=%v phase=%s", s.Ready, s.Generation == connected.Generation, c.Status().Phase)
+	c.RecordRefusal(ctx, binding, true, 2)
+	if s := saved(); !s.Refused || !s.Ready || s.Generation != connected.Generation || string(s.Files["credentials.db"]) != string(connected.Files["credentials.db"]) || c.Status().Phase != "reconnect_required" || !c.Refused() {
+		t.Fatalf("refused login: sealed=%v ready=%v generation kept=%v phase=%s", s.Refused, s.Ready, s.Generation == connected.Generation, c.Status().Phase)
 	}
-	c.RecordRefusal(binding, false)
-	waitSaved("accepted call", func(s *Snapshot) bool { return !s.Refused })
-	if c.Status().Phase != "connected" {
-		t.Fatalf("accepted call left %s", c.Status().Phase)
+	if c.RecordRefusal(ctx, binding, false, 3); saved().Refused || c.Status().Phase != "connected" || c.Refused() {
+		t.Fatalf("accepted call left sealed=%v phase=%s", saved().Refused, c.Status().Phase)
 	}
-	c.RecordRefusal(binding, true)
-	waitSaved("refusal", func(s *Snapshot) bool { return s.Refused })
+	c.RecordRefusal(ctx, binding, true, 4)
 	// A failed mint is no accepted call.
 	failure := filepath.Join(c.root, "failure")
 	if err := os.WriteFile(failure, []byte("backend error SECRET-CANARY"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Token(context.Background(), binding, nil); err == nil || !saved().Refused {
+	if _, err := c.Token(ctx, binding, nil); err == nil || !saved().Refused {
 		t.Fatalf("failed mint cleared the refusal: %v", err)
 	}
 	if err := os.Remove(failure); err != nil {
@@ -255,25 +233,76 @@ func TestRefusedLoginSignsInAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted.SetState(saved())
-	if phase := restarted.Status().Phase; phase != "reconnect_required" {
+	if phase := restarted.Status().Phase; phase != "reconnect_required" || !restarted.Refused() {
 		t.Fatalf("restart lost the refusal: %s", phase)
 	}
 	// A new link signs in again instead of reporting the refused login.
+	again := connectFixture(t, c, "again")
+	if again.Generation == connected.Generation || again.Refused || !again.Ready || again.Account != connected.Account || again.Project != connected.Project {
+		t.Fatalf("new sign-in: new generation=%v refused=%v ready=%v same account=%v same project=%v", again.Generation != connected.Generation, again.Refused, again.Ready, again.Account == connected.Account, again.Project == connected.Project)
+	}
+	// Answers for the replaced login change nothing.
+	if c.RecordRefusal(ctx, binding, true, 5); saved() != again || c.Refused() {
+		t.Fatal("an answer for the replaced login was recorded")
+	}
+}
+
+// connectFixture connects Drive through the consent flow id, signing in, and
+// returns the sealed login.
+func connectFixture(t *testing.T, c *Controller, id string) *Snapshot {
+	t.Helper()
+	if err := c.Start(id, c.Epoch(), ""); err != nil {
+		t.Fatal(err)
+	}
+	waitView(t, c, id, "awaiting_code")
+	if err := c.Submit(id, "fixture-code"); err != nil {
+		t.Fatal(err)
+	}
+	waitView(t, c, id, "connected")
+	return c.snapshot()
+}
+
+// A refusal whose seal fails still counts in this process: status reports
+// it and the next connection signs in again instead of reporting the
+// refused login as connected.
+func TestUnsealedRefusalStillSignsInAgain(t *testing.T) {
+	c, saved, failSave := controllerFixture(t)
+	connected := connectFixture(t, c, "browser")
+	*failSave = true
+	c.RecordRefusal(context.Background(), connected.Binding(), true, 1)
+	*failSave = false
+	if saved().Refused {
+		t.Fatal("fixture sealed the refusal despite the failed save")
+	}
+	if !c.Refused() || c.Status().Phase != "reconnect_required" {
+		t.Fatalf("unsealed refusal not reported: %s", c.Status().Phase)
+	}
 	if err := c.Start("again", c.Epoch(), ""); err != nil {
 		t.Fatal(err)
 	}
+	// A flow that skipped the sign-in ends connected before awaiting_code.
 	waitView(t, c, "again", "awaiting_code")
 	if err := c.Submit("again", "fixture-code"); err != nil {
 		t.Fatal(err)
 	}
 	waitView(t, c, "again", "connected")
-	again := saved()
-	if again.Generation == connected.Generation || again.Refused || !again.Ready || again.Account != connected.Account || again.Project != connected.Project {
-		t.Fatalf("new sign-in: new generation=%v refused=%v ready=%v same account=%v same project=%v", again.Generation != connected.Generation, again.Refused, again.Ready, again.Account == connected.Account, again.Project == connected.Project)
+	if again := saved(); again.Generation == connected.Generation || again.Refused || c.Refused() {
+		t.Fatal("new sign-in did not replace the refused login")
 	}
-	// Answers for the replaced login change nothing.
-	if c.RecordRefusal(binding, true); !idle() || saved() != again {
-		t.Fatal("an answer for the replaced login was recorded")
+}
+
+// Answers are ordered by their calls: one to an earlier call, arriving
+// after a later call's answer, changes neither the sealed login nor status.
+func TestRefusalAnswersOrderedByCall(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		c, saved, _ := controllerFixture(t)
+		binding := connectFixture(t, c, "browser").Binding()
+		ctx := context.Background()
+		c.RecordRefusal(ctx, binding, later, 2)
+		c.RecordRefusal(ctx, binding, !later, 1)
+		if saved().Refused != later || c.Refused() != later {
+			t.Fatalf("later call refused=%v: sealed=%v status=%v after an earlier call's answer", later, saved().Refused, c.Refused())
+		}
 	}
 }
 

@@ -184,9 +184,10 @@ func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
 	}
 }
 
-// A refusal sealed with the login reports the Google services as needing a
-// reconnect even from a proxy that never saw the 401, as after a container
-// restart (#184).
+// Status reports the Google services as needing a reconnect from the
+// controller's record of Google refusing the login: a refusal sealed with the
+// login, even from a proxy that never saw the 401 (as after a container
+// restart), and one whose seal failed (#184).
 func TestContainerGoogleSealedRefusalStatus(t *testing.T) {
 	in, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"})
 	if err != nil {
@@ -199,6 +200,21 @@ func TestContainerGoogleSealedRefusalStatus(t *testing.T) {
 	x.must("POST", "/google-drive", map[string]any{})
 	login := &googlelogin.Snapshot{Generation: strings.Repeat("b", 32), Account: "person@example.test", Project: "owned-project-1", Ready: true,
 		Files: map[string][]byte{"credentials.db": []byte("synthetic-credential")}}
+	check := func(step string, refused bool) {
+		t.Helper()
+		status := x.must("GET", "/status", nil)
+		reconnect, _ := status["reconnect_required"].(map[string]any)
+		failing, _ := status["failing"].(map[string]any)
+		for _, name := range []string{"drive", "google-me-drive", "google-me-upload", "google-me-sheets"} {
+			if (reconnect[name] == true) != refused || (failing[name] == server.GoogleRefusedContainer) != refused {
+				t.Fatalf("%s %s: reconnect=%v failing=%v", step, name, reconnect[name], failing[name])
+			}
+		}
+		want := map[bool]string{false: "connected", true: "reconnect_required"}[refused]
+		if phase := status["google"].(map[string]any)["phase"]; phase != want {
+			t.Fatalf("%s: phase %v", step, phase)
+		}
+	}
 	expected := ""
 	for _, refused := range []bool{false, true} {
 		next := *login
@@ -207,17 +223,18 @@ func TestContainerGoogleSealedRefusalStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		expected = login.Generation
-		status := x.must("GET", "/status", nil)
-		reconnect, _ := status["reconnect_required"].(map[string]any)
-		failing, _ := status["failing"].(map[string]any)
-		for _, name := range []string{"drive", "google-me-drive", "google-me-upload", "google-me-sheets"} {
-			if (reconnect[name] == true) != refused || (failing[name] == server.GoogleRefusedContainer) != refused {
-				t.Fatalf("refused=%v %s: reconnect=%v failing=%v", refused, name, reconnect[name], failing[name])
-			}
-		}
-		want := map[bool]string{false: "connected", true: "reconnect_required"}[refused]
-		if phase := status["google"].(map[string]any)["phase"]; phase != want {
-			t.Fatalf("refused=%v phase %v", refused, phase)
-		}
+		check(map[bool]string{false: "sealed login", true: "sealed refusal"}[refused], refused)
 	}
+	in.google.RecordRefusal(context.Background(), login.Binding(), false, 1)
+	check("accepted call", false)
+	failed, cancel := context.WithCancel(context.Background())
+	cancel()
+	in.google.RecordRefusal(failed, login.Binding(), true, 2)
+	in.mu.Lock()
+	sealed := in.state.Google.Refused
+	in.mu.Unlock()
+	if sealed {
+		t.Fatal("a canceled seal saved the refusal")
+	}
+	check("unsealed refusal", true)
 }

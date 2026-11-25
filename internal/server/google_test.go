@@ -419,19 +419,24 @@ func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
 	clock := time.Now()
 	h.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
 	var answers []bool
-	h.SetGoogleRefusal(func(a policy.GoogleAccount, refused bool) {
+	var lastSeq uint64
+	h.SetGoogleRefusal(func(ctx context.Context, a policy.GoogleAccount, refused bool, seq uint64) {
 		mu.Lock()
 		defer mu.Unlock()
 		if a.ConfigDir != dirs["personal"] {
 			t.Errorf("answer recorded for %s", a.ConfigDir)
 		}
+		if _, bounded := ctx.Deadline(); !bounded || seq <= lastSeq {
+			t.Errorf("answer %d after %d, bounded=%v", seq, lastSeq, bounded)
+		}
+		lastSeq = seq
 		answers = append(answers, refused)
 	})
 	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 200 {
 		t.Fatalf("first call: %d", w.Code)
 	}
-	if state, _, reconnect := h.GoogleStatus("personal"); state != "ready" || reconnect {
-		t.Fatalf("accepted token: %q reconnect=%v", state, reconnect)
+	if s := h.GoogleStatus("personal"); s.Mint != GoogleReady || s.Refused {
+		t.Fatalf("accepted token: %+v", s)
 	}
 	// The fixture's Google answers every write with 401.
 	for round := range 2 {
@@ -441,13 +446,12 @@ func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
 		if checks.Load() != int32(round+1) {
 			t.Fatalf("refused call %d: %d mints; a refused token must not be reused", round, checks.Load())
 		}
-		state, expires, reconnect := h.GoogleStatus("personal")
-		if state != googleRefusedHost || !reconnect || !expires.IsZero() {
-			t.Fatalf("refused call %d: %q reconnect=%v", round, state, reconnect)
+		if s := h.GoogleStatus("personal"); !s.Refused || s.Text(false) != googleRefusedHost || s.Failing(true) != GoogleRefusedContainer || !s.Expires.IsZero() {
+			t.Fatalf("refused call %d: %+v", round, s)
 		}
 	}
-	if state, _, reconnect := h.GoogleStatus("business"); reconnect || state != "not checked" {
-		t.Fatalf("other account marked: %q", state)
+	if s := h.GoogleStatus("business"); s.Refused || s.Mint != GoogleNotChecked {
+		t.Fatalf("other account marked: %+v", s)
 	}
 	// A failed mint is the newer diagnosis, but Google accepted nothing.
 	fail := filepath.Join(dirs["personal"], "fail")
@@ -457,8 +461,8 @@ func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
 	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code == 200 {
 		t.Fatal("call succeeded without a token")
 	}
-	if state, _, reconnect := h.GoogleStatus("personal"); !reconnect || state == googleRefusedHost || state == "ready" {
-		t.Fatalf("failed mint after a refusal: %q reconnect=%v", state, reconnect)
+	if s := h.GoogleStatus("personal"); !s.Refused || s.Mint != GoogleMintFailed || s.Failing(false) != s.Failure {
+		t.Fatalf("failed mint after a refusal: %+v", s)
 	}
 	if err := os.Remove(fail); err != nil {
 		t.Fatal(err)
@@ -469,8 +473,8 @@ func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
 	if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 200 || checks.Load() != 3 {
 		t.Fatalf("call after refusal: %d with %d mints", w.Code, checks.Load())
 	}
-	if state, _, reconnect := h.GoogleStatus("personal"); state != "ready" || reconnect {
-		t.Fatalf("accepted call did not clear the refusal: %q reconnect=%v", state, reconnect)
+	if s := h.GoogleStatus("personal"); s.Mint != GoogleReady || s.Refused || s.Failing(true) != "" {
+		t.Fatalf("accepted call did not clear the refusal: %+v", s)
 	}
 	mu.Lock()
 	got := fmt.Sprint(answers)
@@ -480,5 +484,75 @@ func TestGoogleRefusedTokenNeedsReconnect(t *testing.T) {
 	}
 	if strings.Contains(audit.String(), "synthetic-") {
 		t.Fatal("audit exposed a credential")
+	}
+}
+
+// googleCallGate holds the fixture's Drive calls of each gated method until
+// the test releases them; entered reports each held call.
+type googleCallGate struct {
+	next    http.RoundTripper
+	entered chan string
+	release map[string]chan struct{}
+}
+
+func (g googleCallGate) RoundTrip(r *http.Request) (*http.Response, error) {
+	if release := g.release[r.Method]; release != nil && r.URL.Host == "www.googleapis.com" {
+		g.entered <- r.Method
+		<-release
+	}
+	return g.next.RoundTrip(r)
+}
+
+// Google's answers to concurrent calls with one token are ordered by when
+// each call took the token, whatever order they arrive in: a later call's
+// answer stands, and the container records the same one (#184).
+func TestGoogleAnswersOrderedByCall(t *testing.T) {
+	for _, tc := range []struct {
+		taken, answered [2]string // GET is accepted, POST refused
+		refused         bool
+	}{
+		// The refusal dropped the token; the later call's acceptance
+		// still counts.
+		{[2]string{"POST", "GET"}, [2]string{"POST", "GET"}, false},
+		// An earlier call's refusal arriving late changes nothing.
+		{[2]string{"POST", "GET"}, [2]string{"GET", "POST"}, false},
+		// An earlier call's acceptance arriving late changes nothing.
+		{[2]string{"GET", "POST"}, [2]string{"POST", "GET"}, true},
+	} {
+		h, _, _, checks, _ := googleFixture(t)
+		var mu sync.Mutex
+		var latest uint64
+		var recorded bool
+		h.SetGoogleRefusal(func(_ context.Context, _ policy.GoogleAccount, refused bool, seq uint64) {
+			mu.Lock()
+			defer mu.Unlock()
+			if seq > latest {
+				latest, recorded = seq, refused
+			}
+		})
+		if w := call(h, "GET", "/personal/files", "role-personal", nil); w.Code != 200 {
+			t.Fatalf("first call: %d", w.Code)
+		}
+		gate := googleCallGate{next: h.client.Transport, entered: make(chan string, 2), release: map[string]chan struct{}{"GET": make(chan struct{}), "POST": make(chan struct{})}}
+		h.client.Transport = gate
+		codes := map[string]chan int{"GET": make(chan int, 1), "POST": make(chan int, 1)}
+		for _, method := range tc.taken {
+			go func() { codes[method] <- call(h, method, "/personal/files", "role-personal", nil).Code }()
+			if got := <-gate.entered; got != method {
+				t.Fatalf("%s took the token instead of %s", got, method)
+			}
+		}
+		for _, method := range tc.answered {
+			close(gate.release[method])
+			if code, want := <-codes[method], map[string]int{"GET": 200, "POST": 401}[method]; code != want {
+				t.Fatalf("%s: %d, want %d", method, code, want)
+			}
+		}
+		mu.Lock()
+		got := recorded
+		mu.Unlock()
+		if s := h.GoogleStatus("personal"); s.Refused != tc.refused || got != tc.refused || checks.Load() != 1 {
+			t.Fatalf("taken %v, answered %v: refused=%v recorded=%v mints=%d; want refused=%v", tc.taken, tc.answered, s.Refused, got, checks.Load(), tc.refused)
+		}
 	}
 }
