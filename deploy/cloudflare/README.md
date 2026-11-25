@@ -435,14 +435,17 @@ for an unknown instance, `409` for incompatible reserved service/grant definitio
 and the existing `502` failure shape when the container or state save is unavailable.
 Provisioning is not sign-in.
 
-`{"project": "<existing project ID>"}` instead of `{}` also names a Google Cloud
-project the signed-in account already owns, for when Google will not create a new
-one (see `project_limit_reached` below). A valid ID (6-30 lowercase letters,
-digits or hyphens, starting with a letter, not ending with a hyphen) is checked
-first (`400`, nothing changed). Choosing needs a retained sign-in whose setup has
-not finished and no connection running: otherwise `409`, after the repeatable
-provisioning itself was applied. The ID is sealed like a generated one; the owner
-then presses Retry on the Drive page (or opens a new link). Setup only checks that
+`{"project": "<existing project ID>"}` instead of `{}` only chooses a Google Cloud
+project the signed-in account already owns and that still exists (an older
+`drivekey-…` project listed by `gcloud projects list`, or any other), for when
+Google will not create a new one (see `project_limit_reached` below). It
+provisions nothing. An invalid ID (not 6-30 lowercase letters, digits or
+hyphens, starting with a letter, not ending with a hyphen) gets `400`; without a
+retained sign-in whose setup has not finished, or while a connection runs, it
+gets `409`. Both change nothing. On success (`200 {"version":N}`) the ID is
+sealed like a generated one; the owner then presses Retry on the Drive page or
+opens a new `drive` link. The failed Drive page also offers the same choice
+whenever the sign-in is retained, together with Retry. Setup only checks that
 project is ACTIVE and reachable, enables Drive and Sheets and probes; it never
 creates or replaces a chosen project. Several keyrings may share one project: it
 only carries API quota (`X-Goog-User-Project`); every sign-in and credential
@@ -486,16 +489,6 @@ Permission-management endpoints and DELETE are refused. `drive` itself cannot
 proxy requests. `GET /admin/instances/<id>/services` reports the four services as
 connected only after login/project setup is saved, with a safe failure hint;
 it exposes no Google account, project, authorization URL, code, or credential.
-gcloud can keep minting access tokens that Google refuses, for example with
-"Active session is invalid" after the account signed out everywhere or changed
-its password. A Google 401 to any proxied call therefore drops that token (the
-next call mints a new one) and reports all four services `connected: false`
-with `failing: "Google refused the sign-in (HTTP 401, session invalid); disconnect
-and reconnect Drive"` (`reconnect_required` in the container's `/status`) until
-Google accepts a call again. Credentials are kept until then. A link alone does
-not sign in again while the saved connection is complete: disconnect Drive
-(`DELETE keys/drive`), then send a new `drive` link. If the new project cannot be
-created (`project_limit_reached`), enter the previous project's ID on the page.
 
 SDK credentials are bounded opaque database snapshots (256 KiB total), in a
 dedicated field of the instance's encrypted state, never in forwarded keys.

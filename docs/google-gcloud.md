@@ -98,13 +98,7 @@ removing and re-adding the same binding. A failed renewal fails closed (502), wi
 the existing 10-second error-cache delay; **no background retry or diagnostic
 probe runs**. It never uses another account or a stale token. An upstream 401
 invalidates only the token used and is returned **without replay**, including
-POST/PATCH writes. The next call mints a new token. Because gcloud can keep
-minting tokens that Google refuses (for example "Active session is invalid"
-after the account signed out everywhere), a 401 also marks the account refused:
-the dashboard status reads "Google refused the gcloud token (HTTP 401); run
-gcloud auth login for this account" until Google accepts a call again. Nothing
-is deleted and the 401 alone is not treated as a login requirement. Only a
-confirmed reauthentication requirement asks the owner
+POST/PATCH writes. Only a confirmed reauthentication requirement asks the owner
 to sign in; runtime, network and unknown failures must not be treated as login
 problems. Host logout alone does not erase an already minted in-memory access
 token: revoke the role first to stop new proxy calls immediately, then perform

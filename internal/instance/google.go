@@ -68,6 +68,8 @@ func (in *Instance) saveGoogle(ctx context.Context, expected string, next *googl
 
 // provisionGoogle is an atomic extension of an existing router role, never a
 // replacement of its token or of unrelated grants. Reserved conflicts fail closed.
+// With a project it only chooses that project for the retained sign-in and
+// provisions nothing, so a refused choice (400, 409) changes nothing.
 func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 	if !in.opt.Container {
 		writeError(w, &httpError{http.StatusNotFound, "container Google provisioning is unavailable"})
@@ -82,8 +84,13 @@ func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(`Google provisioning requires a JSON object: {} or {"project": "<existing project ID>"}`))
 		return
 	}
-	if request.Project != "" && !googlelogin.ValidProject(request.Project) {
-		writeError(w, badRequest("%v", googlelogin.ErrProjectID))
+	if request.Project != "" {
+		if !googlelogin.ValidProject(request.Project) {
+			writeError(w, badRequest("%v", googlelogin.ErrProjectID))
+			return
+		}
+		version, err := in.chooseGoogleProject(r.Context(), request.Project)
+		in.changed(w, "google_project_chosen", nil, version, err, nil)
 		return
 	}
 	services := map[string]policy.Service{
@@ -136,10 +143,7 @@ func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 		s.Roles["router"] = role
 		return nil
 	})
-	if err == nil && request.Project != "" {
-		version, err = in.chooseGoogleProject(r.Context(), request.Project)
-	}
-	in.changed(w, "google_provisioned", map[string]any{"project_chosen": request.Project != ""}, version, err, nil)
+	in.changed(w, "google_provisioned", nil, version, err, nil)
 }
 
 // chooseGoogleProject saves an existing project ID for the retained Google

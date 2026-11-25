@@ -30,7 +30,7 @@ func (s *Server) startGoogle(w http.ResponseWriter, r *http.Request, l *link, h 
 		return
 	}
 	state, browser := randomToken(), randomToken()
-	if err := s.google.Start(state, l.googleEpoch); err != nil {
+	if err := s.google.Start(state, l.googleEpoch, ""); err != nil {
 		s.mu.Unlock()
 		render(w, http.StatusConflict, pageData{Message: err.Error()})
 		return
@@ -90,13 +90,9 @@ func (s *Server) googlePage(w http.ResponseWriter, r *http.Request, id string, p
 		}
 		if r.PostForm.Get("action") == "retry" {
 			// An existing project the account owns, when Google will not
-			// create another one. Optional; not a secret.
-			if project := strings.TrimSpace(r.PostForm.Get("project")); project != "" {
-				err = s.google.ChooseProject(r.Context(), project)
-			}
-			if err == nil {
-				err = s.google.Start(id, f.googleEpoch)
-			}
+			// create another one. Optional; not a secret. Choosing it and
+			// retrying are one operation: a refused retry chooses nothing.
+			err = s.google.Start(id, f.googleEpoch, strings.TrimSpace(r.PostForm.Get("project")))
 		} else {
 			err = s.google.Submit(id, r.PostForm.Get("code"))
 		}
@@ -127,10 +123,8 @@ func (s *Server) googlePage(w http.ResponseWriter, r *http.Request, id string, p
 		data.Problem = true
 		data.Form, data.GoogleRetry = true, true
 		data.GoogleTerms = view.Error == "cloud_terms_not_accepted"
-		switch view.Error {
-		case "project_limit_reached", "project_not_accessible", "project_not_found", "project_not_active":
-			data.GoogleChooseProject = true
-		}
+		// Whatever failed, a retained sign-in may still take another project.
+		data.GoogleChooseProject = view.ProjectChoosable
 		data.Message = googleFailureMessage(view)
 	case "setting_up_project":
 		data.GoogleStep = 2

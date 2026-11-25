@@ -28,6 +28,10 @@ type View struct {
 	// Step is the fixed name of the project setup command that failed
 	// (project_describe, project_create, services_enable, access_token).
 	Step string `json:"step,omitempty"`
+	// ProjectChoosable: a finished flow whose retained sign-in may still
+	// take an existing project (see ChooseProject). Only the consent page
+	// of that flow sees it.
+	ProjectChoosable bool `json:"-"`
 }
 
 type job struct {
@@ -37,6 +41,9 @@ type job struct {
 	code       chan string
 	cancel     context.CancelFunc
 	done       bool
+	// project is an existing project chosen with this retry; the job saves
+	// it once it holds the writer, before connecting.
+	project string
 }
 
 // Controller serializes every SDK writer, including refresh and revocation.
@@ -144,6 +151,7 @@ func (c *Controller) View(id string) (View, bool) {
 	if c.state != nil && c.state.Generation == c.job.generation {
 		v.Account, v.Project = c.state.Account, c.state.Project
 	}
+	v.ProjectChoosable = c.job.done && !c.closing && choosable(c.state)
 	return v, true
 }
 
@@ -153,7 +161,15 @@ func (c *Controller) Epoch() uint64 {
 	return c.epoch
 }
 
-func (c *Controller) Start(id string, epoch uint64) error {
+// Start begins the connection of a consent flow, or retries it. A nonempty
+// project first chooses an existing project of the retained sign-in (see
+// ChooseProject) in the same operation: the flow's job is reserved before
+// the choice is saved, so a refused start never leaves a saved choice behind,
+// and a refused choice changes nothing.
+func (c *Controller) Start(id string, epoch uint64, project string) error {
+	if project != "" && !ValidProject(project) {
+		return ErrProjectID
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if epoch != c.epoch {
@@ -162,8 +178,15 @@ func (c *Controller) Start(id string, epoch uint64) error {
 	if c.closing || c.job != nil && !c.job.done {
 		return errors.New("a Google connection is already in progress")
 	}
+	if project != "" && !choosable(c.state) {
+		return ErrProjectNotChoosable
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	j := &job{id: id, view: View{Phase: "starting"}, code: make(chan string, 1), cancel: cancel}
+	j := &job{id: id, view: View{Phase: "starting"}, code: make(chan string, 1), cancel: cancel, project: project}
+	if project != "" {
+		// Replacing or removing this sign-in cancels the choice too.
+		j.generation = c.state.Generation
+	}
 	c.job = j
 	go c.connect(ctx, j)
 	return nil
@@ -192,11 +215,19 @@ var ErrProjectID = errors.New("enter a Google Cloud project ID: 6-30 lowercase l
 // whose setup has not finished, while no connection runs.
 var ErrProjectNotChoosable = errors.New("a project can be chosen only after Google sign-in, before Drive is connected, while no connection runs")
 
+// choosable reports whether s is a retained sign-in whose setup has not
+// finished, the only state a project may be chosen for.
+func choosable(s *Snapshot) bool {
+	return s != nil && !s.Ready && s.Account != ""
+}
+
 // ChooseProject makes setup use an existing project the account owns
 // instead of creating one: Google limits how many projects an account may
 // create, and deleted ones count for 30 days. The ID is not secret; it is
 // sealed like a generated one. Setup then only checks it is ACTIVE and
 // reachable, enables the APIs and probes; it never creates or replaces it.
+// It only chooses; the next connection runs setup. A refused choice
+// (ErrProjectID, ErrProjectNotChoosable) changes nothing.
 func (c *Controller) ChooseProject(ctx context.Context, project string) error {
 	if !ValidProject(project) {
 		return ErrProjectID
@@ -213,8 +244,17 @@ func (c *Controller) ChooseProject(ctx context.Context, project string) error {
 		return err
 	}
 	defer func() { <-c.ops }()
+	if busy() {
+		return ErrProjectNotChoosable
+	}
+	return c.chooseLocked(ctx, project)
+}
+
+// chooseLocked seals project for the retained sign-in. The caller holds the
+// writer.
+func (c *Controller) chooseLocked(ctx context.Context, project string) error {
 	current := c.snapshot()
-	if busy() || current == nil || current.Ready || current.Account == "" {
+	if !choosable(current) {
 		return ErrProjectNotChoosable
 	}
 	if current.Project == project && current.ProjectChosen {
@@ -277,7 +317,12 @@ func (c *Controller) connect(ctx context.Context, j *job) {
 		return
 	}
 	defer func() { <-c.ops }()
-	err = c.connectLocked(ctx, j)
+	if j.project != "" {
+		err = c.chooseLocked(ctx, j.project)
+	}
+	if err == nil {
+		err = c.connectLocked(ctx, j)
+	}
 	c.finish(j, err)
 }
 

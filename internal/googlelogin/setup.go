@@ -84,12 +84,9 @@ func atStep(step string, err error) error {
 }
 
 func (c *Controller) setup(ctx context.Context, s *Snapshot) error {
-	if err := c.ensureProject(ctx, s); err != nil {
+	s, err := c.ensureProject(ctx, s)
+	if err != nil {
 		return err
-	}
-	// A fresh project ID may have been sealed above.
-	if current := c.snapshot(); current != nil && current.Generation == s.Generation {
-		s = current
 	}
 	if err := c.retryProjectCommand(ctx, s, "services", "enable", "drive.googleapis.com", "sheets.googleapis.com", "--project="+s.Project); err != nil {
 		return atStep("services_enable", err)
@@ -114,46 +111,64 @@ func (c *Controller) setup(ctx context.Context, s *Snapshot) error {
 }
 
 // ensureProject makes sure the retained project is ACTIVE, creating it on
-// first use. Google answers describe for a project deleted for good and for
-// one this account cannot reach with the same "does not have permission to
-// access projects instance [id] (or it may not exist)", and create with the
-// same "already in use by another project" for both: the two cases cannot be
-// told apart, so do not try. Either way the retained ID is unusable for this
-// account, and Drive files live in the account, not the project, so a fresh
-// project ID is created once. A fresh ID refused again is not retried.
-func (c *Controller) ensureProject(ctx context.Context, s *Snapshot) error {
+// first use, and returns the snapshot setup continues with: s, or the one
+// sealed with a fresh project ID. Google answers describe for a project
+// deleted for good and for one this account cannot reach with the same "does
+// not have permission to access projects instance [id] (or it may not
+// exist)", and create with the same "already in use by another project" for
+// both: the two cases cannot be told apart, so do not try. Either way the
+// retained ID is unusable for this account, and Drive files live in the
+// account, not the project, so a fresh project ID is created once. A fresh
+// ID refused again is not retried.
+func (c *Controller) ensureProject(ctx context.Context, s *Snapshot) (*Snapshot, error) {
 	if s.ProjectChosen {
 		// The owner's own project: check it, never create or replace it.
 		err := c.describeProject(ctx, s)
 		if errors.Is(err, errProjectHidden) {
-			return atStep("project_describe", errProjectNotFound)
+			return nil, atStep("project_describe", errProjectNotFound)
 		}
-		return err
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
 	}
 	// A new ID answers describe as hidden too; any describe failure other
 	// than login or terms may be a project not created yet.
 	err := c.describeProject(ctx, s)
-	if err == nil || errors.Is(err, errProjectInactive) || errors.Is(err, errLogin) || errors.Is(err, errTerms) || ctx.Err() != nil {
-		return err
+	if err == nil {
+		return s, nil
+	}
+	if errors.Is(err, errProjectInactive) || errors.Is(err, errLogin) || errors.Is(err, errTerms) || ctx.Err() != nil {
+		return nil, err
 	}
 	err = c.retryProjectCommand(ctx, s, "projects", "create", s.Project, "--name=drivekey")
+	if err == nil {
+		return s, nil
+	}
 	if !errors.Is(err, errProjectTaken) {
-		return atStep("project_create", err)
+		return nil, atStep("project_create", err)
 	}
 	// The first describe may have failed for a passing reason while the
 	// project is ours: ask once more before giving the ID up.
-	if err := c.describeProject(ctx, s); !errors.Is(err, errProjectHidden) {
-		return err
+	err = c.describeProject(ctx, s)
+	if err == nil {
+		return s, nil
+	}
+	if !errors.Is(err, errProjectHidden) {
+		return nil, err
 	}
 	fresh, err := c.freshProject(ctx, s)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = c.retryProjectCommand(ctx, fresh, "projects", "create", fresh.Project, "--name=drivekey")
 	if errors.Is(err, errProjectTaken) {
 		err = errProjectRefused
 	}
-	return atStep("project_create", err)
+	if err != nil {
+		return nil, atStep("project_create", err)
+	}
+	return fresh, nil
 }
 
 func (c *Controller) describeProject(ctx context.Context, s *Snapshot) error {
