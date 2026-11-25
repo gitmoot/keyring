@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"time"
@@ -67,14 +68,32 @@ func (in *Instance) saveGoogle(ctx context.Context, expected string, next *googl
 
 // provisionGoogle is an atomic extension of an existing router role, never a
 // replacement of its token or of unrelated grants. Reserved conflicts fail closed.
+// With a project (any value, even "" or null) it only chooses that project
+// for the retained sign-in and provisions nothing, so a refused choice (400,
+// 409) changes nothing. Only an omitted project provisions.
 func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 	if !in.opt.Container {
 		writeError(w, &httpError{http.StatusNotFound, "container Google provisioning is unavailable"})
 		return
 	}
-	var request *struct{}
+	var request *struct {
+		// Project names an existing project of the signed-in account for
+		// Drive setup instead of creating one (Google's project limit).
+		// Raw, so that an explicit "" or null is told apart from omission.
+		Project json.RawMessage `json:"project,omitempty"`
+	}
 	if err := decode(r, &request); err != nil || request == nil {
-		writeError(w, badRequest("Google provisioning requires an empty JSON object"))
+		writeError(w, badRequest(`Google provisioning requires a JSON object: {} or {"project": "<existing project ID>"}`))
+		return
+	}
+	if request.Project != nil {
+		var project string
+		if err := json.Unmarshal(request.Project, &project); err != nil {
+			writeError(w, badRequest("%v", googlelogin.ErrProjectID))
+			return
+		}
+		version, err := in.chooseGoogleProject(r.Context(), project)
+		in.changed(w, "google_project_chosen", nil, version, err, nil)
 		return
 	}
 	services := map[string]policy.Service{
@@ -128,4 +147,26 @@ func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	in.changed(w, "google_provisioned", nil, version, err, nil)
+}
+
+// chooseGoogleProject saves an existing project ID for the retained Google
+// sign-in's setup; the owner then retries the Drive connection.
+func (in *Instance) chooseGoogleProject(ctx context.Context, project string) (uint64, error) {
+	if in.google == nil {
+		return 0, &httpError{http.StatusNotFound, "container Google provisioning is unavailable"}
+	}
+	switch err := in.google.ChooseProject(ctx, project); {
+	case errors.Is(err, googlelogin.ErrProjectID):
+		return 0, badRequest("%v", err)
+	case errors.Is(err, googlelogin.ErrProjectNotChoosable):
+		return 0, &httpError{http.StatusConflict, err.Error()}
+	case err != nil:
+		return 0, err
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.state == nil {
+		return 0, &httpError{http.StatusConflict, errLocked.Error()}
+	}
+	return in.state.Version, nil
 }

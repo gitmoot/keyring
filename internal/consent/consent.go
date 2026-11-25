@@ -1029,7 +1029,9 @@ type pageData struct {
 	Status                                                int
 	Problem                                               bool
 	Google, GoogleCode, GoogleRetry, GoogleTerms, Refresh bool
-	GoogleURL, GoogleAccount, GoogleProject               string
+	// GoogleChooseProject offers an existing project ID with the retry.
+	GoogleChooseProject                     bool
+	GoogleURL, GoogleAccount, GoogleProject string
 	// GoogleStep is the Google connection's current step while it runs
 	// (1 sign-in, 2 project setup), shown as a list; 0 shows none.
 	GoogleStep int
@@ -1119,6 +1121,9 @@ input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(36,1
 <input id="code" type="password" name="code" required maxlength="4096" autocomplete="off" spellcheck="false">
 <button class="btn" type="submit">Finish Google sign-in</button>
 {{else if .GoogleRetry}}<input type="hidden" name="action" value="retry">
+{{if .GoogleChooseProject}}<label for="project">Use an existing Google Cloud project ID</label>
+<input id="project" name="project" minlength="6" maxlength="30" pattern="[a-z][a-z0-9\-]{4,28}[a-z0-9]" autocomplete="off" spellcheck="false" placeholder="drivekey-…">
+<p class="hint">Optional. Find it in Google Cloud Console under Manage resources; it must belong to the Google account above. One project can serve several keyrings: it only carries API quota, never your sign-in.</p>{{end}}
 <button class="btn" type="submit">Retry connection</button>
 {{else if .SignIn}}<p>You will sign in on the provider's own page. Your password is never seen here.</p>
 <button class="btn" type="submit">Sign in and connect</button>

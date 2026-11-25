@@ -430,10 +430,27 @@ instances into fixed Google services. For existing instances, call
 proof and admin bearer token, then request the normal `service: drive` connection
 link. Provisioning is atomic and repeatable: it preserves the router token and
 unrelated services/grants. It returns `200 {"version":N}` only after sealed-state
-sync, `400` for an invalid/nonempty body, `401` for failed authentication, `404`
+sync, `400` for an invalid body or unknown field, `401` for failed authentication, `404`
 for an unknown instance, `409` for incompatible reserved service/grant definitions,
 and the existing `502` failure shape when the container or state save is unavailable.
 Provisioning is not sign-in.
+
+`{"project": "<existing project ID>"}` instead of `{}` only chooses a Google Cloud
+project the signed-in account already owns and that still exists (an older
+`drivekey-…` project listed by `gcloud projects list`, or any other), for when
+Google will not create a new one (see `project_limit_reached` below). It
+provisions nothing; only a body without `project` provisions. An invalid ID
+(not 6-30 lowercase letters, digits or hyphens, starting with a letter, not
+ending with a hyphen; `""` and `null` included) gets `400`; without a
+retained sign-in whose setup has not finished, or while a connection runs, it
+gets `409`. Both change nothing. On success (`200 {"version":N}`) the ID is
+sealed like a generated one; the owner then presses Retry on the Drive page or
+opens a new `drive` link. The failed Drive page also offers the same choice
+whenever the sign-in is retained, together with Retry. Setup only checks that
+project is ACTIVE and reachable, enables Drive and Sheets and probes; it never
+creates or replaces a chosen project. Several keyrings may share one project: it
+only carries API quota (`X-Goog-User-Project`); every sign-in and credential
+stays per keyring.
 
 The one-time link opens a browser-bound `/connect/<id>/g/<flow>` page. The person
 opens Google's URL and enters its verification code **only on that private page**,
@@ -441,7 +458,26 @@ never in chat. Login runs in that person's container with the SDK's own OAuth
 client and `--enable-gdrive-access`. Setup retains one project ID across retries,
 enables Drive and Sheets, and checks the selected identity. Cloud terms refusal
 links to Google Cloud Console and offers an explicit retry without discarding
-the completed login. No billing account is attached. This relies on Google
+the completed login. A failed setup shows its code and the step that failed
+(`project_describe`, `project_create`, `services_enable`, `access_token`) on the
+page and in `failing` as `"<code> (<step>)"`, never command output:
+
+| Code | Meaning and what to do |
+|---|---|
+| `project_limit_reached` | The account is at Google's project limit (deleted projects count for 30 days). Enter the ID of a project the account already owns, such as an older `drivekey-…` one, on the page, then Retry. |
+| `project_not_active` | The retained project is deleted or pending deletion: restore it in Cloud Console → Manage resources, enter another owned project ID, or disconnect Drive to start with a new project. |
+| `project_not_accessible` | Google refused even a fresh project ID. Retry later, enter an owned project ID, or disconnect and connect again. |
+| `project_not_found` | The chosen project is not visible to this account; check the ID and owner, then enter it again. |
+| `google_command_failed` | A Google Cloud command failed; retry, and check the project in Cloud Console if it repeats. |
+| `api_disabled` | Drive/Sheets APIs are not enabled yet; wait a few minutes, then retry. |
+| `api_probe_failed` | Google refused the setup test call; after a sign-out everywhere or password change, disconnect and connect again, otherwise retry. |
+| `connection_failed` | Anything else; retry or ask for a new link. |
+
+Google answers `projects describe` identically for a project deleted for good
+and one the account cannot reach, and `projects create` refuses both IDs as "already in use"
+(Google never reuses an ID). So when a retained ID is refused that way, setup
+seals one fresh ID and creates it once; it does not try to tell the cases apart.
+No billing account is attached. This relies on Google
 continuing to permit the SDK flow; it does not bypass reauthentication or policy.
 
 | Service | Methods | Path prefixes |

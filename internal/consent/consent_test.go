@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/googlelogin"
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
@@ -925,5 +926,25 @@ func TestReturnURLAfterConnecting(t *testing.T) {
 	w = e.page("POST", e.link("other"), url.Values{"value": {"v"}}, fromPage)
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "url=") || !strings.Contains(w.Body.String(), "close this page") {
 		t.Fatalf("plain value page: %d %s", w.Code, w.Body)
+	}
+}
+
+// Every setup failure the owner can hit needs its own advice; falling back to
+// the generic text hid deleted projects and refused sign-ins (#184).
+func TestGoogleSetupFailuresExplainWhatToDo(t *testing.T) {
+	generic := googleFailureMessage(googlelogin.View{Error: "connection_failed"})
+	for code, advice := range map[string]string{
+		"google_command_failed":  "check the project in Google Cloud Console",
+		"project_not_active":     "Manage resources",
+		"project_not_accessible": "would not create a new Drive project",
+		"project_limit_reached":  "Enter the ID of a project you already own",
+		"project_not_found":      "did not find that project",
+		"api_disabled":           "not enabled yet",
+		"api_probe_failed":       "disconnect Drive and connect again",
+	} {
+		message := googleFailureMessage(googlelogin.View{Phase: "failed", Error: code, Step: "project_create"})
+		if message == generic || !strings.Contains(message, advice) || !strings.HasSuffix(message, "(Failed step: project_create.)") {
+			t.Errorf("%s: %q", code, message)
+		}
 	}
 }

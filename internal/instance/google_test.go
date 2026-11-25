@@ -1,12 +1,16 @@
 package instance
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gitmoot/keyring/internal/googlelogin"
 )
 
 // Exercise the public admin transaction, not copies of the service definitions.
@@ -103,5 +107,78 @@ func TestContainerGoogleProvisioning(t *testing.T) {
 	var view map[string]any
 	if json.Unmarshal(raw, &view) != nil || view["phase"] != "disconnected" || view["account"] != nil || view["quota_project"] != nil {
 		t.Fatalf("unsafe connection metadata: %s", raw)
+	}
+}
+
+// The admin side may name an existing project for the retained sign-in's
+// setup; that only chooses it and provisions nothing, so a refused choice
+// changes nothing. {} stays the provisioning contract and unknown fields
+// stay refused.
+func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
+	in, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(in.Close)
+	x := &inst{t: t, in: in, admin: in.AdminHandler()}
+	x.must("POST", "/create", map[string]any{"id": "person", "data_key": newKey(t), "listen": freeAddr(t)})
+	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	notProvisioned := func(what string) {
+		t.Helper()
+		if services := x.must("GET", "/status", nil)["services"].(map[string]any); services["drive"] != nil || services["google-me-drive"] != nil {
+			t.Fatalf("%s provisioned Google services", what)
+		}
+	}
+	before := x.must("GET", "/state", nil)
+	for _, tc := range []struct {
+		body any
+		code int
+	}{
+		{map[string]any{"project": "Not_A_Project"}, http.StatusBadRequest},
+		// Only an omitted project provisions; an explicit empty one is a
+		// choice of nothing.
+		{map[string]any{"project": ""}, http.StatusBadRequest},
+		{map[string]any{"project": nil}, http.StatusBadRequest},
+		{map[string]any{"project": 5}, http.StatusBadRequest},
+		{map[string]any{"other": "field"}, http.StatusBadRequest},
+		// No Google sign-in yet: nothing to set the project for.
+		{map[string]any{"project": "owned-project-1"}, http.StatusConflict},
+	} {
+		if code, _ := x.call("POST", "/google-drive", tc.body); code != tc.code {
+			t.Fatalf("%v: %d; want %d", tc.body, code, tc.code)
+		}
+		if after := x.must("GET", "/state", nil); after["version"] != before["version"] || after["state"] != before["state"] {
+			t.Fatalf("refused %v changed the sealed state", tc.body)
+		}
+		notProvisioned("a refused request")
+	}
+	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["phase"] != "disconnected" {
+		t.Fatalf("refused project choice changed the connection: %v", google)
+	}
+	x.must("POST", "/google-drive", map[string]any{})
+	if services := x.must("GET", "/status", nil)["services"].(map[string]any); services["drive"] == nil {
+		t.Fatal("{} did not provision Google services")
+	}
+	// Without the router's Google grants, a choice must not bring them back.
+	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	// A sign-in whose setup failed (Google's project limit) is retained.
+	signedIn := &googlelogin.Snapshot{Generation: strings.Repeat("a", 32), Account: "person@example.test", Project: "drivekey-aaaaaaaaaaaaaaaaaaaa",
+		Files: map[string][]byte{"credentials.db": []byte("synthetic-credential")}}
+	if err := in.saveGoogle(context.Background(), "", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	in.google.SetState(signedIn)
+	x.must("POST", "/google-drive", map[string]any{"project": "owned-project-1"})
+	in.mu.Lock()
+	sealed := *in.state.Google
+	in.mu.Unlock()
+	if sealed.Project != "owned-project-1" || !sealed.ProjectChosen || sealed.Ready || sealed.Account != signedIn.Account {
+		t.Fatalf("chosen project not sealed for setup: %+v", sealed)
+	}
+	if access, _ := x.must("GET", "/status", nil)["roles"].(map[string]any)["router"].(map[string]any)["access"].(map[string]any); len(access) != 0 {
+		t.Fatalf("choosing a project provisioned grants: %v", access)
+	}
+	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["quota_project"] != nil {
+		t.Fatalf("status exposed the project: %v", google)
 	}
 }
