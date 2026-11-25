@@ -61,11 +61,11 @@ func bitcoinRoute(path string) (service, action string) {
 
 // BitcoinSpendPath is where the daily bitcoin totals of the keyring whose
 // store (or instance state) is base are kept: keys.json ->
-// keys.bitcoin-spend.json. Named after base, so two keyrings sharing a
-// directory keep separate totals and a restart does not reset
-// bitcoin_max_sats_per_day.
+// keys.json.bitcoin-spend.json. The whole name is kept, so two keyrings
+// sharing a directory (even wallet.json and wallet.sealed) keep separate
+// totals, and a restart does not reset bitcoin_max_sats_per_day.
 func BitcoinSpendPath(base string) string {
-	return strings.TrimSuffix(base, filepath.Ext(base)) + ".bitcoin-spend.json"
+	return base + ".bitcoin-spend.json"
 }
 
 type bitcoinSignRequest struct {

@@ -138,13 +138,14 @@ type Plan struct {
 // derivation of this key on an allowed path, derived script equal to the
 // output's), plus the fee.
 //
-// The input amounts come from the PSBT, so each must be committed: a
-// taproot signature without anyonecanpay commits to every input's amount
-// and script (BIP341); otherwise a signature commits only to its own
-// input's amount (BIP143, BIP341 anyonecanpay), and every other input must
-// prove its amount with non_witness_utxo, the previous transaction. An
-// understated amount would lower the fee and so the external count, while
-// another call signs that input.
+// The input amounts come from the PSBT, so each must be committed by every
+// signature returned: a taproot signature without anyonecanpay commits to
+// every input's amount and script (BIP341), but a P2WPKH signature (BIP143)
+// or a taproot anyonecanpay one commits only to its own input's amount and
+// stays usable when another input's amount was understated. So when the
+// call makes such a signature, every other input must prove its amount with
+// non_witness_utxo, the previous transaction. An understated amount would
+// lower the fee and so the external count.
 func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 	packet, err := psbt.NewFromRawBytes(strings.NewReader(psbtBase64), true)
 	if err != nil || packet.UnsignedTx == nil {
@@ -235,14 +236,14 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 		plan.matches = append(plan.matches, m)
 		plan.types = append(plan.types, t)
 	}
-	committed := false
-	for n := range plan.inputs {
-		if plan.matches[n].kind == ScriptP2TR && plan.types[n]&txscript.SigHashAnyOneCanPay == 0 {
-			committed = true
+	var narrow []int // inputs whose signature commits only to their own amount
+	for n, i := range plan.inputs {
+		if plan.matches[n].kind != ScriptP2TR || plan.types[n]&txscript.SigHashAnyOneCanPay != 0 {
+			narrow = append(narrow, i)
 		}
 	}
 	for i, pin := range packet.Inputs {
-		if committed || listed[i] {
+		if len(narrow) == 0 || len(narrow) == 1 && narrow[0] == i {
 			continue
 		}
 		prev, nw := tx.TxIn[i].PreviousOutPoint, pin.NonWitnessUtxo

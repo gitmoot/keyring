@@ -219,16 +219,20 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 	case len(paths) > MaxPaths:
 		return nil, fmt.Errorf("at most %d paths", MaxPaths)
 	}
-	seen := map[string]bool{}
+	// The addresses call names a path by its fixed part, so no two paths may
+	// share it (m/86'/1'/0'/0 and m/86'/1'/0'/0/* would make the answer
+	// depend on their order).
+	seen := map[string]string{}
 	for _, s := range paths {
 		path, err := ParsePath(s)
 		if err != nil {
 			return nil, fmt.Errorf("path %q: %w", s, err)
 		}
-		if seen[path.String()] {
-			return nil, fmt.Errorf("path %q is listed twice", s)
+		lookup := formatPath(path.fixed)
+		if other, ok := seen[lookup]; ok {
+			return nil, fmt.Errorf("paths %q and %q are both looked up as %s: list one", other, s, lookup)
 		}
-		seen[path.String()] = true
+		seen[lookup] = s
 		r.paths = append(r.paths, path)
 	}
 	if len(sighash) == 0 {

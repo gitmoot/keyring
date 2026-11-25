@@ -69,7 +69,9 @@ In the access file (`services` → name):
   Hardened steps take `'` or `h`. A trailing `/*` means any non-hardened index
   (0 … 2^31-1). The purpose must be `86'` (taproot key path, BIP86: the BIP341
   tweak with no script tree) or `84'` (native SegWit P2WPKH); it decides the
-  script. The coin type and account are whatever you list.
+  script. The coin type and account are whatever you list. No two templates
+  may share the part before `/*` (`m/86'/1'/0'/0` with `m/86'/1'/0'/0/*`):
+  the addresses call names a template by that part.
 - `script` (WIF keys instead of `paths`): `p2tr` (BIP86-style key path) or
   `p2wpkh`.
 - `sighash` (optional): the sighash types it signs. Default `["default",
@@ -105,7 +107,7 @@ Grant the role the service like any other. Two optional limits sit next to
 - `bitcoin_max_sats_per_tx`: the most external sats one PSBT may send.
 - `bitcoin_max_sats_per_day`: the most external sats per role and service per
   UTC day. The total is kept next to the key store in a file named after it
-  (`keys.json` → `keys.bitcoin-spend.json`; in instance mode after `--state`), written atomically after each
+  (`keys.json` → `keys.json.bitcoin-spend.json`; in instance mode after `--state`), written atomically after each
   successful signature, so a restart does not reset it. If that file is
   missing a limit cannot be kept: a grant with a per-day limit is then refused
   with 503, and a corrupt or unsafe file is left alone and refused the same way.
@@ -163,11 +165,13 @@ signed:
    exists.
 2. **Every** input (listed or not) has `witness_utxo`, so the amounts and the
    fee are known; no two inputs spend the same output; outputs do not exceed
-   inputs. Each amount must be committed: a taproot signature without
-   anyonecanpay commits to all of them (BIP341); otherwise every input not
-   signed in this call needs `non_witness_utxo` (the previous transaction,
-   matching its outpoint and `witness_utxo`). Sign all of the key's inputs
-   in one call: each call counts the PSBT's external sats.
+   inputs. Each amount must be committed by every signature returned: a
+   taproot signature without anyonecanpay commits to all of them (BIP341),
+   but a P2WPKH signature (BIP143) or a taproot anyonecanpay one commits only
+   to its own input's amount. So if the call makes such a signature, every
+   other input (listed or not) needs `non_witness_utxo` (the previous
+   transaction, matching its outpoint and `witness_utxo`). Sign all of the
+   key's inputs in one call: each call counts the PSBT's external sats.
 3. Each listed input is not finalised and has a `tap_bip32_derivation`
    (purpose 86) or `bip32_derivation` (purpose 84) with this key's master
    fingerprint, on an allowed path, whose public key is this key's at that

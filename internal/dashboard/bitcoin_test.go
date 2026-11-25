@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 	"github.com/gitmoot/keyring/internal/policy"
@@ -101,7 +103,26 @@ func TestBitcoinServicePageListsSignatures(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The proxy's audit goes to a buffer here; the page reads the log file.
-	if err := os.WriteFile(e.proxy.Config().AuditLog, e.audit.Bytes(), 0o600); err != nil {
+	// Review of #188: more than server.AuditLimit newer calls of the service
+	// that sign nothing do not push the signature out of the table.
+	var signedAt time.Time
+	for dec := json.NewDecoder(bytes.NewReader(e.audit.Bytes())); dec.More(); {
+		var rec struct {
+			Time time.Time `json:"time"`
+		}
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Time.After(signedAt) {
+			signedAt = rec.Time
+		}
+	}
+	log := bytes.Clone(e.audit.Bytes())
+	later := signedAt.Add(time.Second).UTC().Format(time.RFC3339)
+	for range server.AuditLimit + 10 {
+		log = append(log, `{"time":"`+later+`","role":"phobos","service":"btc-ord","method":"GET","path":"/_keyring/bitcoin/btc-ord/addresses","status":200}`+"\n"...)
+	}
+	if err := os.WriteFile(e.proxy.Config().AuditLog, log, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	page := e.request("GET", "/services/btc-ord", nil).Body.String()

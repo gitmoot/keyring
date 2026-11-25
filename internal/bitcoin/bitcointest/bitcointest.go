@@ -143,15 +143,21 @@ func derivations(t testing.TB, c Coin) ([]*psbt.Bip32Derivation, []*psbt.Taproot
 	return []*psbt.Bip32Derivation{{PubKey: priv.PubKey().SerializeCompressed(), MasterKeyFingerprint: fp, Bip32Path: path}}, nil
 }
 
-// Build makes a PSBT spending inputs (each with witness_utxo and derivation
-// info) to outputs. Input i spends output 0 of a made-up transaction named
-// after i, so builds are deterministic.
+// Build makes a PSBT spending inputs (each with witness_utxo,
+// non_witness_utxo and derivation info) to outputs. Input i spends output 0
+// of a made-up previous transaction named after i, so builds are
+// deterministic.
 func Build(t testing.TB, inputs []Coin, outputs []Out) *psbt.Packet {
 	t.Helper()
 	tx := wire.NewMsgTx(2)
-	for i := range inputs {
+	prevs := make([]*wire.MsgTx, len(inputs))
+	for i, c := range inputs {
 		hash := chainhash.Hash(sha256.Sum256([]byte("keyring test prevout " + strconv.Itoa(i))))
-		tx.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&hash, 0), nil, nil))
+		prevs[i] = wire.NewMsgTx(2)
+		prevs[i].AddTxIn(wire.NewTxIn(wire.NewOutPoint(&hash, 0), nil, nil))
+		prevs[i].AddTxOut(wire.NewTxOut(c.Value, Script(t, c)))
+		prevHash := prevs[i].TxHash()
+		tx.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&prevHash, 0), nil, nil))
 	}
 	for _, o := range outputs {
 		script := o.Script
@@ -166,6 +172,7 @@ func Build(t testing.TB, inputs []Coin, outputs []Out) *psbt.Packet {
 	}
 	for i, c := range inputs {
 		p.Inputs[i].WitnessUtxo = wire.NewTxOut(c.Value, Script(t, c))
+		p.Inputs[i].NonWitnessUtxo = prevs[i]
 		p.Inputs[i].Bip32Derivation, p.Inputs[i].TaprootBip32Derivation = derivations(t, c)
 	}
 	for i, o := range outputs {

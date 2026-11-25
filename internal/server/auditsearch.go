@@ -41,9 +41,12 @@ type AuditRow struct {
 	Bitcoin *BitcoinAudit `json:"bitcoin,omitempty"`
 }
 
-// AuditFilter narrows a search: exact service and role, path substring.
+// AuditFilter narrows a search: exact service and role, path substring, and
+// with Bitcoin only PSBT signatures (so other calls cannot push them out of
+// the AuditLimit newest).
 type AuditFilter struct {
 	Service, Role, Path string
+	Bitcoin             bool
 }
 
 var errAuditTime = errors.New("write the times as 2026-11-15T16:39 (UTC) or RFC 3339")
@@ -176,7 +179,7 @@ func auditMatch(line []byte, lo, hi string, f AuditFilter) (AuditRow, bool) {
 		return row, false
 	}
 	if f.Service != "" && row.Service != f.Service || f.Role != "" && row.Role != f.Role ||
-		f.Path != "" && !strings.Contains(row.Path, f.Path) {
+		f.Path != "" && !strings.Contains(row.Path, f.Path) || f.Bitcoin && row.Bitcoin == nil {
 		return row, false
 	}
 	return row, true

@@ -10,7 +10,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 
 	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 )
@@ -123,9 +122,7 @@ func TestSignTaprootAndP2WPKHInputsVerify(t *testing.T) {
 func TestSignsOnlyListedInputs(t *testing.T) {
 	r := regtestRules(t)
 	k := masterKey(t, r)
-	p := standard(t)
-	withPrevious(p, 0) // input 0's amount is not committed by a P2WPKH signature
-	plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{1})
+	plan, err := Prepare(k, r, bitcointest.Encode(t, standard(t)), []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,21 +251,20 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
-// withPrevious gives input i a previous transaction that holds its
-// witness_utxo, and points the input at it.
-func withPrevious(p *psbt.Packet, i int) {
-	prev := wire.NewMsgTx(2)
-	prev.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 7}, nil, nil))
-	prev.AddTxOut(&wire.TxOut{Value: 1, PkScript: bitcointest.External})
-	prev.AddTxOut(p.Inputs[i].WitnessUtxo)
-	p.UnsignedTx.TxIn[i].PreviousOutPoint = wire.OutPoint{Hash: prev.TxHash(), Index: 1}
-	p.Inputs[i].NonWitnessUtxo = prev
+// bare drops the previous transactions of p's inputs.
+func bare(p *psbt.Packet, inputs ...int) *psbt.Packet {
+	for _, i := range inputs {
+		p.Inputs[i].NonWitnessUtxo = nil
+	}
+	return p
 }
 
-// Review of #188: a P2WPKH signature commits only to its own input's amount,
-// so without a taproot signature over all amounts the other inputs must
-// prove theirs with the previous transaction; an understated amount would
-// lower the fee and the external count.
+// Review of #188: a P2WPKH signature, or a taproot one with anyonecanpay,
+// commits only to its own input's amount and stays usable when another
+// amount was understated, so every other input must prove its amount with
+// the previous transaction; an understated amount would lower the fee and
+// the external count. Only a call whose signatures all commit to every
+// amount (taproot without anyonecanpay) needs no proof.
 func TestUncommittedAmountsNeedThePreviousTransaction(t *testing.T) {
 	r := regtestRules(t, "default", "all", "all|anyonecanpay")
 	k := masterKey(t, r)
@@ -280,29 +276,45 @@ func TestUncommittedAmountsNeedThePreviousTransaction(t *testing.T) {
 		}
 	}
 	// Only the P2WPKH input is signed: input 0's amount is not committed.
-	p := standard(t)
+	p := bare(standard(t), 0)
 	p.Inputs[0].WitnessUtxo.Value = 20_000 // understated by 30000
 	refused(p, []int{1}, "input 0 amount is not committed by the signatures: add its non_witness_utxo")
 	p = standard(t)
-	withPrevious(p, 0)
 	p.Inputs[0].WitnessUtxo.Value = 20_000
 	refused(p, []int{1}, "input 0: non_witness_utxo does not match its outpoint and witness_utxo")
 	p = standard(t)
-	withPrevious(p, 0)
-	p.UnsignedTx.TxIn[0].PreviousOutPoint.Index = 0
+	p.UnsignedTx.TxIn[0].PreviousOutPoint.Index = 1
 	refused(p, []int{1}, "input 0: non_witness_utxo does not match")
-	p = standard(t)
-	withPrevious(p, 0)
-	plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{1})
+	plan, err := Prepare(k, r, bitcointest.Encode(t, bare(standard(t), 1)), []int{1})
 	if err != nil || plan.External != 65_000 || plan.Fee != 5_000 {
 		t.Fatalf("with the previous transaction: %v, %+v", err, plan)
 	}
+	// Both inputs signed: the P2WPKH signature of input 1 does not commit
+	// to input 0's amount, though the taproot one does.
+	p = bare(standard(t), 0, 1)
+	p.Inputs[0].WitnessUtxo.Value = 45_000 // understated by 5000: the fee would read 0
+	refused(p, []int{0, 1}, "input 0 amount is not committed by the signatures")
+	if _, err := Prepare(k, r, bitcointest.Encode(t, bare(standard(t), 1)), []int{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	// Two P2WPKH inputs: each signature commits only to its own amount.
+	second := bitcointest.Coin{Key: bitcointest.Master, Kind: "p2wpkh", Path: "m/84'/1'/0'/0/2", Value: 50_000}
+	two := func() *psbt.Packet {
+		return bitcointest.Build(t, []bitcointest.Coin{second, wpkhIn}, []bitcointest.Out{{Value: 75_000, Script: bitcointest.External}})
+	}
+	p = bare(two(), 0, 1)
+	p.Inputs[0].WitnessUtxo.Value = 45_000
+	refused(p, []int{0, 1}, "input 0 amount is not committed by the signatures")
+	refused(bare(two(), 1), []int{0, 1}, "input 1 amount is not committed by the signatures")
+	if _, err := Prepare(k, r, bitcointest.Encode(t, two()), []int{0, 1}); err != nil {
+		t.Fatal(err)
+	}
 	// A taproot signature with anyonecanpay commits only to its own amount.
-	p = standard(t)
+	p = bare(standard(t), 1)
 	p.Inputs[0].SighashType = txscript.SigHashAll | txscript.SigHashAnyOneCanPay
 	refused(p, []int{0}, "input 1 amount is not committed by the signatures")
 	// Without anyonecanpay it commits to every amount.
-	if _, err := Prepare(k, r, bitcointest.Encode(t, standard(t)), []int{0}); err != nil {
+	if _, err := Prepare(k, r, bitcointest.Encode(t, bare(standard(t), 0, 1)), []int{0}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -378,6 +390,9 @@ func TestNewRules(t *testing.T) {
 		{network: Regtest, paths: []string{"m/86'/1'/00'/0/*"}},
 		{network: Regtest, paths: []string{"86'/1'/0'/0/*"}},
 		{network: Regtest, paths: []string{"m/86'/1'/0'/0/*", "m/86h/1h/0h/0/*"}},
+		// Review of #188: both answer the addresses path m/86'/1'/0'/0.
+		{network: Regtest, paths: []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/0"}},
+		{network: Regtest, paths: []string{"m/86'/1'/0'/0", "m/86'/1'/0'/0/*"}},
 		{network: Regtest, paths: testPaths, sighash: []string{"ALL"}},
 		{network: Regtest, paths: testPaths, sighash: []string{"all", "all"}},
 	}

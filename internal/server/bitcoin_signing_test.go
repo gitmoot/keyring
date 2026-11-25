@@ -190,13 +190,14 @@ func TestBitcoinMaxSatsPerDaySurvivesRestart(t *testing.T) {
 		t.Fatalf("within the rest of the day: %d %s", w.Code, w.Body.String())
 	}
 	// The next UTC day starts from zero.
-	day = day.Add(24 * time.Hour)
+	day = time.Date(2026, 11, 26, 0, 0, 30, 0, time.UTC)
 	if w := signCall(h, "POST", bitcoinSignPath, signBody(psbt65k(t), 0, 1), testToken); w.Code != 200 {
 		t.Fatalf("next day: %d %s", w.Code, w.Body.String())
 	}
-	// Review of #188: a request still on the previous day's clock counts
-	// toward the new day instead of moving the ledger back and erasing it.
-	day = day.Add(-time.Minute)
+	// Review of #188: a request still on the previous day's clock (before
+	// midnight) counts toward the new day instead of moving the ledger back
+	// and erasing it.
+	day = time.Date(2026, 11, 25, 23, 59, 59, 0, time.UTC)
 	if w := signCall(h, "POST", bitcoinSignPath, signBody(psbt65k(t), 0, 1), testToken); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "65000 sats signed today") {
 		t.Fatalf("late request: %d %s", w.Code, w.Body.String())
 	}
@@ -205,10 +206,14 @@ func TestBitcoinMaxSatsPerDaySurvivesRestart(t *testing.T) {
 	}
 }
 
-// Review of #188: two keyrings in one directory keep separate totals.
+// Review of #188: two keyrings in one directory keep separate totals, also
+// when their names differ only in the extension.
 func TestBitcoinSpendPathFollowsTheStore(t *testing.T) {
-	if a, b := BitcoinSpendPath("/k/keys.json"), BitcoinSpendPath("/k/other.json"); a != "/k/keys.bitcoin-spend.json" || b != "/k/other.bitcoin-spend.json" {
+	if a, b := BitcoinSpendPath("/k/keys.json"), BitcoinSpendPath("/k/other.json"); a != "/k/keys.json.bitcoin-spend.json" || b != "/k/other.json.bitcoin-spend.json" {
 		t.Fatalf("%s %s", a, b)
+	}
+	if a, b := BitcoinSpendPath("/k/wallet.json"), BitcoinSpendPath("/k/wallet.sealed"); a == b {
+		t.Fatalf("wallet.json and wallet.sealed share %s", a)
 	}
 	if got := BitcoinSpendPath("/k/state"); got != "/k/state.bitcoin-spend.json" {
 		t.Fatal(got)

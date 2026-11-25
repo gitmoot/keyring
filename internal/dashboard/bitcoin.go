@@ -66,15 +66,13 @@ func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 		data["BitcoinFingerprint"], data["BitcoinWatch"] = k.Fingerprint(), watch
 	}
 	now := b.Now()
-	rows, _, err := server.SearchAudit(b.rules().AuditLog, now.Add(-bitcoinSignatureDays*24*time.Hour), now.Add(time.Minute), server.AuditFilter{Service: name})
+	rows, _, err := server.SearchAudit(b.rules().AuditLog, now.Add(-bitcoinSignatureDays*24*time.Hour), now.Add(time.Minute), server.AuditFilter{Service: name, Bitcoin: true})
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		data["SignaturesError"] = "The audit log could not be read."
 	}
 	var signatures []bitcoinSignature
-	for _, row := range rows {
-		if row.Bitcoin != nil && len(signatures) < bitcoinSignatureRows {
-			signatures = append(signatures, bitcoinSignature{Time: row.Time, Role: row.Role, BitcoinAudit: *row.Bitcoin})
-		}
+	for _, row := range rows[:min(len(rows), bitcoinSignatureRows)] {
+		signatures = append(signatures, bitcoinSignature{Time: row.Time, Role: row.Role, BitcoinAudit: *row.Bitcoin})
 	}
 	data["Signatures"], data["SignatureDays"] = signatures, bitcoinSignatureDays
 	return data
