@@ -31,7 +31,7 @@ primary credential. Header names are case-insensitive; duplicates, primary
 collisions, `Authorization`, `X-Keyring-*`, routing and hop-by-hop headers are
 refused. Signing keys and OAuth credentials cannot be reused as extra headers.
 **A key with several values** (dashboard): on **Add key**, paste one value per row (one
-to 32 values; **Add another value** adds rows). Names are optional: values without one
+to 32 values; **+ Add value** adds rows). Names are optional: values without one
 are numbered `1`, `2`, `3` (stored as `CLAUDE_KEYS.1`, `CLAUDE_KEYS.2`, …), and a number
 is never given again, even after its value is removed. Name a value where a service must
 tell them apart, for example `MODAL` with `id` ← `wk-…` and `secret` ← `ws-…`, stored as
@@ -147,6 +147,6 @@ A service with `"key_pool": true` uses every value of its key: one key such as `
 
 Setting one up in the dashboard:
 
-1. **Add key**, name it (`CLAUDE_KEYS`) and paste one Claude key per row, with an optional label each (**Add another value** for more, up to 32). They are numbered `1`, `2`, `3`. On an existing key, **Add a value** adds one.
+1. **Add key**, name it (`CLAUDE_KEYS`) and paste one Claude key per row, with an optional label each under **Label or name** (**+ Add value** for more, up to 32). They are numbered `1`, `2`, `3`. On an existing key, **Add a value** adds one.
 2. Under **Order and labels**, put the value to try first at the top with **Move up**.
 3. Under **Connect to a service**, paste `{"service":"claude-api","base":"https://api.anthropic.com","auth":"header","header":"x-api-key","key_pool":true}`, then grant the agents the service. If a service already uses the key, turn the pool on there instead, because no other service may use a pooled key's values: on that service's edit page pick the key `CLAUDE_KEYS` and paste the same settings without `service`.

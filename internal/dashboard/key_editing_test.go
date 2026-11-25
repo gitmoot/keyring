@@ -232,8 +232,8 @@ func TestAddingAValueToAPlainKeyKeepsItsService(t *testing.T) {
 // offers a button for more rows.
 func TestAddKeyWithOneOrManyNamedValues(t *testing.T) {
 	e := newEnv(t)
-	if !strings.Contains(e.request("GET", "/new/key", nil).Body.String(), `data-addrow="value-rows"`) {
-		t.Fatal("the add-key form has no Add another value button")
+	if !strings.Contains(e.request("GET", "/new/key", nil).Body.String(), `data-addrow="value-rows" data-max="32"`) {
+		t.Fatal("the add-key form has no Add another value button up to 32 values")
 	}
 	form := func(name string, n int) url.Values {
 		f := url.Values{"name": {name}, "password": {password}}
@@ -254,6 +254,56 @@ func TestAddKeyWithOneOrManyNamedValues(t *testing.T) {
 	}
 	if len(mustKeys(t, e)) != 1+1+6+32 {
 		t.Fatal("a refused form stored values, or an accepted one did not")
+	}
+}
+
+// Owner, 2026-11-25: the add-key form asks for one value; label and value
+// name wait in closed details, and + adds more rows, each a copy of the
+// first. The key page's Add a value card hides them the same way.
+func TestAddKeyFormStartsWithOneValue(t *testing.T) {
+	e := newEnv(t)
+	page := e.request("GET", "/new/key", nil).Body.String()
+	start := strings.Index(page, `<form method="post" action="/keys">`)
+	form := page[start : start+strings.Index(page[start:], "</form>")]
+	if n := strings.Count(form, `name="value"`); n != 1 {
+		t.Fatalf("the form starts with %d value inputs, want 1", n)
+	}
+	hiddenOnly := func(where, s string) {
+		t.Helper()
+		closed := `<details class="more"><summary>Label or name</summary>`
+		outside := s
+		for {
+			i := strings.Index(outside, closed)
+			if i < 0 {
+				break
+			}
+			end := strings.Index(outside[i:], "</details>")
+			outside = outside[:i] + outside[i+end:]
+		}
+		if strings.Count(s, closed) != 1 || strings.Contains(outside, `name="label"`) || strings.Contains(outside, `name="part"`) {
+			t.Fatalf("%s: label or value name is shown outside one closed details", where)
+		}
+	}
+	hiddenOnly("add-key form", form)
+	if !strings.Contains(form, `data-removerow aria-label="Remove this value" hidden`) || !strings.Contains(form, `aria-label="Add another value" hidden>+ Add value`) {
+		t.Fatal("the rows lack their + and × buttons, hidden until the script runs")
+	}
+	keyPage := e.request("GET", "/keys/API_KEY", nil).Body.String()
+	card := keyPage[strings.Index(keyPage, `id="add-value"`):]
+	hiddenOnly("Add a value card", card[:strings.Index(card, "</form>")])
+
+	// What three copied rows send, the last one left empty: the values in
+	// order, each with its label and value name, empty ones too.
+	if loc := e.request("POST", "/keys", url.Values{"name": {"ROWS"}, "value": {"row-a-0123456789", "row-b-0123456789", "row-c-0123456789", ""},
+		"label": {"", "Backup", "", ""}, "part": {"", "", "", ""}, "password": {password}}).Header().Get("Location"); loc != "/keys/ROWS?done=added" {
+		t.Fatalf("add: %s", loc)
+	}
+	keys := mustKeys(t, e)
+	if keys["ROWS.1"] != "row-a-0123456789" || keys["ROWS.2"] != "row-b-0123456789" || keys["ROWS.3"] != "row-c-0123456789" || len(keys) != 1+3 {
+		t.Fatalf("stored names = %v", sortedNames(keys))
+	}
+	if !strings.Contains(html.UnescapeString(e.request("GET", "/keys/ROWS", nil).Body.String()), "2 · Backup") {
+		t.Fatal("the second row's label is not on the second value")
 	}
 }
 
