@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/framing"
 )
 
 const (
@@ -242,12 +242,12 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// gets the whole answer with its length, or a 502. (A HEAD reply
 		// has no body to cut and keeps the streaming path below.)
 		var err error
-		whole, err = io.ReadAll(io.LimitReader(resp.Body, policy.HTTP10AnswerLimit+1))
+		whole, err = io.ReadAll(io.LimitReader(resp.Body, framing.HTTP10AnswerLimit+1))
 		if err != nil {
 			http.Error(w, "relay: the keyring's answer broke off", http.StatusBadGateway)
 			return
 		}
-		if len(whole) > policy.HTTP10AnswerLimit {
+		if len(whole) > framing.HTTP10AnswerLimit {
 			http.Error(w, "relay: answer too large for an HTTP/1.0 caller", http.StatusBadGateway)
 			return
 		}

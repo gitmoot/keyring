@@ -352,10 +352,6 @@ type Service struct {
 // forged through the keyring.
 const RoleHeader = "X-Keyring-Role"
 
-// HTTP10AnswerLimit bounds the answer the keyring and the relay hold for an
-// HTTP/1.0 caller, which only gets a complete answer with its length.
-const HTTP10AnswerLimit = 32 << 20
-
 // AppleAds fixes the public identity of the Apple Ads client secret.
 type AppleAds struct {
 	ClientID string `json:"client_id"`
