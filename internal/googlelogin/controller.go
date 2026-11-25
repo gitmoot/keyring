@@ -198,7 +198,7 @@ var ErrProjectNotChoosable = errors.New("a project can be chosen only after Goog
 // sealed like a generated one. Setup then only checks it is ACTIVE and
 // reachable, enables the APIs and probes; it never creates or replaces it.
 func (c *Controller) ChooseProject(ctx context.Context, project string) error {
-	if !validProject(project) {
+	if !ValidProject(project) {
 		return ErrProjectID
 	}
 	busy := func() bool {

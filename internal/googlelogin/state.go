@@ -46,7 +46,8 @@ func validGeneration(value string) bool {
 	return true
 }
 
-func validProject(value string) bool {
+// ValidProject reports whether value is in Google's project ID format.
+func ValidProject(value string) bool {
 	if len(value) < 6 || len(value) > 30 || value[0] < 'a' || value[0] > 'z' || value[len(value)-1] == '-' {
 		return false
 	}
@@ -80,7 +81,7 @@ func (s *Snapshot) Validate() error {
 			return errors.New("invalid Google login account")
 		}
 	}
-	if s.Project != "" && !validProject(s.Project) || s.ProjectChosen && s.Project == "" {
+	if s.Project != "" && !ValidProject(s.Project) || s.ProjectChosen && s.Project == "" {
 		return errors.New("invalid Google project")
 	}
 	total := 0

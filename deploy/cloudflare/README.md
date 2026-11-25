@@ -437,10 +437,11 @@ Provisioning is not sign-in.
 
 `{"project": "<existing project ID>"}` instead of `{}` also names a Google Cloud
 project the signed-in account already owns, for when Google will not create a new
-one (see `project_limit_reached` below). It needs a retained sign-in whose setup
-has not finished and no connection running (`409` otherwise) and a valid ID
-(6-30 lowercase letters, digits or hyphens, starting with a letter, not ending
-with a hyphen; `400` otherwise). The ID is sealed like a generated one; the owner
+one (see `project_limit_reached` below). A valid ID (6-30 lowercase letters,
+digits or hyphens, starting with a letter, not ending with a hyphen) is checked
+first (`400`, nothing changed). Choosing needs a retained sign-in whose setup has
+not finished and no connection running: otherwise `409`, after the repeatable
+provisioning itself was applied. The ID is sealed like a generated one; the owner
 then presses Retry on the Drive page (or opens a new link). Setup only checks that
 project is ACTIVE and reachable, enables Drive and Sheets and probes; it never
 creates or replaces a chosen project. Several keyrings may share one project: it

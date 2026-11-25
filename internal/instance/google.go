@@ -82,6 +82,10 @@ func (in *Instance) provisionGoogle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, badRequest(`Google provisioning requires a JSON object: {} or {"project": "<existing project ID>"}`))
 		return
 	}
+	if request.Project != "" && !googlelogin.ValidProject(request.Project) {
+		writeError(w, badRequest("%v", googlelogin.ErrProjectID))
+		return
+	}
 	services := map[string]policy.Service{
 		"drive":            {Auth: policy.AuthGcloudLogin, GoogleAccount: "me"},
 		"google-me-drive":  {Auth: policy.AuthGcloud, GoogleAccount: "me", Base: "https://www.googleapis.com/drive/v3"},
@@ -145,8 +149,6 @@ func (in *Instance) chooseGoogleProject(ctx context.Context, project string) (ui
 		return 0, &httpError{http.StatusNotFound, "container Google provisioning is unavailable"}
 	}
 	switch err := in.google.ChooseProject(ctx, project); {
-	case errors.Is(err, googlelogin.ErrProjectID):
-		return 0, badRequest("%v", err)
 	case errors.Is(err, googlelogin.ErrProjectNotChoosable):
 		return 0, &httpError{http.StatusConflict, err.Error()}
 	case err != nil:

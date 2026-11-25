@@ -121,11 +121,16 @@ func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
 	x := &inst{t: t, in: in, admin: in.AdminHandler()}
 	x.must("POST", "/create", map[string]any{"id": "person", "data_key": newKey(t), "listen": freeAddr(t)})
 	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	if code, _ := x.call("POST", "/google-drive", map[string]any{"project": "Not_A_Project"}); code != http.StatusBadRequest {
+		t.Fatalf("invalid project ID: %d", code)
+	}
+	if services := x.must("GET", "/status", nil)["services"].(map[string]any); services["drive"] != nil {
+		t.Fatal("a refused request provisioned Google services")
+	}
 	for _, tc := range []struct {
 		body any
 		code int
 	}{
-		{map[string]any{"project": "Not_A_Project"}, http.StatusBadRequest},
 		{map[string]any{"other": "field"}, http.StatusBadRequest},
 		// No Google sign-in yet: nothing to set the project for.
 		{map[string]any{"project": "owned-project-1"}, http.StatusConflict},
