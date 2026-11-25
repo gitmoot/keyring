@@ -138,11 +138,15 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	if svc.Auth == policy.AuthBearer {
 		sentAs = svc.AuthorizationScheme()
 	}
-	b.render(w, status, "service", sid, map[string]any{
+	data := map[string]any{
 		"OAuth2": svc.OAuth2, "SecretStored": secretStored, "SentAs": sentAs,
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
 		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
-	})
+	}
+	if svc.Auth == policy.AuthBitcoinPSBTSign {
+		maps.Copy(data, b.bitcoinPage(f.Name, svc))
+	}
+	b.render(w, status, "service", sid, data)
 }
 
 func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string) {

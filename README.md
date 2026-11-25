@@ -35,6 +35,7 @@ The key never leaves the keyring machine. The agent holds only a role token, whi
 
 - **API proxy.** Bearer (or another `Authorization` scheme, such as `Key`), header or query-parameter keys, up to two extra secret headers, keys with up to 32 values (numbered or named, with optional labels), and [key pools](docs/proxy.md#key-pools-several-keys-behind-one-service) that try a key's values in the order you set and switch to the next when one is refused or runs out. Paths are normalised, keys echoed back by an API are masked, redirects are not followed. [Proxy](docs/proxy.md)
 - **Request signing without handing out the private key.** Apple Ads and App Store Connect JWTs, Sign in with Apple client secrets, APNs push, raw Ed25519, and minisign release signatures. [Apple](docs/apple.md) · [Signing](docs/signing.md)
+- **Bitcoin PSBT signing (test networks).** Imported tprv/WIF keys sign the PSBT inputs that are provably theirs (BIP86 taproot key path, BIP84 P2WPKH), only on allowed derivation paths, with per-grant sats limits per PSBT and per day; the key is never shown. Regtest, testnet and signet in phase 1. [Bitcoin](docs/bitcoin.md)
 - **OAuth with refresh.** The keyring holds the refresh token and mints access tokens, for Gmail, Drive and any OAuth 2 provider; Google accounts can also come from `gcloud`. [OAuth](docs/oauth.md) · [Google via gcloud](docs/google-gcloud.md)
 - **Per-agent access.** Each agent (a *role*) gets only the services, methods and paths it was given, with daily request and byte limits and an end date. Agents find services with `keyring services --search`, ask with `keyring request`, and the owner approves in one tap. [Finding services](docs/proxy.md#finding-services)
 - **Projects.** Group a client's services, give an agent a whole project, pause it or let it expire in one place. [Projects](docs/projects.md)
@@ -136,6 +137,7 @@ Next: [turn on the dashboard](docs/dashboard.md), [install on a Mac](deploy/mac/
 | [Consent links](docs/consent-links.md) | One-time links for a person to connect their account |
 | [Apple](docs/apple.md) | Apple Ads, App Store Connect, Sign in with Apple, APNs |
 | [Signing](docs/signing.md) | Ed25519 and minisign |
+| [Bitcoin](docs/bitcoin.md) | PSBT signing with imported keys (test networks) |
 | [Egress proxy](docs/egress-proxy.md) | Tunnels through a person's own proxy |
 | [Instance mode](docs/instance-mode.md) | One keyring per person, under a supervisor |
 | [Mac install](deploy/mac/README.md) · [Cloudflare](deploy/cloudflare/README.md) | Deployment |

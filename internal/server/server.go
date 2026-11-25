@@ -73,6 +73,7 @@ type Handler struct {
 	oauth         oauthCache
 	google        googleCache
 	googleHistory googleHistory
+	bitcoinSpend  bitcoinSpend
 	// Set before serving: the container seals SDK changes before token use.
 	googleCommand func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)
 	// Set before serving in the container: seals Google's answer to call
@@ -257,6 +258,9 @@ type auditRecord struct {
 	// to sign (BLAKE2b-512 hex, as b2sum prints it).
 	Digest         string `json:"digest,omitempty"`
 	TrustedComment string `json:"trusted_comment,omitempty"`
+	// Bitcoin records one PSBT signature: network, txid, inputs signed and
+	// the sats it spends (#187).
+	Bitcoin *BitcoinAudit `json:"bitcoin,omitempty"`
 }
 
 // SetRequests turns on RequestsPath, filing into store. Call before serving.
@@ -370,6 +374,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var signingKey *ecdsa.PrivateKey
 	var signMessage []byte
 	var minisignReq minisignRequest
+	var bitcoinAction string
+	var bitcoinSign bitcoinSignRequest
+	var bitcoinQuery bitcoinAddressQuery
 	var signingAuth string
 	switch r.URL.Path {
 	case appleAdsSignPath:
@@ -391,6 +398,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if signService := minisignService(r.URL.Path); signService != "" && signingAuth == "" {
 		service, rest, ok = signService, "/", true
 		signingAuth = policy.AuthMinisignSign
+	}
+	if signService, action := bitcoinRoute(r.URL.Path); signService != "" && signingAuth == "" {
+		// The action is the path a grant may limit: "/sign-psbt" or
+		// "/addresses".
+		service, rest, ok = signService, "/"+action, true
+		signingAuth, bitcoinAction = policy.AuthBitcoinPSBTSign, action
 	}
 	signing := signingAuth != ""
 	rec.Service, rec.Path = service, rest
@@ -426,12 +439,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if signing {
-		if r.URL.EscapedPath() != r.URL.Path || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		bitcoinAddresses := bitcoinAction == bitcoinAddressesAction
+		if r.URL.EscapedPath() != r.URL.Path || (r.URL.RawQuery != "" || r.URL.ForceQuery) && !bitcoinAddresses {
 			fail(http.StatusBadRequest, "signing requires the exact path without a query")
 			return
 		}
 		minisignExport := signingAuth == policy.AuthMinisignSign && r.Method == http.MethodGet
-		if r.Method != http.MethodPost && !minisignExport {
+		if bitcoinAddresses {
+			if r.Method != http.MethodGet {
+				fail(http.StatusMethodNotAllowed, "bitcoin addresses requires GET")
+				return
+			}
+		} else if r.Method != http.MethodPost && !minisignExport {
 			fail(http.StatusMethodNotAllowed, "signing requires POST")
 			return
 		}
@@ -454,6 +473,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			rec.Digest, rec.TrustedComment = minisignReq.DigestHex, minisignReq.TrustedComment
+		} else if bitcoinAddresses {
+			var reqErr error
+			if bitcoinQuery, reqErr = decodeBitcoinAddresses(r.URL.RawQuery); reqErr != nil {
+				fail(http.StatusBadRequest, reqErr.Error())
+				return
+			}
+		} else if bitcoinAction == bitcoinSignAction {
+			var reqErr error
+			if bitcoinSign, reqErr = decodeBitcoinSign(r.Body); reqErr != nil {
+				fail(http.StatusBadRequest, reqErr.Error())
+				return
+			}
 		} else {
 			var probe [1]byte
 			if n, err := io.ReadFull(r.Body, probe[:]); n != 0 || err != io.EOF {
@@ -603,6 +634,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if tunnel {
 		h.openTunnel(w, r, svc, key, roleName, service, access, start, &rec, fail)
+		return
+	}
+	if signingAuth == policy.AuthBitcoinPSBTSign {
+		h.serveBitcoin(w, svc, key, roleName, service, access, bitcoinAction, bitcoinSign, bitcoinQuery, start, &rec, fail)
 		return
 	}
 	if signingAuth == policy.AuthEd25519Sign {

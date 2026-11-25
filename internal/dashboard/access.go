@@ -276,6 +276,8 @@ type cellForm struct {
 	Paths         string // one per line
 	Daily         string
 	Expires       string // YYYY-MM-DD, UTC
+	// MaxSatsTx and MaxSatsDay are a bitcoin-psbt-sign grant's limits.
+	MaxSatsTx, MaxSatsDay string
 }
 
 func (f cellForm) Has(method string) bool { return slices.Contains(f.Methods, method) }
@@ -290,6 +292,12 @@ func formFromAccess(role, service string, acc policy.Access, on bool) cellForm {
 	f.Paths = strings.Join(acc.Paths, "\n")
 	if acc.DailyRequests > 0 {
 		f.Daily = strconv.Itoa(acc.DailyRequests)
+	}
+	if acc.BitcoinMaxSatsPerTx > 0 {
+		f.MaxSatsTx = strconv.FormatInt(acc.BitcoinMaxSatsPerTx, 10)
+	}
+	if acc.BitcoinMaxSatsPerDay > 0 {
+		f.MaxSatsDay = strconv.FormatInt(acc.BitcoinMaxSatsPerDay, 10)
 	}
 	if acc.Expires != nil {
 		f.Expires = acc.Expires.UTC().Format(time.DateOnly)
@@ -339,6 +347,18 @@ func (f cellForm) access(now time.Time) (policy.Access, error) {
 		}
 		acc.DailyRequests = n
 	}
+	for _, limit := range []struct {
+		text string
+		into *int64
+	}{{f.MaxSatsTx, &acc.BitcoinMaxSatsPerTx}, {f.MaxSatsDay, &acc.BitcoinMaxSatsPerDay}} {
+		if t := strings.TrimSpace(limit.text); t != "" {
+			n, err := strconv.ParseInt(t, 10, 64)
+			if err != nil || n < 0 {
+				return acc, errors.New("The sats limits must be whole numbers, 0 or more (0 or empty: no limit).")
+			}
+			*limit.into = n
+		}
+	}
 	if e := strings.TrimSpace(f.Expires); e != "" {
 		t, err := time.Parse(time.DateOnly, e)
 		if err != nil {
@@ -381,7 +401,8 @@ func (b *Backend) renderCell(w http.ResponseWriter, sid string, status int, f ce
 			}
 		}
 	}
-	b.render(w, status, "cell", sid, map[string]any{"Form": f, "Error": msg, "AllMethods": fullMethods, "Via": via})
+	b.render(w, status, "cell", sid, map[string]any{"Form": f, "Error": msg, "AllMethods": fullMethods, "Via": via,
+		"Bitcoin": cfg.Services[f.Service].Auth == policy.AuthBitcoinPSBTSign})
 }
 
 func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
@@ -389,6 +410,7 @@ func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
 		Role: r.PathValue("role"), Service: r.PathValue("service"), On: r.PostFormValue("on") == "yes",
 		Mode: r.PostFormValue("mode"), Methods: r.PostForm["method"], Paths: r.PostFormValue("paths"),
 		Daily: r.PostFormValue("daily"), Expires: r.PostFormValue("expires"),
+		MaxSatsTx: r.PostFormValue("max_sats_tx"), MaxSatsDay: r.PostFormValue("max_sats_day"),
 	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		b.renderCell(w, sid, http.StatusForbidden, f, "Enter your dashboard password to change access.")
@@ -434,6 +456,9 @@ func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
 	fields := map[string]any{"role": f.Role, "service": f.Service, "on": f.On}
 	if f.On {
 		fields["methods"], fields["paths"], fields["daily_requests"] = acc.Methods, acc.Paths, acc.DailyRequests
+		if acc.BitcoinMaxSatsPerTx > 0 || acc.BitcoinMaxSatsPerDay > 0 {
+			fields["bitcoin_max_sats_per_tx"], fields["bitcoin_max_sats_per_day"] = acc.BitcoinMaxSatsPerTx, acc.BitcoinMaxSatsPerDay
+		}
 		if acc.Expires != nil {
 			fields["expires"] = acc.Expires.Format(time.DateOnly)
 		}

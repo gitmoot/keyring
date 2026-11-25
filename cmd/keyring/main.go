@@ -50,6 +50,9 @@ const usage = `Usage:
   keyring list --store FILE                  print key names (never values)
   keyring minisign-keygen --store FILE NAME  make a new Ed25519 signing key in the store (never shown) and
                                              print its minisign public key
+  keyring bitcoin-import --store FILE --network regtest|testnet|signet NAME
+                                             import a Bitcoin tprv or WIF key from stdin (never shown) and print
+                                             its fingerprint and first receive addresses
   keyring new-token                          make a role token and its hash for the rules file
   keyring request --upstream URL --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new TOKENS_DIR]
                                              ask the owner for full access to services (approved in the dashboard)
@@ -102,6 +105,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
 	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
 	statePath := fs.String("state", "", "instance: keep the sealed state in this file (default: memory only)")
+	network := fs.String("network", "", "bitcoin-import: regtest, testnet or signet")
 	auditPath := fs.String("audit", "", "instance: audit log file (default: stdout)")
 	containerMode := fs.Bool("container", false, "instance: run in a container reached only through its supervisor (wildcard listen, no source check)")
 	if err := fs.Parse(rest); err != nil {
@@ -198,6 +202,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		err = minisignKeygen(*storePath, fs.Arg(0), stdout)
+	case "bitcoin-import":
+		if !need("store") || fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "keyring bitcoin-import: pass --store FILE, --network and one NAME; the key is read from stdin, never from arguments")
+			return 2
+		}
+		err = bitcoinImport(*storePath, *network, fs.Arg(0), stdin, stdout, stderr)
 	case "new-token":
 		if fs.NArg() != 0 {
 			return 2
@@ -316,6 +326,11 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 		// Keep unrelated services available, but make lost persistence visible.
 		// The unsafe/corrupt file is never replaced by an empty history.
 		fmt.Fprintf(stderr, "Google renewal history unavailable: %v\n", err)
+	}
+	if err := handler.OpenBitcoinSpend(server.BitcoinSpendPath(storePath)); err != nil {
+		// Kept closed: grants with bitcoin_max_sats_per_day sign nothing
+		// until the file is fixed; the file is never replaced.
+		fmt.Fprintf(stderr, "bitcoin daily totals unavailable: %v\n", err)
 	}
 	usageFile := usagePath(storePath)
 	if rows, err := loadUsage(usageFile); err != nil {

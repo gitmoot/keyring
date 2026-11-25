@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/minisign"
 	"github.com/gitmoot/keyring/internal/store"
@@ -43,6 +44,9 @@ const (
 	// AuthMinisignSign signs BLAKE2b-512 digests as minisign signatures with
 	// a restricted trusted comment; the Ed25519 key never leaves.
 	AuthMinisignSign = "minisign-sign"
+	// AuthBitcoinPSBTSign signs Bitcoin PSBTs with an imported key on the
+	// service's network and paths (#187); the key never leaves.
+	AuthBitcoinPSBTSign = "bitcoin-psbt-sign"
 	// AuthOAuth2 sends Authorization: Bearer <access token>, minted from the
 	// refresh token stored under Key; the refresh token never goes upstream.
 	AuthOAuth2 = "oauth2"
@@ -323,6 +327,8 @@ type Service struct {
 	EgressProxy *EgressProxy `json:"egress_proxy,omitempty"`
 	// Minisign restricts what a minisign-sign service signs.
 	Minisign *Minisign `json:"minisign,omitempty"`
+	// Bitcoin restricts what a bitcoin-psbt-sign service signs.
+	Bitcoin *Bitcoin `json:"bitcoin,omitempty"`
 	// APNs fixes the public identity of an APNs auth key (auth apns).
 	APNs *APNs `json:"apns,omitempty"`
 	// ForwardRole sends the calling role's name upstream in RoleHeader, so
@@ -387,6 +393,22 @@ var apnsID = regexp.MustCompile(`^[A-Z0-9]{10}$`)
 // only that product's releases.
 type Minisign struct {
 	TrustedCommentPrefix string `json:"trusted_comment_prefix"`
+}
+
+// Bitcoin limits a bitcoin-psbt-sign service (#187): the network its key
+// and every output belong to, and either the derivation paths an extended
+// key (tprv) signs for or, for a single WIF key, its script kind. Sighash
+// lists the sighash types it signs; empty means default and all.
+type Bitcoin struct {
+	Network string   `json:"network"`
+	Paths   []string `json:"paths,omitempty"`
+	Script  string   `json:"script,omitempty"`
+	Sighash []string `json:"sighash,omitempty"`
+}
+
+// Rules checks the settings and returns them ready for signing.
+func (b *Bitcoin) Rules() (*bitcoin.Rules, error) {
+	return bitcoin.NewRules(b.Network, b.Paths, b.Script, b.Sighash)
 }
 
 // OAuth2 is the public half of an OAuth client: the refresh token and client
@@ -665,7 +687,7 @@ var tunnelName = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9]
 
 // SignOnly services never send their private key to an upstream.
 func (s Service) SignOnly() bool {
-	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign || s.Auth == AuthMinisignSign || s.Auth == AuthSignInWithAppleSign
+	return s.Auth == AuthAppleAdsSign || s.Auth == AuthAppStoreConnectSign || s.Auth == AuthEd25519Sign || s.Auth == AuthMinisignSign || s.Auth == AuthSignInWithAppleSign || s.Auth == AuthBitcoinPSBTSign
 }
 
 type Role struct {
@@ -693,6 +715,12 @@ type Access struct {
 	// DailyBytes caps tunnel bytes (both ways) per UTC day for an
 	// egress-proxy service; 0 means no cap.
 	DailyBytes int64 `json:"daily_bytes,omitempty"`
+	// BitcoinMaxSatsPerTx and BitcoinMaxSatsPerDay cap what a
+	// bitcoin-psbt-sign grant signs: outputs not paying back to the key plus
+	// the fee, per PSBT and per UTC day; 0 means no cap (test networks;
+	// mainnet will require both).
+	BitcoinMaxSatsPerTx  int64 `json:"bitcoin_max_sats_per_tx,omitempty"`
+	BitcoinMaxSatsPerDay int64 `json:"bitcoin_max_sats_per_day,omitempty"`
 	// Expires ends this access (the role keeps its others); nil means never.
 	Expires *time.Time `json:"expires,omitempty"`
 }
@@ -1013,6 +1041,9 @@ func (c *Config) Validate() error {
 			if access.DailyBytes != 0 && c.Services[svcName].Auth != AuthEgressProxy {
 				return fmt.Errorf("role %s, service %s: daily_bytes applies only to egress-proxy services", name, svcName)
 			}
+			if (access.BitcoinMaxSatsPerTx != 0 || access.BitcoinMaxSatsPerDay != 0) && c.Services[svcName].Auth != AuthBitcoinPSBTSign {
+				return fmt.Errorf("role %s, service %s: bitcoin_max_sats_per_tx and bitcoin_max_sats_per_day apply only to bitcoin-psbt-sign services", name, svcName)
+			}
 		}
 		for project, access := range role.Projects {
 			if !serviceName.MatchString(project) {
@@ -1023,6 +1054,9 @@ func (c *Config) Validate() error {
 			}
 			if access.DailyBytes != 0 {
 				return fmt.Errorf("role %s, project %s: daily_bytes applies only to a single egress-proxy service", name, project)
+			}
+			if access.BitcoinMaxSatsPerTx != 0 || access.BitcoinMaxSatsPerDay != 0 {
+				return fmt.Errorf("role %s, project %s: bitcoin limits apply only to a single bitcoin-psbt-sign service", name, project)
 			}
 		}
 	}
@@ -1164,6 +1198,9 @@ func (s *Service) validate() error {
 	if s.Minisign != nil && s.Auth != AuthMinisignSign {
 		return errors.New("minisign settings require auth minisign-sign")
 	}
+	if s.Bitcoin != nil && s.Auth != AuthBitcoinPSBTSign {
+		return errors.New("bitcoin settings require auth bitcoin-psbt-sign")
+	}
 	if s.Auth == AuthGcloudLogin {
 		if s.GoogleAccount != "me" || s.Base != "" || s.Key != "" || s.Header != "" || s.Param != "" ||
 			s.TestMethod != "" || s.TestPath != "" || s.TLSPinSHA256 != "" || s.OAuth2 != nil ||
@@ -1216,6 +1253,13 @@ func (s *Service) validate() error {
 			}
 			if !minisign.ValidPrefix(s.Minisign.TrustedCommentPrefix) {
 				return errors.New("minisign trusted_comment_prefix must be 1-64 bytes of printable ASCII, not starting with a space")
+			}
+		case AuthBitcoinPSBTSign:
+			if s.AppleAds != nil || s.AppStoreConnect != nil || s.SignInWithApple != nil || s.Bitcoin == nil {
+				return errors.New("bitcoin-psbt-sign requires only bitcoin settings")
+			}
+			if _, err := s.Bitcoin.Rules(); err != nil {
+				return fmt.Errorf("bitcoin: %w", err)
 			}
 		}
 		for _, value := range identity {
@@ -1416,8 +1460,11 @@ func (a Access) validate() error {
 			return fmt.Errorf("path %q must start with / and contain no .. or %%", p)
 		}
 	}
-	if a.DailyRequests < 0 || a.DailyBytes < 0 {
-		return errors.New("daily_requests or daily_bytes is negative")
+	if a.DailyRequests < 0 || a.DailyBytes < 0 || a.BitcoinMaxSatsPerTx < 0 || a.BitcoinMaxSatsPerDay < 0 {
+		return errors.New("daily_requests, daily_bytes or a bitcoin limit is negative")
+	}
+	if a.BitcoinMaxSatsPerTx > bitcoin.MaxSats || a.BitcoinMaxSatsPerDay > bitcoin.MaxSats {
+		return errors.New("a bitcoin limit is above 21 million bitcoin")
 	}
 	return nil
 }

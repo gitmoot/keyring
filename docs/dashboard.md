@@ -31,7 +31,9 @@ The **Keys** page (`/keys`) is a table of every key the access file names or the
   the dashboard password, with a Copy button. It is the answer to that one request:
   never in a URL, a log or a cached page, and the audit log records `key_revealed`
   with the key name, never the value. It works for every key, including .p8 and other
-  private keys, from anywhere the dashboard is reachable. A single-line value that holds
+  private keys, from anywhere the dashboard is reachable — except Bitcoin keys
+  (`tprv`/`xprv`/WIF values, and any key of a `bitcoin-psbt-sign` service), which are
+  never shown: their page shows the fingerprint instead ([Bitcoin](bitcoin.md)). A single-line value that holds
   a non-ASCII character (often an invisible one from copying, such as U+200B) is flagged
   with its code point and position, and so is a value wrapped in quotes; nothing is changed.
 - **Upload key file** (Keys page) stores a key that comes as a file, such as an Apple

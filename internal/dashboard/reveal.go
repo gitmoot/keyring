@@ -51,14 +51,13 @@ func (b *Backend) revealKey(w http.ResponseWriter, r *http.Request, sid string) 
 		http.Redirect(w, r, "/keys/"+name+"?error=password", http.StatusSeeOther)
 		return
 	}
-	row, ok, err := b.row(name)
+	row, keys, ok, err := b.storedRow(name)
 	if err != nil || !ok {
 		b.unknownKey(w, r, sid, err)
 		return
 	}
-	keys, err := store.Load(b.StorePath)
-	if err != nil {
-		b.fail(w, sid, err)
+	if _, never := neverShown(b.Proxy.Config(), row, keys); never {
+		http.Redirect(w, r, "/keys/"+name+"?error=never-shown", http.StatusSeeOther)
 		return
 	}
 	var values []revealedValue

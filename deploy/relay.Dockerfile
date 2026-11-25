@@ -1,9 +1,9 @@
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 RUN apk add --no-cache ca-certificates \
     && mkdir -p /run/keyring/tokens \
     && chmod 700 /run/keyring /run/keyring/tokens
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
 ARG VERSION=dev
