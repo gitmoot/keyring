@@ -1063,7 +1063,7 @@ func buildOutbound(ctx context.Context, svc policy.Service, key, method, rest, r
 func (h *Handler) TestKey(ctx context.Context, svc policy.Service, key string) (int, error) {
 	snap := h.snap.Load()
 	// key may come from the store on disk rather than snap: checked itself.
-	if _, ok := bitcoin.Inspect(key); ok && svc.Auth != policy.AuthBitcoinPSBTSign {
+	if bitcoin.IsKey(key) && svc.Auth != policy.AuthBitcoinPSBTSign {
 		return 0, errors.New(bitcoinKeyRefused)
 	}
 	resp, err := h.testRequest(ctx, snap, svc, key)

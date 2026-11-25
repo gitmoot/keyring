@@ -403,6 +403,28 @@ func TestBitcoinFormOnlyForAOneValueKey(t *testing.T) {
 			t.Fatalf("paste for %s: %d %s", key, w.Code, w.Body.String())
 		}
 	}
+	// A plain value is one value too, while a service names a value of
+	// the key that is not stored: the form, and a paste naming the key,
+	// connect it (review of #204).
+	for _, key := range []string{"PLAIN", "PLAINB"} {
+		e.withService(strings.ToLower(key)+"-api", policy.Service{Base: e.proxy.Config().Services["api"].Base, Key: key + ".missing", Auth: policy.AuthBearer})
+		if err := store.Set(e.backend.StorePath, key, bitcointest.WIF); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if page = e.request("GET", "/keys/PLAIN", nil).Body.String(); !strings.Contains(page, `name="script"`) || strings.Contains(page, `name="key_part"`) {
+		t.Fatal("a key with one plain bitcoin value lacks the Bitcoin form")
+	}
+	for key, v := range map[string]url.Values{
+		"PLAIN":  {"auth": {"bitcoin-psbt-sign"}, "service": {"btc-plain"}, "network": {"regtest"}, "script": {"p2tr"}, "sighash": {"default"}},
+		"PLAINB": {"pasted": {`{"btc-plainb":{"auth":"bitcoin-psbt-sign","key":"PLAINB","bitcoin":{"network":"regtest","script":"p2tr"}}}`}},
+	} {
+		v.Set("password", password)
+		w := e.request("POST", "/keys/"+key+"/connect", v)
+		if w.Header().Get("Location") != "/keys/"+key+"?done=connected" || e.proxy.Config().Services["btc-"+strings.ToLower(key)].Key != key {
+			t.Fatalf("connect %s: %d %s", key, w.Code, w.Body.String())
+		}
+	}
 }
 
 // A service copied whole from access.json pastes with its own test method,

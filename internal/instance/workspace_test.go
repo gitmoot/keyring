@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 )
 
 const accountGenerationHeader = "X-Keyring-Binding-Generation"
@@ -105,6 +107,31 @@ func TestExtraHeaderRejectsWorkspaceAccountKey(t *testing.T) {
 	}, "")
 	if code != 400 {
 		t.Fatalf("Workspace account credential accepted as extra header: %d", code)
+	}
+}
+
+// A Workspace account's refresh token goes to Google's token endpoint
+// though no service names it, so a Bitcoin key is not stored as one
+// (review of #204).
+func TestWorkspaceAccountKeyRefusesABitcoinKey(t *testing.T) {
+	f := newWorkspaceFixture(t, 0)
+	f.hydrate(f.migrate())
+	account := f.must("POST", "/accounts", map[string]string{"alias": "work"}, "")["account"].(map[string]any)
+	id := accountField(account, "account_id")
+	f.in.mu.Lock()
+	key := f.in.state.WorkspaceAccounts[id].Key
+	f.in.mu.Unlock()
+	events := f.provider.snapshot()
+	code, _ := f.call("PUT", "/keys/"+key, map[string]any{"value": bitcointest.WIF}, "")
+	f.in.mu.Lock()
+	stored := f.in.state.Keys[key]
+	f.in.mu.Unlock()
+	if code != 400 || stored == bitcointest.WIF {
+		t.Fatalf("a Bitcoin key stored as a Workspace account's refresh token: %d", code)
+	}
+	f.call("POST", "/accounts/"+id+"/identity", map[string]any{}, accountField(account, "binding_generation"))
+	if !reflect.DeepEqual(events, f.provider.snapshot()) {
+		t.Fatalf("the provider was asked: %v", f.provider.snapshot()[len(events):])
 	}
 }
 

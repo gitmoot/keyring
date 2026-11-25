@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
@@ -126,6 +127,36 @@ func TestSetRefusesABitcoinKeyForAProxyService(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := run([]string{"set", "--store", storePath, "--config", rules, "BTC_ORD"}, strings.NewReader(bitcointest.WIF+"\n"), &out, &errOut); code != 0 {
 		t.Fatalf("a Bitcoin key no service uses: exit %d: %s", code, errOut.String())
+	}
+}
+
+// Consent links store keys as the dashboard does: a Bitcoin key for a proxy
+// service is refused before anything is written, alone or in a bundle.
+func TestConsentRefusesABitcoinKeyForAProxyService(t *testing.T) {
+	rules, storePath := bitcoinRules(t)
+	cfg, err := policy.Load(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := storeKeys{path: storePath, metaPath: filepath.Join(filepath.Dir(storePath), "keymeta.json"), mu: &sync.Mutex{}, proxy: server.New(cfg, nil, &bytes.Buffer{})}
+	for name, write := range map[string]func() error{
+		"Set": func() error { return k.Set("API_KEY", bitcointest.WIF) },
+		"SetAll": func() error {
+			return k.SetAll(map[string]string{"API_KEY": bitcointest.WIF, "OTHER": "other-0123456789"})
+		},
+	} {
+		if err := write(); err == nil || err.Error() != bitcoinKeyRefusal {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if names, _ := store.Names(storePath); len(names) != 0 {
+			t.Fatalf("%s: stored %v", name, names)
+		}
+	}
+	if err := k.SetAll(map[string]string{"API_KEY": "sk-api-0123456789", "BTC_ORD": bitcointest.WIF}); err != nil {
+		t.Fatal(err)
+	}
+	if keys, _ := store.Load(storePath); keys["API_KEY"] != "sk-api-0123456789" || keys["BTC_ORD"] != bitcointest.WIF {
+		t.Fatal("a bundle no proxy service gets a Bitcoin key from was not stored")
 	}
 }
 

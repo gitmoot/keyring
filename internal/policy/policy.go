@@ -432,7 +432,7 @@ func (e *BitcoinKeyError) Error() string {
 func (a AccessList) CheckBitcoinKeys(keys map[string]string) error {
 	var found []string
 	for name, value := range keys {
-		if _, ok := bitcoin.Inspect(value); ok {
+		if bitcoin.IsKey(value) {
 			found = append(found, name)
 		}
 	}

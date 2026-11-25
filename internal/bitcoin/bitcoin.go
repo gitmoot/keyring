@@ -429,6 +429,27 @@ type Info struct {
 	WIF         bool   // a single key, signing for a script rather than paths
 }
 
+// maxWIFLength is the longest WIF key: 52 Base58 characters (compressed).
+// Nothing longer is decoded as one; Base58 decoding takes time quadratic in
+// the length, and every stored value is checked (IsKey).
+const maxWIFLength = 52
+
+// IsKey reports whether value is a bitcoin private key (any network), as
+// Inspect does, without deriving what Inspect shows. It is the check that
+// keeps a Bitcoin key from every service but a Bitcoin signing one.
+func IsKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if isExtended(value) {
+		ext, err := hdkeychain.NewKeyFromString(value)
+		return err == nil && ext.IsPrivate()
+	}
+	if len(value) > maxWIFLength {
+		return false
+	}
+	_, err := btcutil.DecodeWIF(value)
+	return err == nil
+}
+
 // Inspect reports whether value is a bitcoin private key (any network) and
 // what may be shown about it. The dashboard never shows such a value.
 func Inspect(value string) (Info, bool) {
@@ -449,6 +470,9 @@ func Inspect(value string) (Info, bool) {
 			info.Fingerprint = hex.EncodeToString(address.Hash160(pub.SerializeCompressed())[:4])
 		}
 		return info, true
+	}
+	if len(value) > maxWIFLength {
+		return Info{}, false
 	}
 	wif, err := btcutil.DecodeWIF(value)
 	if err != nil {

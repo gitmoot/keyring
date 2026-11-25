@@ -31,12 +31,7 @@ type storeKeys struct {
 func (k storeKeys) Load() (map[string]string, error) { return store.Load(k.path) }
 
 func (k storeKeys) Set(name, value string) error {
-	return k.change(name, false, func() error {
-		if err := k.refuseBitcoinKeys(map[string]string{name: value}); err != nil {
-			return err
-		}
-		return store.Set(k.path, name, value)
-	})
+	return k.set(map[string]string{name: value}, func() error { return store.Set(k.path, name, value) })
 }
 
 func (k storeKeys) Delete(name string) error {
@@ -44,27 +39,35 @@ func (k storeKeys) Delete(name string) error {
 }
 
 func (k storeKeys) SetAll(values map[string]string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if err := k.refuseBitcoinKeys(values); err != nil {
-		return err
-	}
-	if err := store.SetAll(k.path, values); err != nil {
-		return err
-	}
-	return k.applyBundle(maps.Keys(values), false)
+	return k.set(values, func() error { return store.SetAll(k.path, values) })
 }
 
-// refuseBitcoinKeys refuses, before they are written, values that would give
-// a service other than a Bitcoin signing service a Bitcoin key
-// (policy.CheckBitcoinKeys). Callers hold k.mu.
-func (k storeKeys) refuseBitcoinKeys(values map[string]string) error {
+// set stores values with write and puts them in force. The store is read
+// once and values put in; that map is checked before anything is written,
+// so no service but a Bitcoin signing service gets a Bitcoin key
+// (policy.CheckBitcoinKeys), and the same map goes into the proxy.
+func (k storeKeys) set(values map[string]string, write func() error) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	keys, err := store.Load(k.path)
 	if err != nil {
 		return err
 	}
 	maps.Copy(keys, values)
-	return k.proxy.Config().CheckBitcoinKeys(keys)
+	cfg := k.proxy.Config()
+	if err := cfg.CheckBitcoinKeys(keys); err != nil {
+		return err
+	}
+	if err := write(); err != nil {
+		return err
+	}
+	k.proxy.Swap(cfg, keys)
+	for name := range values {
+		if err := dashboardpkg.NoteKeyChange(k.metaPath, name, false, time.Now()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (k storeKeys) DeleteAll(names []string) error {

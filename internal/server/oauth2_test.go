@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin/bitcointest"
 	"github.com/gitmoot/keyring/internal/policy"
+	"github.com/gitmoot/keyring/internal/workspace"
 )
 
 const (
@@ -335,5 +339,28 @@ func TestOAuthFailureDescriptionForTheOwnerOnly(t *testing.T) {
 		if got := oauthDescription(d, testRefresh, "s", "c"); got != "" {
 			t.Errorf("%q kept as %q", d, got)
 		}
+	}
+}
+
+// A Bitcoin key never goes to a token endpoint. Every refresh refuses one
+// before the request is built, also for a Workspace account, whose refresh
+// token no service names (review of #204).
+func TestOAuthNeverSendsABitcoinKey(t *testing.T) {
+	up, _ := upstream(t)
+	te := newTokenEndpoint(t, 3600)
+	h, _, _ := newOAuthHandler(t, up.URL, te.srv.URL, policy.Access{Paths: []string{"/"}})
+	svc := h.Config().Services["api"]
+	ctx := context.Background()
+	if _, err := h.WorkspaceIdentity(ctx, workspace.Selection{Service: svc, Refresh: bitcointest.WIF, Secret: testSecret}); err == nil {
+		t.Fatal("a Workspace account's Bitcoin refresh token was used")
+	}
+	if _, err := h.accessToken(ctx, svc, testRefresh, bitcointest.Master); !errors.Is(err, errOAuthRejected) || !strings.Contains(err.Error(), bitcoinKeyRefused) {
+		t.Fatalf("a Bitcoin client secret: %v", err)
+	}
+	if n := te.calls.Load(); n != 0 {
+		t.Fatalf("the token endpoint got %d requests carrying a Bitcoin key", n)
+	}
+	if _, err := h.accessToken(ctx, svc, testRefresh, testSecret); err != nil || te.calls.Load() != 1 {
+		t.Fatalf("an ordinary refresh: %v after %d requests", err, te.calls.Load())
 	}
 }

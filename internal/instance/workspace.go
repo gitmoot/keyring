@@ -7,11 +7,14 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/workspace"
 )
@@ -121,6 +124,22 @@ func (s *State) validateWorkspace(container bool) error {
 	for _, name := range []string{"gmail", "calendar"} {
 		if svc, exists := s.Services[name]; exists && svc.Key != a.Key {
 			return errors.New("Workspace default refresh key is immutable after migration")
+		}
+	}
+	return nil
+}
+
+// checkBitcoinKeys refuses a state in which anything but a Bitcoin signing
+// service would send a stored Bitcoin key: a key the services name
+// (policy.CheckBitcoinKeys), or the refresh token of a Workspace account,
+// which the Workspace services send though no service names it.
+func (s *State) checkBitcoinKeys(cfg *policy.Config) error {
+	if err := cfg.CheckBitcoinKeys(s.Keys); err != nil {
+		return err
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.WorkspaceAccounts)) {
+		if a := s.WorkspaceAccounts[id]; bitcoin.IsKey(s.Keys[a.Key]) {
+			return fmt.Errorf("Workspace account %s: %s is a Bitcoin key; it can only be used by a Bitcoin signing service", a.Alias, a.Key)
 		}
 	}
 	return nil

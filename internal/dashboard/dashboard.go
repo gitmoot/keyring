@@ -1540,6 +1540,10 @@ func (b *Backend) connectKey(w http.ResponseWriter, r *http.Request, sid string)
 		return
 	case f.KeyPool:
 		// The pool names the key itself; its values are tried in list order.
+	case f.KeyPart == "" && row.baseStored && !slices.ContainsFunc(row.Parts, func(p keyPart) bool { return p.HasValue }):
+		// The plain value is the one stored value (services may name values
+		// not stored yet): settings that leave the value out mean it, as the
+		// page that offers them does.
 	case len(row.Parts) > 0:
 		// Settings that leave the value out mean the one stored value.
 		if f.KeyPart == "" && !row.baseStored {

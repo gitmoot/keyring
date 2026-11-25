@@ -62,7 +62,7 @@ func bitcoinImport(configPath, storePath, network, name string, stdin io.Reader,
 // reload or start. Without the settings that cannot be checked, so a
 // Bitcoin key needs configPath.
 func checkBitcoinValue(configPath, storePath, name, value string) error {
-	if _, ok := bitcoin.Inspect(value); !ok {
+	if !bitcoin.IsKey(value) {
 		return nil
 	}
 	if configPath == "" {

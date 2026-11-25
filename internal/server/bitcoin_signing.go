@@ -77,7 +77,7 @@ const bitcoinKeyRefused = "bitcoin key refused"
 func bitcoinValues(keys map[string]string) map[string]bool {
 	var found map[string]bool
 	for _, value := range keys {
-		if _, ok := bitcoin.Inspect(value); ok {
+		if bitcoin.IsKey(value) {
 			if found == nil {
 				found = map[string]bool{}
 			}
