@@ -75,6 +75,9 @@ type Handler struct {
 	googleHistory googleHistory
 	// Set before serving: the container seals SDK changes before token use.
 	googleCommand func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)
+	// Set before serving in the container: seals Google's answers (refused
+	// on 401, accepted below 400) with the login. It must not block.
+	googleRefusal func(policy.GoogleAccount, bool)
 
 	auditMu   sync.Mutex
 	workspace workspace.Boundary // fixed before serving in container mode
@@ -84,6 +87,12 @@ type Handler struct {
 // File-mode hosts keep the existing isolated subprocess path.
 func (h *Handler) SetGoogleCommand(command func(context.Context, policy.GoogleAccount, *gcloudexec.RenewalTrace) (string, error)) {
 	h.googleCommand = command
+}
+
+// SetGoogleRefusal installs the container's record of Google refusing (401)
+// or accepting the tokens of a binding, before serving.
+func (h *Handler) SetGoogleRefusal(record func(policy.GoogleAccount, bool)) {
+	h.googleRefusal = record
 }
 
 type snapshot struct {
@@ -830,9 +839,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.dropAccessToken(svc, refresh, secret, upstreamKey)
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		// Invalidate only the token used; never replay an ambiguous write.
-		h.dropGoogleToken(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey)
+	if svc.Auth == policy.AuthGcloud {
+		// A 401 invalidates only the token used and marks the account
+		// refused; never replay an ambiguous write.
+		h.googleAnswered(snap.config.GoogleAccounts[svc.GoogleAccount], upstreamKey, resp.StatusCode)
 	}
 	// The transport already decoded gzip. Any other encoding would hide an
 	// echoed key from the redactor, so such a reply is not passed on.
@@ -1024,8 +1034,8 @@ func (h *Handler) testRequest(ctx context.Context, snap *snapshot, svc policy.Se
 		}
 		return nil, errors.New("service unreachable")
 	}
-	if svc.Auth == policy.AuthGcloud && resp.StatusCode == http.StatusUnauthorized {
-		h.dropGoogleToken(googleAccount, key)
+	if svc.Auth == policy.AuthGcloud {
+		h.googleAnswered(googleAccount, key, resp.StatusCode)
 	}
 	return resp, nil
 }

@@ -610,7 +610,8 @@ export class KeyringInstance extends DurableObject<Env> {
 				.map(([name, svc]) => {
 					const google = svc.google_account === "me" && (svc.auth === "gcloud" || svc.auth === "gcloud-login");
 					const credentialsPresent = keys.has(svc.key) && Object.values(svc.extra_headers ?? {}).every((key) => keys.has(key));
-					return { name, connected: google ? s.google?.phase === "connected" : credentialsPresent && !s.reconnect_required?.[name],
+					// Google refusing the login's tokens (401) is not connected, even with a sealed login.
+					return { name, connected: google ? s.google?.phase === "connected" && !s.reconnect_required?.[name] : credentialsPresent && !s.reconnect_required?.[name],
 						failing: google ? googleError ?? s.failing?.[name] ?? (s.google?.phase === "connected" ? null : "Google connection is not ready") : s.failing?.[name] ?? null };
 				})
 				.sort((a, b) => a.name.localeCompare(b.name));

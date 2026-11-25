@@ -33,7 +33,18 @@ type googleEntry struct {
 	oauthEntry
 	expires time.Time
 	renewal gcloudexec.RenewalTrace
+	// refused: Google answered 401 to the last call made with a token this
+	// entry held. Only a later call it accepts clears it; a new token does not.
+	refused bool
 }
+
+// Google answered 401 to a call with a token gcloud minted (#184). The
+// messages are fixed text: never Google's body, the account or a token.
+const (
+	// GoogleRefusedContainer: the next Drive connection signs in again.
+	GoogleRefusedContainer = "Google refused the sign-in (HTTP 401, session invalid); open a new Drive link to sign in again"
+	googleRefusedHost      = "Google refused the gcloud token (HTTP 401); run gcloud auth login for this account"
+)
 
 // GoogleRenewal returns a fixed-size, credential-free snapshot of the latest
 // actual attempt. It does not refresh, inspect SDK files, or change the cache.
@@ -52,27 +63,40 @@ func (h *Handler) GoogleRenewal(name string) (gcloudexec.RenewalRecord, bool) {
 }
 
 // GoogleStatus is safe dashboard metadata, never command output or a token.
-func (h *Handler) GoogleStatus(name string) (state string, expires time.Time) {
-	a, ok := h.snap.Load().config.GoogleAccounts[name]
+// reconnect is true while Google refuses the account's tokens: gcloud still
+// mints them, but the sign-in behind them must be made again. It is kept
+// apart from the mint state: a failed or new mint does not clear it, only a
+// call Google accepts.
+func (h *Handler) GoogleStatus(name string) (state string, expires time.Time, reconnect bool) {
+	snap := h.snap.Load()
+	a, ok := snap.config.GoogleAccounts[name]
 	if !ok {
-		return "not configured", time.Time{}
+		return "not configured", time.Time{}, false
 	}
 	h.google.mu.Lock()
 	defer h.google.mu.Unlock()
 	e := h.google.entries[a]
 	if e == nil {
-		return "not checked", time.Time{}
+		return "not checked", time.Time{}, false
 	}
+	reconnect = e.refused
 	if e.refreshing != nil {
-		return "renewing", time.Time{}
+		return "renewing", time.Time{}, reconnect
 	}
 	if e.err != nil {
-		return e.err.Error(), time.Time{}
+		// A failing mint is the newer diagnosis; the refusal stays.
+		return e.err.Error(), time.Time{}, reconnect
+	}
+	if e.refused {
+		if snap.config.ContainerMode {
+			return GoogleRefusedContainer, time.Time{}, true
+		}
+		return googleRefusedHost, time.Time{}, true
 	}
 	if e.token == "" || !h.now().Before(e.expires) {
-		return "renewal required", time.Time{}
+		return "renewal required", time.Time{}, false
 	}
-	return "ready", e.expires
+	return "ready", e.expires, false
 }
 
 func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleAccount) (string, error) {
@@ -142,11 +166,33 @@ func (h *Handler) googleToken(ctx context.Context, name string, a policy.GoogleA
 	}
 }
 
-func (h *Handler) dropGoogleToken(a policy.GoogleAccount, token string) {
+// googleAnswered records Google's answer to a call sent with token. A 401
+// drops the token, so the next call mints a new one, and marks the account
+// refused; a later accepted call clears it. Credentials are never removed
+// here. Answers for a token the entry no longer holds change nothing. The
+// container's controller also seals the answer (SetGoogleRefusal).
+func (h *Handler) googleAnswered(a policy.GoogleAccount, token string, status int) {
+	var refused bool
+	switch {
+	case status == http.StatusUnauthorized:
+		refused = true
+	case status < 400:
+	default:
+		return
+	}
 	h.google.mu.Lock()
-	defer h.google.mu.Unlock()
-	if e := h.google.entries[a]; e != nil && e.token == token {
+	e := h.google.entries[a]
+	if e == nil || e.token != token {
+		h.google.mu.Unlock()
+		return
+	}
+	e.refused = refused
+	if refused {
 		e.token = ""
+	}
+	h.google.mu.Unlock()
+	if h.googleRefusal != nil {
+		h.googleRefusal(a, refused)
 	}
 }
 

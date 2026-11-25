@@ -270,6 +270,7 @@ func (in *Instance) commit(next *State, key []byte) error {
 		in.consent = consent.New(in.proxy.Config, instanceKeys{in}, in.opt.Audit)
 		if in.google != nil {
 			in.proxy.SetGoogleCommand(in.google.Token)
+			in.proxy.SetGoogleRefusal(in.google.RecordRefusal)
 			in.consent.SetGoogle(in.google)
 		}
 		if in.opt.Container {
@@ -589,8 +590,18 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 		c.APITokenSHA256 = "" // a token hash, like the roles' hashes, is not shown
 		consentView = &c
 	}
-	// Why a service's refresh failed, for oauth2 services whose last
-	// refresh failed (never a token).
+	// Why a service's credential is failing: an oauth2 refresh failure, or
+	// a Google account that cannot mint or whose tokens Google refuses
+	// (never a token).
+	var googleView *googlelogin.View
+	if in.google != nil {
+		view := in.google.Status()
+		view.Account, view.Project = "", ""
+		googleView = &view
+	}
+	// The container's only Google account ("me") is the sealed login: its
+	// refusal survives restarts and failed mints.
+	sealedRefusal := googleView != nil && googleView.Phase == "reconnect_required"
 	failing := map[string]string{}
 	reconnect := map[string]bool{}
 	for name, svc := range s.Services {
@@ -603,19 +614,19 @@ func (in *Instance) status(w http.ResponseWriter, _ *http.Request) {
 				reconnect[name] = true
 			}
 		} else if svc.Auth == policy.AuthGcloud || svc.Auth == policy.AuthGcloudLogin {
-			why, _ := in.proxy.GoogleStatus(svc.GoogleAccount)
+			why, _, refused := in.proxy.GoogleStatus(svc.GoogleAccount)
 			switch why {
 			case "not configured", "not checked", "renewing", "renewal required", "ready":
+				if in.google != nil && (refused || sealedRefusal) {
+					failing[name] = server.GoogleRefusedContainer
+				}
 			default:
 				failing[name] = why
 			}
+			if refused || sealedRefusal {
+				reconnect[name] = true
+			}
 		}
-	}
-	var googleView *googlelogin.View
-	if in.google != nil {
-		view := in.google.Status()
-		view.Account, view.Project = "", ""
-		googleView = &view
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"unlocked": true, "id": s.ID, "version": s.Version,

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gitmoot/keyring/internal/googlelogin"
+	"github.com/gitmoot/keyring/internal/server"
 )
 
 // Exercise the public admin transaction, not copies of the service definitions.
@@ -180,5 +181,43 @@ func TestContainerGoogleProvisioningChoosesProject(t *testing.T) {
 	}
 	if google := x.must("GET", "/status", nil)["google"].(map[string]any); google["quota_project"] != nil {
 		t.Fatalf("status exposed the project: %v", google)
+	}
+}
+
+// A refusal sealed with the login reports the Google services as needing a
+// reconnect even from a proxy that never saw the 401, as after a container
+// restart (#184).
+func TestContainerGoogleSealedRefusalStatus(t *testing.T) {
+	in, err := New(Options{AdminListen: freeAddr(t), AdminTokenSHA256: sha(adminToken), StatePath: filepath.Join(t.TempDir(), "sealed"), Container: true, Audit: io.Discard, AuditName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(in.Close)
+	x := &inst{t: t, in: in, admin: in.AdminHandler()}
+	x.must("POST", "/create", map[string]any{"id": "person", "data_key": newKey(t), "listen": freeAddr(t)})
+	x.must("PUT", "/roles/router", map[string]any{"access": map[string]any{}})
+	x.must("POST", "/google-drive", map[string]any{})
+	login := &googlelogin.Snapshot{Generation: strings.Repeat("b", 32), Account: "person@example.test", Project: "owned-project-1", Ready: true,
+		Files: map[string][]byte{"credentials.db": []byte("synthetic-credential")}}
+	expected := ""
+	for _, refused := range []bool{false, true} {
+		next := *login
+		next.Refused = refused
+		if err := in.saveGoogle(context.Background(), expected, &next); err != nil {
+			t.Fatal(err)
+		}
+		expected = login.Generation
+		status := x.must("GET", "/status", nil)
+		reconnect, _ := status["reconnect_required"].(map[string]any)
+		failing, _ := status["failing"].(map[string]any)
+		for _, name := range []string{"drive", "google-me-drive", "google-me-upload", "google-me-sheets"} {
+			if (reconnect[name] == true) != refused || (failing[name] == server.GoogleRefusedContainer) != refused {
+				t.Fatalf("refused=%v %s: reconnect=%v failing=%v", refused, name, reconnect[name], failing[name])
+			}
+		}
+		want := map[bool]string{false: "connected", true: "reconnect_required"}[refused]
+		if phase := status["google"].(map[string]any)["phase"]; phase != want {
+			t.Fatalf("refused=%v phase %v", refused, phase)
+		}
 	}
 }

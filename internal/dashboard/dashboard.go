@@ -933,7 +933,7 @@ func (b *Backend) keysPage(w http.ResponseWriter, r *http.Request, sid string) {
 	var accounts []googleRow
 	cfg := b.Proxy.Config()
 	for name, a := range cfg.GoogleAccounts {
-		status, expires := b.Proxy.GoogleStatus(name)
+		status, expires, _ := b.Proxy.GoogleStatus(name)
 		row := googleRow{Name: name, Account: a.Account, Status: status}
 		history := b.Proxy.GoogleHistory(name)
 		row.History, row.HistoryUnavailable = history.Incidents, history.Unavailable
