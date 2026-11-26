@@ -119,7 +119,13 @@ func (n *Notifier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil || dec.More() || body.Text == nil {
+	if err := dec.Decode(&body); err != nil || body.Text == nil {
+		http.Error(w, `want {"text": "..."}`, http.StatusBadRequest)
+		return
+	}
+	// One JSON document and nothing after it (More only looks inside the
+	// current container).
+	if _, err := dec.Token(); err != io.EOF {
 		http.Error(w, `want {"text": "..."}`, http.StatusBadRequest)
 		return
 	}
@@ -132,7 +138,9 @@ func (n *Notifier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "over 60 notices a minute", http.StatusTooManyRequests)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), notifyTimeout)
+	// The command's own context, not the request's: a notice already taken
+	// gets its 20 seconds even if the caller goes away.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), notifyTimeout)
 	defer cancel()
 	// No stdin, stdout or stderr: Run returns as soon as the command ends
 	// or is killed.

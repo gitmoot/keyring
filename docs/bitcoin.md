@@ -323,7 +323,7 @@ owner picked in `rules.json` (`notify`), for example `keyring: mainnet
 signature by phobos on btc-main: txid …, 65000 sats external, fee 5000
 sats, 32.5 sat/vB`. A refusal or a test network sends none. It starts once
 the signature and its day total are kept, before the reply is written, runs
-in the background for at most 10 seconds, and a failure is written to the
+in the background for at most 30 seconds (the relay's gram command gets 20), and a failure is written to the
 audit log (`"method":"NOTIFY"`); it never delays or fails the signature.
 
 The channel is a setting so other channels can be offered later; for now

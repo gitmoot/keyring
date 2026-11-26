@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -19,8 +18,10 @@ import (
 	"github.com/gitmoot/keyring/internal/policy"
 )
 
-// NoticeTimeout bounds one notice.
-const NoticeTimeout = 10 * time.Second
+// NoticeTimeout bounds how long the keyring waits for one notice. It is
+// longer than the relay's 20-second budget for the gram command, so a slow
+// but successful notice is never reported as failed.
+const NoticeTimeout = 30 * time.Second
 
 // noticeClient sends notices: no proxy from the environment, no redirects
 // (the token goes to the configured URL only).
@@ -71,10 +72,11 @@ func SendNotice(ctx context.Context, notify *policy.Notify, keys map[string]stri
 		}
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	// Only the status matters; the body is not read (no connection is
+	// reused), and the peer's reason phrase is not repeated.
+	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("the relay answered %s", resp.Status)
+		return fmt.Errorf("the relay answered HTTP %d", resp.StatusCode)
 	}
 	return nil
 }

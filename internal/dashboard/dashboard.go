@@ -1983,6 +1983,10 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 		http.Redirect(w, r, "/keys/"+name+"?error=password", http.StatusSeeOther)
 		return
 	}
+	if name == b.Proxy.Config().NotifyTokenKey() {
+		http.Redirect(w, r, "/keys/"+name+"?error=notice-token", http.StatusSeeOther)
+		return
+	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
 	rows, err := b.rows()

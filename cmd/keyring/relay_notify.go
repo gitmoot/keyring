@@ -20,14 +20,15 @@ type relayNotify struct {
 	listen      string   // IP:port; "" is off
 	allow       []string // source IPs
 	tokenFile   string
-	gramCommand string // "herdr" (looked up in PATH) or an absolute path
+	gramCommand string // a name looked up in PATH or an absolute path
+	gramSet     bool   // --gram-command was given
 }
 
 // server checks the flags and builds the notify listener's server, nil when
 // --notify-listen is not set. gramCommand becomes the resolved path.
 func (n *relayNotify) server() (*http.Server, error) {
 	if n.listen == "" {
-		if len(n.allow) != 0 || n.tokenFile != "" || n.gramCommand != "herdr" {
+		if len(n.allow) != 0 || n.tokenFile != "" || n.gramSet {
 			return nil, errors.New("--notify-allow, --notify-token-file and --gram-command need --notify-listen")
 		}
 		return nil, nil
@@ -62,8 +63,10 @@ func (n *relayNotify) server() (*http.Server, error) {
 		}
 	} else if strings.ContainsRune(command, '/') {
 		return nil, fmt.Errorf("--gram-command %q: give a name looked up in PATH or an absolute path", command)
-	} else if command, err = exec.LookPath(command); err != nil {
-		return nil, fmt.Errorf("--gram-command %q: not found in PATH; give its absolute path", n.gramCommand)
+	} else if path, err := exec.LookPath(command); err != nil {
+		return nil, fmt.Errorf("--gram-command %q: not found in PATH; give its absolute path", command)
+	} else {
+		command = path
 	}
 	n.gramCommand = command
 	return &http.Server{

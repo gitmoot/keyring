@@ -366,7 +366,9 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 			return
 		}
 		if mainnet {
-			if snap.config.Notify == nil {
+			// No channel, or one whose token is not stored, would sign
+			// without telling the owner.
+			if snap.config.Notify == nil || snap.keys[snap.config.Notify.TokenKey] == "" {
 				h.refund(role, service, access.DailyRequests, start)
 				fail(http.StatusServiceUnavailable, "bitcoin unavailable: no owner notification configured")
 				return

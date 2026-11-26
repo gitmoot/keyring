@@ -27,7 +27,8 @@ func TestRelayNotifyFlags(t *testing.T) {
 		n    relayNotify
 		want string
 	}{
-		"allow without listen": {relayNotify{allow: []string{"100.111.92.43"}, gramCommand: "herdr"}, "need --notify-listen"},
+		"allow without listen": {relayNotify{allow: []string{"100.111.92.43"}}, "need --notify-listen"},
+		"gram without listen":  {relayNotify{gramCommand: "herdr", gramSet: true}, "need --notify-listen"},
 		"wildcard":             {relayNotify{listen: "0.0.0.0:7702", allow: []string{"100.111.92.43"}, tokenFile: token, gramCommand: gram}, "no wildcard"},
 		"no allowed IP":        {relayNotify{listen: "127.0.0.1:7702", tokenFile: token, gramCommand: gram}, "at least one --notify-allow"},
 		"no token file":        {relayNotify{listen: "127.0.0.1:7702", allow: []string{"100.111.92.43"}, gramCommand: gram}, "needs --notify-token-file"},

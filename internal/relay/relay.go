@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gitmoot/keyring/internal/framing"
+	"github.com/gitmoot/keyring/internal/plainhttp"
 )
 
 const (
@@ -31,7 +31,6 @@ const (
 var (
 	roleName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	tokenText = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]{16,512}$`)
-	tailnet   = netip.MustParsePrefix("100.64.0.0/10")
 )
 
 // Relay forwards calls to one keyring.
@@ -55,8 +54,7 @@ func CheckUpstream(raw string) (*url.URL, error) {
 	switch u.Scheme {
 	case "https":
 	case "http":
-		addr, err := netip.ParseAddr(u.Hostname())
-		if err != nil || !(addr.IsLoopback() || tailnet.Contains(addr.Unmap())) {
+		if !plainhttp.Allowed(u.Hostname()) {
 			return nil, fmt.Errorf("upstream %q: plain http only to a tailnet (100.64.0.0/10) or loopback IP; otherwise use https", raw)
 		}
 	default:

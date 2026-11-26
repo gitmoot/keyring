@@ -177,7 +177,7 @@ func TestBitcoinMainnetNotifyNeverBlocks(t *testing.T) {
 		}
 		if notifyURL == failing {
 			deadline := time.Now().Add(5 * time.Second)
-			for !strings.Contains(audit.String(), `"note":"signature notice not sent: the relay answered 502 Bad Gateway"`) {
+			for !strings.Contains(audit.String(), `"note":"signature notice not sent: the relay answered HTTP 502"`) {
 				if time.Now().After(deadline) {
 					t.Fatalf("no failure in the audit: %s", audit.String())
 				}
@@ -272,7 +272,7 @@ func TestBitcoinKeyOnTwoNetworksSignsNothing(t *testing.T) {
 		}
 	}
 	// Different keys sign on both.
-	h = startMainnet(t, mainnetConfig(t, mainnetLimits, ""), map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign}, &lockedBuffer{}, t.TempDir())
+	h = startMainnet(t, mainnetConfig(t, mainnetLimits, ""), map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign, "KEYRING_NOTIFY_TOKEN": noticeToken}, &lockedBuffer{}, t.TempDir())
 	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != 200 {
 		t.Fatalf("mainnet with its own key: %d %s", w.Code, w.Body.String())
 	}
@@ -292,13 +292,19 @@ func TestBitcoinMainnetGrantWithoutLimitsSignsNothing(t *testing.T) {
 }
 
 // Validation refuses a mainnet service without notify; a config that
-// skipped it still signs nothing on mainnet.
+// skipped it, or whose notice token is not stored (renamed away), still
+// signs nothing on mainnet.
 func TestBitcoinMainnetWithoutNotifySignsNothing(t *testing.T) {
 	cfg := mainnetConfig(t, mainnetLimits, "")
-	cfg.Notify = nil
-	h := startMainnet(t, cfg, mainnetKeys, &lockedBuffer{}, t.TempDir())
-	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "no owner notification configured") {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+	noToken := map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign}
+	for _, h := range []*Handler{startMainnet(t, cfg, noToken, &lockedBuffer{}, t.TempDir()), func() *Handler {
+		c := mainnetConfig(t, mainnetLimits, "")
+		c.Notify = nil
+		return startMainnet(t, c, mainnetKeys, &lockedBuffer{}, t.TempDir())
+	}()} {
+		if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "no owner notification configured") {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
 	}
 }
 

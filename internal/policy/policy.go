@@ -27,6 +27,7 @@ import (
 	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/minisign"
+	"github.com/gitmoot/keyring/internal/plainhttp"
 	"github.com/gitmoot/keyring/internal/store"
 )
 
@@ -123,9 +124,6 @@ type Notify struct {
 	TokenKey string `json:"token_key"`
 }
 
-// notifyTailnet is the range plain http may reach: the tailnet encrypts.
-var notifyTailnet = netip.MustParsePrefix("100.64.0.0/10")
-
 func (n *Notify) validate() error {
 	if !slices.Contains(NotifyChannels, n.Channel) {
 		return fmt.Errorf("notify: channel %q is not supported; supported channels: %s", n.Channel, strings.Join(NotifyChannels, ", "))
@@ -138,8 +136,7 @@ func (n *Notify) validate() error {
 	case "https":
 	case "http":
 		// The bearer token must not cross any other network in clear.
-		addr, err := netip.ParseAddr(u.Hostname())
-		if err != nil || !(addr.IsLoopback() || notifyTailnet.Contains(addr.Unmap())) {
+		if !plainhttp.Allowed(u.Hostname()) {
 			return fmt.Errorf("notify: url %q: plain http only to a tailnet (100.64.0.0/10) or loopback IP; otherwise use https", n.URL)
 		}
 	default:

@@ -255,12 +255,19 @@ func (b *Backend) saveNotes(key string, notes []ValueNote, last int) error {
 }
 
 // editStart is the common start of these forms, called with b.Mu held: the
-// password, then the key's row. ok is false when a response was written.
+// password, then the key's row. ok is false when a response was written. The
+// signature notice token is named by the rules file, which the dashboard
+// cannot change, so its name and values stay as they are (it can be
+// replaced).
 func (b *Backend) editStart(w http.ResponseWriter, r *http.Request, sid string) (row keyRow, back func(code string), ok bool) {
 	name := r.PathValue("name")
 	back = func(code string) { http.Redirect(w, r, "/keys/"+name+"?error="+code, http.StatusSeeOther) }
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		back("password")
+		return row, back, false
+	}
+	if name == b.Proxy.Config().NotifyTokenKey() {
+		back("notice-token")
 		return row, back, false
 	}
 	row, found, err := b.row(name)
@@ -431,6 +438,10 @@ func (b *Backend) renameKey(w http.ResponseWriter, r *http.Request, sid string) 
 	defer b.Mu.Unlock()
 	row, back, ok := b.editStart(w, r, sid)
 	if !ok {
+		return
+	}
+	if newName == b.Proxy.Config().NotifyTokenKey() {
+		back("notice-token")
 		return
 	}
 	if base, part := store.SplitPart(newName); part != "" || !store.ValidName(base) {

@@ -49,12 +49,24 @@ func TestSignatureNoticesOnTheServicePage(t *testing.T) {
 	// The relay refusing it shows on the page and in the audit.
 	e.status.Store(http.StatusBadGateway)
 	w = e.request("POST", "/services/btc-main/test-notice", url.Values{"password": {password}})
-	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "The test notice was not sent: the relay answered 502 Bad Gateway") || !strings.Contains(e.audit.String(), `"sent":false`) {
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "The test notice was not sent: the relay answered HTTP 502") || !strings.Contains(e.audit.String(), `"sent":false`) {
 		t.Fatalf("refused test notice: %d", w.Code)
 	}
 	// Never shown.
 	if w := e.request("POST", "/keys/"+noticeTokenKey+"/reveal", url.Values{"password": {password}}); w.Code != http.StatusSeeOther || !strings.HasSuffix(w.Header().Get("Location"), "?error=never-shown") {
 		t.Fatalf("reveal: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	// Its name follows the rules file: rename, delete and renaming another
+	// key to it are refused (it can only be replaced).
+	for path, form := range map[string]url.Values{
+		"/keys/" + noticeTokenKey + "/rename": {"new_name": {"OTHER"}},
+		"/keys/" + noticeTokenKey + "/delete": {},
+		"/keys/API_KEY/rename":                {"new_name": {noticeTokenKey}},
+	} {
+		form.Set("password", password)
+		if w := e.request("POST", path, form); !strings.HasSuffix(w.Header().Get("Location"), "?error=notice-token") {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Header().Get("Location"))
+		}
 	}
 	key := e.request("GET", "/keys/"+noticeTokenKey+"?error=never-shown", nil).Body.String()
 	if strings.Contains(key, "/reveal") || !strings.Contains(key, "The signature notice token is never shown") || strings.Contains(key, token) {

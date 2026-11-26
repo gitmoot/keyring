@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const notifyToken = "notice-token-0123456789abcdef"
@@ -49,15 +51,16 @@ func TestNotifyListener(t *testing.T) {
 		from, auth, body string
 		want             int
 	}{
-		"other IP":     {"100.64.0.9", bearer, `{"text":"hi"}`, http.StatusForbidden},
-		"wrong token":  {keyring, "Bearer notice-token-0123456789abcdeX", `{"text":"hi"}`, http.StatusUnauthorized},
-		"no token":     {keyring, "", `{"text":"hi"}`, http.StatusUnauthorized},
-		"oversize":     {keyring, bearer, `{"text":"` + strings.Repeat("a", 4<<10) + `"}`, http.StatusRequestEntityTooLarge},
-		"not JSON":     {keyring, bearer, `hi`, http.StatusBadRequest},
-		"empty text":   {keyring, bearer, `{"text":"\u0007\u001b"}`, http.StatusBadRequest},
-		"long text":    {keyring, bearer, `{"text":"` + strings.Repeat("a", 1001) + `"}`, http.StatusBadRequest},
-		"option-like":  {keyring, bearer, `{"text":"--file /etc/shadow"}`, http.StatusBadRequest},
-		"extra fields": {keyring, bearer, `{"text":"hi","from":"x"}`, http.StatusBadRequest},
+		"other IP":      {"100.64.0.9", bearer, `{"text":"hi"}`, http.StatusForbidden},
+		"wrong token":   {keyring, "Bearer notice-token-0123456789abcdeX", `{"text":"hi"}`, http.StatusUnauthorized},
+		"no token":      {keyring, "", `{"text":"hi"}`, http.StatusUnauthorized},
+		"oversize":      {keyring, bearer, `{"text":"` + strings.Repeat("a", 4<<10) + `"}`, http.StatusRequestEntityTooLarge},
+		"not JSON":      {keyring, bearer, `hi`, http.StatusBadRequest},
+		"empty text":    {keyring, bearer, `{"text":"\u0007\u001b"}`, http.StatusBadRequest},
+		"long text":     {keyring, bearer, `{"text":"` + strings.Repeat("a", 1001) + `"}`, http.StatusBadRequest},
+		"option-like":   {keyring, bearer, `{"text":"--file /etc/shadow"}`, http.StatusBadRequest},
+		"extra fields":  {keyring, bearer, `{"text":"hi","from":"x"}`, http.StatusBadRequest},
+		"trailing data": {keyring, bearer, `{"text":"hi"}]`, http.StatusBadRequest},
 	} {
 		if w := notifyCall(n, c.from, c.auth, c.body); w.Code != c.want {
 			t.Errorf("%s: %d, want %d", name, w.Code, c.want)
@@ -115,5 +118,28 @@ func TestNotifyListenerFailsAndLimits(t *testing.T) {
 	raw, _ := os.ReadFile(out)
 	if runs := strings.Count(string(raw), "--\n"); runs != 60 {
 		t.Fatalf("the gram command ran %d times", runs)
+	}
+}
+
+// A notice already taken runs its full time even when the caller goes
+// away: the command has its own context, not the request's.
+func TestNotifyRunsPastTheCaller(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "done")
+	slow := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 0.5\necho done > '"+out+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyring := netip.MustParseAddr("100.111.92.43")
+	n := NewNotifier(notifyToken, []netip.Addr{keyring}, slow)
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("POST", NotifyPath, strings.NewReader(`{"text":"hi"}`)).WithContext(ctx)
+	r.RemoteAddr = keyring.String() + ":40000"
+	r.Header.Set("Authorization", "Bearer "+notifyToken)
+	time.AfterFunc(50*time.Millisecond, cancel)
+	w := httptest.NewRecorder()
+	n.ServeHTTP(w, r)
+	if _, err := os.Stat(out); err != nil || w.Code != http.StatusNoContent {
+		t.Fatalf("the gram command was cut short: %d %v", w.Code, err)
 	}
 }

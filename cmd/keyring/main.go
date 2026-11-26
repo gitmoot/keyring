@@ -111,7 +111,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var notifyAllow stringList
 	fs.Var(&notifyAllow, "notify-allow", "relay: source IP allowed on --notify-listen (repeat)")
 	notifyTokenFile := fs.String("notify-token-file", "", "relay: file holding the notice token (mode 600, the relay user's)")
-	gramCommand := fs.String("gram-command", "herdr", "relay: herdr, looked up in PATH, or its absolute path")
+	gramCommand := fs.String("gram-command", "herdr", "relay: the herdr command, a name looked up in PATH or an absolute path")
 	upgradeTo := fs.String("version", "", "upgrade: install this release tag instead of the latest")
 	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
 	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
@@ -248,7 +248,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")
 			return 2
 		}
-		err = runRelay(*listen, *upstream, *tokensDir, relayNotify{listen: *notifyListen, allow: notifyAllow, tokenFile: *notifyTokenFile, gramCommand: *gramCommand}, stderr)
+		notify := relayNotify{listen: *notifyListen, allow: notifyAllow, tokenFile: *notifyTokenFile, gramCommand: *gramCommand}
+		fs.Visit(func(f *flag.Flag) { notify.gramSet = notify.gramSet || f.Name == "gram-command" })
+		err = runRelay(*listen, *upstream, *tokensDir, notify, stderr)
 	case "upgrade":
 		if fs.NArg() != 0 {
 			fmt.Fprintln(stderr, "keyring upgrade: takes only --version")
