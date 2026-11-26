@@ -124,6 +124,9 @@ type Plan struct {
 	Txid     string
 	External int64 // sats of outputs not proven this key's, plus the fee
 	Fee      int64
+	// VBytes is a lower bound on the virtual size of the finalised
+	// transaction (minVSize), so the fee rate it gives is an upper bound.
+	VBytes int64
 }
 
 // Prepare checks a base64 PSBT and the inputs to sign. All must hold, or
@@ -227,6 +230,9 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 		if name == "" {
 			return nil, refuse("input %d: sighash type is not valid", i)
 		}
+		if r.Network == Mainnet && t != txscript.SigHashDefault && t != txscript.SigHashAll {
+			return nil, refuse("input %d: sighash %s is not signed on mainnet (default and all only)", i, name)
+		}
 		if !r.sighash[t] {
 			return nil, refuse("input %d: sighash %s is not allowed for this service", i, name)
 		}
@@ -284,16 +290,51 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 	}
 	plan.Fee = in - out
 	plan.External = external + plan.Fee
+	plan.VBytes = plan.minVSize()
 	return plan, nil
 }
 
-// Signed is a signed PSBT and what it does.
+// Witness sizes of an input this plan signs, as serialized (item count,
+// then each item with its length), at their smallest. A taproot key-path
+// signature is 64 bytes, 65 with a sighash other than default; the shortest
+// DER signature is 8 bytes, 9 with its sighash byte, then the 33-byte
+// compressed key.
+const (
+	taprootKeyPathWitness = 1 + 1 + 64
+	p2wpkhMinWitness      = 1 + 1 + 9 + 1 + 33
+)
+
+// minVSize is a virtual size the finalised transaction is never below, so
+// fee / minVSize is never below its real fee rate: the unsigned
+// transaction (empty script sigs), the witness marker and flag, the inputs
+// this plan signs at their smallest witness, and every other input with an
+// empty one. Another input's script sig and witness count nothing even when
+// the PSBT carries them finalised: this plan's signatures do not commit to
+// them, so they can be stripped or replaced after signing.
+func (p *Plan) minVSize() int64 {
+	weight := int64(p.packet.UnsignedTx.SerializeSizeStripped())*4 + 2 + int64(len(p.packet.Inputs)-len(p.inputs))
+	for n := range p.inputs {
+		switch {
+		case p.matches[n].kind == ScriptP2WPKH:
+			weight += p2wpkhMinWitness
+		case p.types[n] == txscript.SigHashDefault:
+			weight += taprootKeyPathWitness
+		default:
+			weight += taprootKeyPathWitness + 1
+		}
+	}
+	return (weight + 3) / 4
+}
+
+// Signed is a signed PSBT and what it does. VBytes is the plan's lower bound
+// on the finalised size.
 type Signed struct {
 	PSBT     string `json:"psbt"`
 	Txid     string `json:"txid"`
 	Signed   []int  `json:"signed"`
 	External int64  `json:"external_sats"`
 	Fee      int64  `json:"fee_sats"`
+	VBytes   int64  `json:"vbytes"`
 }
 
 // Sign signs the plan's inputs: a partial signature for a P2WPKH input, the
@@ -334,5 +375,5 @@ func (p *Plan) Sign() (*Signed, error) {
 	if err != nil {
 		return nil, fmt.Errorf("psbt does not serialize")
 	}
-	return &Signed{PSBT: encoded, Txid: p.Txid, Signed: slices.Clone(p.inputs), External: p.External, Fee: p.Fee}, nil
+	return &Signed{PSBT: encoded, Txid: p.Txid, Signed: slices.Clone(p.inputs), External: p.External, Fee: p.Fee, VBytes: p.VBytes}, nil
 }

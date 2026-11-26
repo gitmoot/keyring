@@ -434,6 +434,18 @@ document.addEventListener("click", function (e) {
 document.addEventListener("change", function (e) {
   var t = e.target;
   if (t.matches("select[data-autosubmit]")) t.form.submit();
+  // A Bitcoin form: the mainnet notice shows for mainnet, and the paths
+  // follow the network while they are still the other side's preset.
+  if (t.matches("select[data-btcnetwork]")) {
+    var main = t.value === "mainnet", paths = t.form.querySelector("textarea[name=paths]");
+    t.form.querySelectorAll("[data-mainnetnotice]").forEach(function (n) { n.hidden = !main; });
+    t.form.querySelectorAll("[data-segwithint]").forEach(function (n) { n.hidden = (n.dataset.segwithint === "mainnet") !== main; });
+    if (paths) {
+      var now = paths.value.replace(/\r\n/g, "\n").trim();
+      if (main && now === t.dataset.testpaths) paths.value = t.dataset.mainnetpaths;
+      if (!main && now === t.dataset.mainnetpaths) paths.value = t.dataset.testpaths;
+    }
+  }
   var f = t.closest("form[data-pathpick]");
   if (f && t.value) location.href = f.getAttribute("action").replace(/\/-$/, "/" + encodeURIComponent(t.value));
 });

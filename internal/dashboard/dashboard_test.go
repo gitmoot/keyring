@@ -57,7 +57,8 @@ func newEnv(t *testing.T) *env {
 	}))
 	t.Cleanup(api.Close)
 	dir := t.TempDir()
-	rules := policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{"127.0.0.1"}, AuditLog: filepath.Join(dir, "audit.log"), AccessFile: filepath.Join(dir, "access.json")}
+	rules := policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{"127.0.0.1"}, AuditLog: filepath.Join(dir, "audit.log"), AccessFile: filepath.Join(dir, "access.json"),
+		NotifyCommand: []string{"/usr/bin/true"}}
 	sum := sha256.Sum256([]byte(token))
 	access := policy.AccessList{
 		Services: map[string]policy.Service{"api": {Base: api.URL, Key: "API_KEY", Auth: policy.AuthBearer, TestPath: "/v1/check"}},

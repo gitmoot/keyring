@@ -42,7 +42,8 @@ func addBitcoin(e *env) {
 func assertNoBitcoinKey(t *testing.T, outputs ...string) {
 	t.Helper()
 	for _, out := range outputs {
-		for _, secret := range []string{bitcointest.Master[:20], bitcointest.Master[len(bitcointest.Master)-20:], bitcointest.WIF[:20]} {
+		for _, secret := range []string{bitcointest.Master[:20], bitcointest.Master[len(bitcointest.Master)-20:], bitcointest.WIF[:20],
+			bitcointest.MasterMainnet[:20], bitcointest.MasterMainnet[len(bitcointest.MasterMainnet)-20:]} {
 			if strings.Contains(out, secret) {
 				t.Fatal("bitcoin key material in output")
 			}
@@ -192,19 +193,20 @@ func addresses(e *env, service, path string) *httptest.ResponseRecorder {
 }
 
 // The Connect form of a Bitcoin key makes a bitcoin-psbt-sign service that
-// answers once an agent is granted it (#201). Mainnet is refused.
+// answers once an agent is granted it (#201). A tprv cannot make a mainnet
+// service.
 func TestBitcoinConnectFormMakesAWorkingService(t *testing.T) {
 	e := newEnv(t)
 	addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
 	page := e.request("GET", "/keys/BTC_ORD", nil).Body.String()
 	for _, want := range []string{`name="auth" value="bitcoin-psbt-sign"`, `<option selected>regtest</option>`, "m/86&#39;/1&#39;/0&#39;/0/*\nm/86&#39;/1&#39;/0&#39;/1/*</textarea>",
-		`value="default" checked`, `value="all" checked`, `value="none">`, `value="single|anyonecanpay">`, "add <span class=\"mono\">m/84'/1'/0'/0/*</span>"} {
+		`value="default" checked`, `value="all" checked`, `value="none">`, `value="single|anyonecanpay">`, `add <span data-segwithint="test"><span class="mono">m/84&#39;/1&#39;/0&#39;/0/*</span>`, `<span data-segwithint="mainnet" hidden>`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the Connect form of a bitcoin key lacks %q", want)
 		}
 	}
-	if strings.Contains(page, "mainnet</option>") || strings.Contains(page, `class="presetpick"`) || strings.Contains(page, `name="base"`) || strings.Contains(page, `name="script"`) {
-		t.Fatal("the bitcoin Connect form offers mainnet, the API form or a WIF script")
+	if strings.Contains(page, `class="presetpick"`) || strings.Contains(page, `name="base"`) || strings.Contains(page, `name="script"`) || !strings.Contains(page, `<p class="warnbox" data-mainnetnotice hidden>`) {
+		t.Fatal("the bitcoin Connect form of a tprv offers the API form or a WIF script, or shows the mainnet notice")
 	}
 	before := e.accessBytes()
 	form := func(network string, sighash ...string) url.Values {
@@ -214,7 +216,7 @@ func TestBitcoinConnectFormMakesAWorkingService(t *testing.T) {
 		name, want string
 		form       url.Values
 	}{
-		{"mainnet", "mainnet is not supported", form("mainnet", "default", "all")},
+		{"mainnet with test paths", "a mainnet service signs only for", form("mainnet", "default", "all")},
 		{"no sighash", "Tick at least one sighash type", form("regtest")},
 	} {
 		if w := e.request("POST", "/keys/BTC_ORD/connect", tc.form); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
@@ -307,7 +309,7 @@ func TestBitcoinPasteRefusalsArePlainText(t *testing.T) {
 		{"unknown field", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","pathz":["m/86'/1'/0'/0/*"]}}`, "unknown field &#34;pathz&#34;"},
 		{"wrong type", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":"m/86'/1'/0'/0/*"}}`, "&#34;bitcoin.paths&#34; has the wrong type"},
 		{"a bare name", `"btc-ord"`, "Paste one service&#39;s settings as JSON"},
-		{"mainnet", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","paths":["m/86'/0'/0'/0/*"]}}`, "mainnet is not supported"},
+		{"mainnet for a tprv", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"mainnet","paths":["m/86'/0'/0'/0/*"]}}`, "the key is for another network than the service"},
 		{"WIF rules for a tprv", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","script":"p2tr"}}`, "does not fit the service"},
 		// Review of #204: a key pasted into the wrong field is not shown back.
 		{"key in paths", `{"service":"btc-ord","auth":"bitcoin-psbt-sign","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*","` + bitcointest.Master + `"]}}`, "path 2: path must start with m"},
@@ -463,7 +465,8 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 		name, want string
 		form       url.Values
 	}{
-		{"mainnet", "mainnet is not supported", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"moved to mainnet", "cannot move between mainnet and the test networks", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"key typed as the network", "network must be", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {bitcointest.Master}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
 		{"becomes a proxy", "stays one", url.Values{"auth": {"bearer"}, "base": {"https://api.example.com"}}},
 		{"pasted for another key", "another key", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}},
 		{"pasted without rules", "bitcoin", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign"}`}}},

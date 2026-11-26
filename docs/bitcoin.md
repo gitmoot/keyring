@@ -1,13 +1,13 @@
-# Bitcoin PSBT signing (test networks)
+# Bitcoin PSBT signing
 
 A sign-only service with `"auth": "bitcoin-psbt-sign"` holds an imported
 Bitcoin key and signs the inputs of a PSBT that belong to it. The key never
 leaves keyring: an agent sends a PSBT and gets it back signed; it never sees
 the key, and neither does anyone opening the dashboard.
 
-Phase 1 signs on **regtest, testnet and signet only**. A service with
-`"network": "mainnet"` is refused when the config is loaded. Mainnet is phase
-2: it will require the per-grant limits below.
+Phase 1 signs on **regtest, testnet and signet**; phase 2 adds **mainnet**,
+with required limits, a fee cap and a notification for every signature (see
+[Mainnet](#mainnet)).
 
 Keyring signs; it does not finalise, broadcast, pick coins or build
 transactions. The caller (for example an inscription tool) does that.
@@ -112,7 +112,7 @@ each agent's grant (section 3).
 }
 ```
 
-- `network`: `regtest`, `testnet` or `signet` (`mainnet` is refused in phase 1).
+- `network`: `mainnet`, `regtest`, `testnet` or `signet`.
 - `paths` (tprv keys): the derivation path templates keyring signs for.
   Hardened steps take `'` or `h`. A trailing `/*` means any non-hardened index
   (0 … 2^31-1). The purpose must be `86'` (taproot key path, BIP86: the BIP341
@@ -160,8 +160,8 @@ Grant the role the service like any other. Two optional limits sit next to
   missing a limit cannot be kept: a grant with a per-day limit is then refused
   with 503, and a corrupt or unsafe file is left alone and refused the same way.
 
-Both limits are optional on test networks and will be required on mainnet in
-phase 2. The dashboard grant form shows them for bitcoin services.
+Both limits are optional on test networks and required on mainnet (see
+[Mainnet](#mainnet)). The dashboard grant form shows them for bitcoin services.
 
 ## API
 
@@ -184,9 +184,14 @@ no-store`):
   "txid": "<id of the unsigned transaction>",
   "signed": [0, 2],
   "external_sats": 65000,
-  "fee_sats": 5000
+  "fee_sats": 5000,
+  "vbytes": 154
 }
 ```
+
+`vbytes` is a size the finalised transaction is never below (see
+[Mainnet](#mainnet)), so `fee_sats / vbytes` is never below its real fee
+rate.
 
 Taproot inputs get the key-path signature (`tap_key_sig`), P2WPKH inputs a
 partial signature; nothing is finalised. Body up to 4 MiB.
@@ -249,12 +254,69 @@ the service (wrong network, a WIF where paths are set) is 503
 ## Audit and dashboard
 
 Each signature writes one audit line with the role, service and
-`"bitcoin": {"network", "txid", "inputs", "external_sats", "fee_sats"}` —
+`"bitcoin": {"network", "txid", "inputs", "external_sats", "fee_sats", "vbytes"}` —
 never the PSBT or the key. The service page shows the watch-only side
 (fingerprint, output descriptors with the account xpubs, first addresses) and
 a table of the recent signatures read from the audit log.
 
-## Phase 2
+## Mainnet
 
-Mainnet: config validation will accept `"network": "mainnet"` only with both
-per-grant limits set.
+Phase 2 (owner rules, 2026-11-26, #187). Real bitcoin, so on top of every
+rule above:
+
+**Setup.**
+
+1. Import a key of its own: `keyring bitcoin-import --config rules.json
+   --store keys.json --network mainnet NAME` (an `xprv` or a mainnet WIF). A
+   key that also backs a test-network service (the same seed, or the same
+   secret as a test WIF) is refused: the dashboard will not create the
+   service, the service page warns, and signing answers 503.
+2. Set `notify_command` in `rules.json` (see Notifications): a mainnet
+   service without it is refused at load, `check` and `SIGHUP`, and signing
+   answers 503 `no owner notification configured`. Instance mode has no
+   trusted channel for it, so it refuses mainnet services outright.
+3. Create the service with `"network": "mainnet"`. Its `paths` may only be
+   `m/86'/0'/0'/0/*`, `m/86'/0'/0'/1/*`, `m/84'/0'/0'/0/*`,
+   `m/84'/0'/0'/1/*`, and its `sighash` only `default` and `all` (none,
+   single and anyonecanpay leave inputs or outputs uncommitted, so a
+   signature could outlive the PSBT whose sats were checked); the signer
+   refuses the others on mainnet whatever the list says. A service never
+   moves between mainnet and the test networks (the dashboard refuses the
+   edit), so grants never carry across; make a new service instead.
+4. Grant one role at a time, with both limits and the typed confirmation.
+
+**Ceilings and required limits.** Every grant on a mainnet service sets both
+`bitcoin_max_sats_per_tx` (1 … 200,000) and `bitcoin_max_sats_per_day`
+(1 … 1,000,000), the per-PSBT one at most the daily one. A config without
+them is refused at load, `check` and `SIGHUP`. Project grants have no limits,
+so they never reach a mainnet service: only the role's own grant does, and
+switching it off revokes that service alone.
+
+**Typed confirmation.** On the dashboard, creating a mainnet grant, renewing
+one that has ended or raising either sats limit, and approving a request for
+a mainnet service (which asks for both limits), take the service name and
+the daily limit typed again exactly; otherwise nothing is saved.
+
+**Fee cap.** A mainnet PSBT whose fee is above 50,000 sats or whose fee rate
+is above 200 sat/vB is refused. The rate is the fee over `vbytes`, a size the
+finalised transaction is never below, so the computed rate is never below
+the real one: the non-witness part of the transaction exactly, the inputs
+keyring signs at their smallest witness (a 64-byte taproot signature, 65
+with sighash `all`; a P2WPKH one with the shortest DER signature and the
+33-byte key), and every other input with an empty witness and script sig,
+even when the PSBT carries it finalised. Keyring's signature does not commit
+to another input's witness, so that witness could be stripped or replaced
+after signing; padding it never lowers the rate keyring computes.
+
+The check is conservative: the real rate is at most the one checked, and
+lower by a lot when other inputs carry large witnesses (an inscription
+reveal). Such a PSBT may need a lower fee rate on the inputs keyring signs,
+or the keyring inputs signed in a transaction of their own. Inputs keyring
+does not sign may be of any kind.
+
+**Notifications.** Every mainnet signature runs `notify_command` (in
+`rules.json`) with one line as its last argument, for example
+`keyring: mainnet signature by phobos on btc-main: txid …, 65000 sats
+external, fee 5000 sats, 32.5 sat/vB`. A refusal sends nothing. See
+[configuration](configuration.md#notify_command). It starts once the
+signature and its day total are kept, before the reply is written.

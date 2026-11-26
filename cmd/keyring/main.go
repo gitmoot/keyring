@@ -53,8 +53,8 @@ const usage = `Usage:
   keyring list --store FILE                  print key names (never values)
   keyring minisign-keygen --store FILE NAME  make a new Ed25519 signing key in the store (never shown) and
                                              print its minisign public key
-  keyring bitcoin-import --config FILE --store FILE --network regtest|testnet|signet NAME
-                                             import a Bitcoin tprv or WIF key from stdin (never shown) and print
+  keyring bitcoin-import --config FILE --store FILE --network mainnet|regtest|testnet|signet NAME
+                                             import a Bitcoin tprv/xprv or WIF key from stdin (never shown) and print
                                              its fingerprint and first receive addresses
   keyring new-token                          make a role token and its hash for the rules file
   keyring request --upstream URL --role NAME --service S [--service S ...] [--project P ...] [--note TEXT] [--new TOKENS_DIR]
@@ -108,7 +108,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
 	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
 	statePath := fs.String("state", "", "instance: keep the sealed state in this file (default: memory only)")
-	network := fs.String("network", "", "bitcoin-import: regtest, testnet or signet")
+	network := fs.String("network", "", "bitcoin-import: mainnet, regtest, testnet or signet")
 	auditPath := fs.String("audit", "", "instance: audit log file (default: stdout)")
 	containerMode := fs.Bool("container", false, "instance: run in a container reached only through its supervisor (wildcard listen, no source check)")
 	if err := fs.Parse(rest); err != nil {

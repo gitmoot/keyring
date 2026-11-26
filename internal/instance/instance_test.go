@@ -424,6 +424,10 @@ func TestRefusedChangesLeaveTheStateAlone(t *testing.T) {
 			t.Errorf("%s %s accepted: %v", c.method, c.path, out)
 		}
 	}
+	// No owner notification channel in an instance, so no mainnet (#187).
+	if code, out := x.call("PUT", "/services/btc-main", map[string]any{"key": "K", "auth": "bitcoin-psbt-sign", "bitcoin": map[string]any{"network": "mainnet", "paths": []string{"m/86'/0'/0'/0/*"}}}); code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "mainnet Bitcoin signing is not available in instance mode") {
+		t.Fatalf("mainnet service in an instance: %v", out)
+	}
 	if v := x.must("GET", "/state", nil)["version"]; v != version {
 		t.Fatalf("version moved from %v to %v", version, v)
 	}

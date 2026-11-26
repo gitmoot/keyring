@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -46,14 +47,30 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 	}
 	b.Mu.Lock()
 	defer b.Mu.Unlock()
-	req, ok, err := b.Requests.Take(id)
+	// The request stays pending until it is answered: a refused approval
+	// (a mistyped mainnet confirmation, a changed access list) leaves it
+	// where it was, and only a decline or a saved approval takes it.
+	pending, err := b.Requests.Pending()
 	if err != nil {
 		b.fail(w, sid, err)
 		return
 	}
-	if !ok {
+	i := slices.IndexFunc(pending, func(p requests.Request) bool { return p.ID == id })
+	if i < 0 {
 		http.Redirect(w, r, "/access?error=gone", http.StatusSeeOther)
 		return
+	}
+	req := pending[i]
+	take := func() bool {
+		_, ok, err := b.Requests.Take(id)
+		if err != nil {
+			b.fail(w, sid, err)
+			return false
+		}
+		if !ok {
+			http.Redirect(w, r, "/access?error=gone", http.StatusSeeOther)
+		}
+		return ok
 	}
 	fields := map[string]any{"request": req.ID, "role": req.Role, "from": req.From}
 	if len(req.Services) > 0 {
@@ -63,9 +80,15 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		fields["projects"] = req.Projects
 	}
 	if !approve {
+		if !take() {
+			return
+		}
 		b.Admin.Audit("request_declined", sid, fields)
 		http.Redirect(w, r, "/access?done=declined", http.StatusSeeOther)
 		return
+	}
+	refuse := func(msg string) {
+		b.render(w, http.StatusConflict, "error", sid, map[string]any{"Error": "Cannot approve: " + msg})
 	}
 	next, err := policy.LoadAccess(b.rules().AccessFile)
 	if err == nil {
@@ -73,8 +96,7 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		err = requests.Check(req, next)
 	}
 	if err != nil {
-		_ = b.Requests.Put(req)
-		b.render(w, http.StatusConflict, "error", sid, map[string]any{"Error": "Cannot approve: " + err.Error()})
+		refuse(err.Error())
 		return
 	}
 	role, exists := next.Roles[req.Role]
@@ -84,8 +106,20 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 	if role.Access == nil {
 		role.Access = map[string]policy.Access{}
 	}
+	// A mainnet Bitcoin service gets the sats limits posted for it, which
+	// its typed name and daily limit confirm (owner, 2026-11-26).
+	limits := map[string][2]int64{}
 	for _, svc := range req.Services {
-		role.Access[svc] = fullAccess()
+		acc := fullAccess()
+		if next.Services[svc].BitcoinMainnet() {
+			var msg string
+			if acc, msg = mainnetGrantFromForm(r, svc); msg != "" {
+				refuse(msg)
+				return
+			}
+			limits[svc] = [2]int64{acc.BitcoinMaxSatsPerTx, acc.BitcoinMaxSatsPerDay}
+		}
+		role.Access[svc] = acc
 	}
 	for _, p := range req.Projects {
 		if role.Projects == nil {
@@ -94,12 +128,23 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		role.Projects[p] = fullAccess()
 	}
 	next.Roles[req.Role] = role
+	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+		refuse(err.Error())
+		return
+	}
+	// Saved first, so a failed save leaves the request pending as it was.
 	if err := b.saveAndApply(next); err != nil {
-		_ = b.Requests.Put(req)
 		b.fail(w, sid, err)
 		return
 	}
+	if len(limits) > 0 {
+		fields["bitcoin_limits"] = limits
+	}
 	fields["new_agent"] = !exists
 	b.Admin.Audit("request_approved", sid, fields)
+	if _, _, err := b.Requests.Take(id); err != nil {
+		b.fail(w, sid, fmt.Errorf("the access was granted, but the request could not be removed from the queue: %w", err))
+		return
+	}
 	http.Redirect(w, r, "/access?done=approved", http.StatusSeeOther)
 }

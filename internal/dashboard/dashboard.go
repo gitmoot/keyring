@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gitmoot/keyring/internal/admin"
+	"github.com/gitmoot/keyring/internal/bitcoin"
 	"github.com/gitmoot/keyring/internal/fileutil"
 	"github.com/gitmoot/keyring/internal/policy"
 	"github.com/gitmoot/keyring/internal/requests"
@@ -1717,7 +1718,7 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	var btc *bitcoinForm
 	btcPart := ""
 	if sole, ok := row.soleValue(); ok && info != nil {
-		btc = bitcoinFormOf(f.Bitcoin, info.WIF)
+		btc = bitcoinFormOf(f.Bitcoin, info.WIF, info.Networks == bitcoin.Mainnet)
 		_, btcPart = store.SplitPart(sole)
 	}
 	b.render(w, status, "key", sid, map[string]any{

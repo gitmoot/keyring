@@ -92,6 +92,13 @@ func (s *State) config(auditName string, container bool) (*policy.Config, error)
 	if err := s.Google.Validate(); err != nil {
 		return nil, err
 	}
+	// Every mainnet signature must notify the owner, and an instance has
+	// no trusted channel to do it (#187).
+	for name, svc := range s.Services {
+		if svc.BitcoinMainnet() {
+			return nil, fmt.Errorf("service %s: mainnet Bitcoin signing is not available in instance mode (no owner notification channel)", name)
+		}
+	}
 	// Round-trip through JSON so the config never shares maps or pointers
 	// with the state, and every parsed field is rebuilt by Validate.
 	raw, err := json.Marshal(struct {

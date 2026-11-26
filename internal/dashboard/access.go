@@ -261,9 +261,18 @@ func (b *Backend) accessPage(w http.ResponseWriter, r *http.Request, sid string)
 	sortAgents(rows, by, desc)
 	cols := columns("/access", query, by, desc, [][3]string{{"name", "Agent", ""}, {"", "Can use", ""}, {"apis", "APIs", "num"},
 		{"today", "Calls today", "num"}, {"last", "Last call", ""}, {"", "Ends", ""}, {"", "", ""}})
+	// Approving a request for a mainnet Bitcoin service asks for its sats
+	// limits and the typed confirmation.
+	mainnet := map[string]bool{}
+	for name, svc := range cfg.Services {
+		if svc.BitcoinMainnet() {
+			mainnet[name] = true
+		}
+	}
 	b.render(w, http.StatusOK, "access", sid, map[string]any{
 		"Services": services, "Rows": rows, "Notice": notice, "Requests": pending, "Error": errMsg, "Columns": cols,
-		"Project": project, "ProjectFilters": projectChips,
+		"Project": project, "ProjectFilters": projectChips, "Mainnet": mainnet,
+		"MainnetMaxTx": policy.BitcoinMainnetMaxSatsPerTx, "MainnetMaxDay": policy.BitcoinMainnetMaxSatsPerDay,
 	})
 }
 
@@ -402,7 +411,8 @@ func (b *Backend) renderCell(w http.ResponseWriter, sid string, status int, f ce
 		}
 	}
 	b.render(w, status, "cell", sid, map[string]any{"Form": f, "Error": msg, "AllMethods": fullMethods, "Via": via,
-		"Bitcoin": cfg.Services[f.Service].Auth == policy.AuthBitcoinPSBTSign})
+		"Bitcoin": cfg.Services[f.Service].Auth == policy.AuthBitcoinPSBTSign, "Mainnet": cfg.Services[f.Service].BitcoinMainnet(),
+		"MainnetMaxTx": policy.BitcoinMainnetMaxSatsPerTx, "MainnetMaxDay": policy.BitcoinMainnetMaxSatsPerDay})
 }
 
 func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
@@ -439,6 +449,7 @@ func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
 	if rl.Access == nil {
 		rl.Access = map[string]policy.Access{}
 	}
+	before, had := rl.Access[f.Service]
 	if f.On {
 		rl.Access[f.Service] = acc
 	} else {
@@ -448,6 +459,15 @@ func (b *Backend) saveCell(w http.ResponseWriter, r *http.Request, sid string) {
 	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
 		b.renderCell(w, sid, http.StatusBadRequest, f, err.Error())
 		return
+	}
+	// Creating or raising a mainnet grant also takes the service name and
+	// the daily limit typed out (owner, 2026-11-26); lowering or removing
+	// one takes the password only.
+	if f.On && next.Services[f.Service].BitcoinMainnet() && raisesMainnetGrant(before, had, acc, b.Now()) {
+		if msg := mainnetConfirmProblem(f.Service, acc.BitcoinMaxSatsPerDay, r.PostFormValue("confirm_service"), r.PostFormValue("confirm_daily")); msg != "" {
+			b.renderCell(w, sid, http.StatusBadRequest, f, msg)
+			return
+		}
 	}
 	if err := b.saveAndApply(next); err != nil {
 		b.fail(w, sid, err)
@@ -501,7 +521,8 @@ func (b *Backend) saveAndApplyKeys(next policy.AccessList, keys map[string]strin
 // otherwise it returns the message to show and saves nothing. Refused are a
 // service other than a Bitcoin signing service that would use a Bitcoin key,
 // and a bitcoin-psbt-sign service whose key does not fit it (another
-// network, a WIF key given paths): validation does not read the store, so
+// network, a WIF key given paths) or that another service signs with on the
+// other side of mainnet: validation does not read the store, so
 // that would otherwise show only on the first PSBT. Callers hold b.Mu and
 // have validated next.
 func (b *Backend) saveChecked(next policy.AccessList, name string) (string, error) {
@@ -510,7 +531,7 @@ func (b *Backend) saveChecked(next policy.AccessList, name string) (string, erro
 		return "", err
 	}
 	if svc := next.Services[name]; svc.Auth == policy.AuthBitcoinPSBTSign {
-		if msg := bitcoinKeyProblem(svc, keys); msg != "" {
+		if msg := bitcoinKeyProblem(next, name, keys); msg != "" {
 			return msg, nil
 		}
 	}

@@ -1,14 +1,16 @@
 // Package bitcoin signs Bitcoin PSBTs with an imported key that never leaves
-// the keyring (gitmoot/keyring#187). Phase 1 covers the test networks only:
-// regtest, testnet and signet. A service names the paths the key may sign
-// for: BIP86 taproot key-path spends (purpose 86) and BIP84 P2WPKH spends
-// (purpose 84), or for a single WIF key the one script kind.
+// the keyring (gitmoot/keyring#187): on the test networks (regtest, testnet,
+// signet) since phase 1, on mainnet since phase 2. A service names the paths
+// the key may sign for: BIP86 taproot key-path spends (purpose 86) and BIP84
+// P2WPKH spends (purpose 84), or for a single WIF key the one script kind.
+// A mainnet service may name only MainnetPaths.
 //
 // Nothing here formats a key, a PSBT or any part of either into an error:
 // every refusal is a fixed reason with at most input or output indices.
 package bitcoin
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -27,7 +29,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 )
 
-// Networks a service may name. Mainnet is phase 2 (owner, 2026-11-25).
+// Networks a service may name. Mainnet is phase 2 (owner, 2026-11-26).
 const (
 	Regtest = "regtest"
 	Testnet = "testnet"
@@ -87,14 +89,31 @@ const (
 	hardened     = hdkeychain.HardenedKeyStart
 )
 
-// ErrMainnet is the phase 1 refusal of a mainnet service.
-var ErrMainnet = errors.New("network mainnet is not supported yet: phase 1 signs on regtest, testnet and signet only")
+// Presets are the path templates of account 0 a form offers on one side of
+// mainnet: BIP86 taproot and BIP84 native SegWit, receive and change.
+type Presets struct{ Taproot, SegWit []string }
+
+var (
+	// TestPresets use coin type 1, the test networks'.
+	TestPresets = Presets{
+		Taproot: []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"},
+		SegWit:  []string{"m/84'/1'/0'/0/*", "m/84'/1'/0'/1/*"},
+	}
+	// MainnetPresets use coin type 0.
+	MainnetPresets = Presets{
+		Taproot: []string{"m/86'/0'/0'/0/*", "m/86'/0'/0'/1/*"},
+		SegWit:  []string{"m/84'/0'/0'/0/*", "m/84'/0'/0'/1/*"},
+	}
+	// MainnetPaths are the only paths a mainnet service may list (owner,
+	// 2026-11-26): the mainnet presets.
+	MainnetPaths = slices.Concat(MainnetPresets.Taproot, MainnetPresets.SegWit)
+)
 
 // Key errors. They never include the value.
 var (
 	ErrKeyFormat  = errors.New("the value is not a BIP32 extended private key (tprv/xprv) or a WIF private key")
 	ErrKeyNetwork = errors.New("the key is for another network than the service's")
-	ErrKeyDepth   = errors.New("the extended key is not a master key (depth 0); import the master tprv")
+	ErrKeyDepth   = errors.New("the extended key is not a master key (depth 0); import the master tprv or xprv")
 	ErrKeyKind    = errors.New("the key does not fit the service: an extended key needs paths, a WIF key needs script and no paths")
 	ErrKeyUncompr = errors.New("the WIF key is for an uncompressed public key; segwit needs a compressed one")
 )
@@ -108,9 +127,9 @@ func params(network string) (*chaincfg.Params, error) {
 	case Signet:
 		return &chaincfg.SigNetParams, nil
 	case Mainnet:
-		return nil, ErrMainnet
+		return &chaincfg.MainNetParams, nil
 	}
-	return nil, errors.New("network must be regtest, testnet or signet")
+	return nil, errors.New("network must be mainnet, regtest, testnet or signet")
 }
 
 // Path is one allowed derivation path: fixed components and, with a
@@ -254,6 +273,9 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 		if err != nil {
 			return nil, fmt.Errorf("path %d: %w", i+1, err)
 		}
+		if network == Mainnet && !slices.Contains(MainnetPaths, path.String()) {
+			return nil, fmt.Errorf("path %d: a mainnet service signs only for %s", i+1, strings.Join(MainnetPaths, ", "))
+		}
 		lookup := formatPath(path.fixed)
 		if other, ok := seen[lookup]; ok {
 			return nil, fmt.Errorf("paths %d and %d are both looked up as %s: list one", other, i+1, lookup)
@@ -268,6 +290,13 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 		t, ok := sighashType(name)
 		if !ok {
 			return nil, fmt.Errorf("sighash %d: want default, all, none, single, or one of those three with |anyonecanpay", i+1)
+		}
+		// none, single and anyonecanpay leave outputs or inputs
+		// uncommitted, so the signature could outlive the PSBT whose
+		// external sats and fee were checked: mainnet signs only the two
+		// that commit to the whole transaction.
+		if network == Mainnet && t != txscript.SigHashDefault && t != txscript.SigHashAll {
+			return nil, fmt.Errorf("sighash %d: a mainnet service signs only default and all", i+1)
 		}
 		if r.sighash[t] {
 			return nil, fmt.Errorf("sighash %d is listed twice", i+1)
@@ -464,6 +493,29 @@ func IsKey(value string) bool {
 	return ext != nil || wif != nil
 }
 
+// SameKey reports whether a and b are both bitcoin private keys holding the
+// same secret, whatever network each is written for: an xprv and the tprv
+// of the same seed, or a mainnet and a test-network WIF of one secret. It
+// keeps one key from signing on mainnet and on a test network.
+func SameKey(a, b string) bool {
+	secret := func(value string) []byte {
+		ext, wif := recognise(value)
+		switch {
+		case ext != nil:
+			priv, err := ext.ECPrivKey()
+			if err != nil {
+				return nil
+			}
+			return priv.Serialize()
+		case wif != nil:
+			return wif.PrivKey.Serialize()
+		}
+		return nil
+	}
+	x, y := secret(a), secret(b)
+	return x != nil && y != nil && subtle.ConstantTimeCompare(x, y) == 1
+}
+
 // Inspect reports whether value is a bitcoin private key (any network), as
 // IsKey does, and what may be shown about it. The dashboard never shows such
 // a value.
@@ -501,8 +553,9 @@ type Description struct {
 }
 
 // Describe checks value as a key for network and lists its first receive
-// addresses: m/86'/1'/0'/0/0 and m/84'/1'/0'/0/0 for an extended key, the
-// key's own taproot and P2WPKH addresses for a WIF key.
+// addresses: m/86'/C'/0'/0/0 and m/84'/C'/0'/0/0 for an extended key (coin
+// type C 0 on mainnet, 1 on the test networks), the key's own taproot and
+// P2WPKH addresses for a WIF key.
 func Describe(value, network string) (Description, error) {
 	p, err := params(network)
 	if err != nil {
@@ -517,7 +570,11 @@ func Describe(value, network string) (Description, error) {
 		kind string
 		path []uint32
 	}
-	spots := []spot{{ScriptP2TR, []uint32{86 + hardened, 1 + hardened, hardened, 0, 0}}, {ScriptP2WPKH, []uint32{84 + hardened, 1 + hardened, hardened, 0, 0}}}
+	coin := uint32(1)
+	if network == Mainnet {
+		coin = 0
+	}
+	spots := []spot{{ScriptP2TR, []uint32{86 + hardened, coin + hardened, hardened, 0, 0}}, {ScriptP2WPKH, []uint32{84 + hardened, coin + hardened, hardened, 0, 0}}}
 	if k.single != nil {
 		d.Kind = "WIF key"
 		spots = []spot{{ScriptP2TR, nil}, {ScriptP2WPKH, nil}}

@@ -46,3 +46,15 @@ A rules file from before the split still holds `services` and `roles`. The servi
 `SIGHUP` re-reads the rules file, the access file and the keys. A change to `allow_sources` applies at once; a changed `listen`, `audit_log` or `access_file`, or an invalid file, is refused, and the previous settings stay in use. Daily counts carry over.
 
 A stored Bitcoin private key (`tprv`/`xprv`/WIF) can only be used by a `bitcoin-psbt-sign` service: `check`, the start and `SIGHUP` refuse settings in which another service would use one, and `keyring set` stores one only with `--config rules.json`, to check that first. See [bitcoin.md](bitcoin.md).
+
+### notify_command
+
+`notify_command` in `rules.json` is the owner's notification hook: it runs once for every **mainnet** Bitcoin signature (never for a refusal, never on a test network). It is an argv list, never a shell string: the first entry is the absolute path of a program, at most 32 entries, no NUL bytes; keyring appends one line as the last argument (`keyring: mainnet signature by <role> on <service>: txid …, N sats external, fee N sats, R sat/vB`). It runs in the background for at most 10 seconds; a failure or timeout is written to the audit log and never delays or fails the signature. A change applies on `SIGHUP`.
+
+The service runs as `_keyring` without a desktop session, so desktop notifiers (for example `osascript`) are not expected to work. The owner picks the channel at setup; a network hook works from the service account, for example posting to a URL the owner controls:
+
+```json
+"notify_command": ["/usr/bin/curl", "-fsS", "-m", "8", "https://ntfy.example/your-topic", "-d"]
+```
+
+It is required for any mainnet service: `check`, the start and `SIGHUP` refuse a mainnet service without it, and signing answers 503 if it is somehow missing. Instance mode has no such setting and refuses mainnet services. See [bitcoin.md](bitcoin.md#mainnet).

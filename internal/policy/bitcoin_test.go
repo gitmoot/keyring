@@ -23,9 +23,9 @@ func TestValidateBitcoinService(t *testing.T) {
 		set  func(*Config)
 		want string
 	}{
-		"mainnet (phase 2)": {func(c *Config) { c.Services["btc-ord"].Bitcoin.Network = "mainnet" }, "mainnet is not supported yet"},
-		"unknown network":   {func(c *Config) { c.Services["btc-ord"].Bitcoin.Network = "testnet3" }, "network must be regtest, testnet or signet"},
-		"purpose 44":        {func(c *Config) { c.Services["btc-ord"].Bitcoin.Paths = []string{"m/44'/1'/0'/0/*"} }, "purpose must be 86' (taproot) or 84'"},
+		"mainnet with test paths": {func(c *Config) { c.Services["btc-ord"].Bitcoin.Network = "mainnet" }, "path 1: a mainnet service signs only for m/86'/0'/0'/0/*, m/86'/0'/0'/1/*, m/84'/0'/0'/0/*, m/84'/0'/0'/1/*"},
+		"unknown network":         {func(c *Config) { c.Services["btc-ord"].Bitcoin.Network = "testnet3" }, "network must be mainnet, regtest, testnet or signet"},
+		"purpose 44":              {func(c *Config) { c.Services["btc-ord"].Bitcoin.Paths = []string{"m/44'/1'/0'/0/*"} }, "purpose must be 86' (taproot) or 84'"},
 		"no bitcoin settings": {func(c *Config) {
 			s := c.Services["btc-ord"]
 			s.Bitcoin = nil
