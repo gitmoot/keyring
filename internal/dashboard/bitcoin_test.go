@@ -200,7 +200,7 @@ func TestBitcoinConnectFormMakesAWorkingService(t *testing.T) {
 	addBitcoinKey(e, "BTC_ORD", bitcointest.Master)
 	page := e.request("GET", "/keys/BTC_ORD", nil).Body.String()
 	for _, want := range []string{`name="auth" value="bitcoin-psbt-sign"`, `<option selected>regtest</option>`, "m/86&#39;/1&#39;/0&#39;/0/*\nm/86&#39;/1&#39;/0&#39;/1/*</textarea>",
-		`value="default" checked`, `value="all" checked`, `value="none">`, `value="single|anyonecanpay">`, "add <span class=\"mono\">m/84'/1'/0'/0/*</span>"} {
+		`value="default" checked`, `value="all" checked`, `value="none">`, `value="single|anyonecanpay">`, `add <span data-segwithint="test"><span class="mono">m/84&#39;/1&#39;/0&#39;/0/*</span>`, `<span data-segwithint="mainnet" hidden>`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the Connect form of a bitcoin key lacks %q", want)
 		}
@@ -465,7 +465,7 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 		name, want string
 		form       url.Values
 	}{
-		{"mainnet with test paths", "a mainnet service signs only for", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"network changed", "network cannot be changed: its grants were given for regtest. Make a new service for mainnet.", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
 		{"becomes a proxy", "stays one", url.Values{"auth": {"bearer"}, "base": {"https://api.example.com"}}},
 		{"pasted for another key", "another key", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}},
 		{"pasted without rules", "bitcoin", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign"}`}}},

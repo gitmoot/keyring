@@ -200,12 +200,14 @@ type Project struct {
 }
 
 // AccessFor is role's access to the named service: its own grant for the
-// service if it has one, otherwise its grant for the service's project.
+// service if it has one, otherwise its grant for the service's project. A
+// project grant has no sats limits, so it never reaches a mainnet Bitcoin
+// service: only the role's own grant does.
 func (a AccessList) AccessFor(role Role, name string) (Access, bool) {
 	if acc, ok := role.Access[name]; ok {
 		return acc, true
 	}
-	if svc, ok := a.Services[name]; ok && svc.Project != "" {
+	if svc, ok := a.Services[name]; ok && svc.Project != "" && !svc.BitcoinMainnet() {
 		acc, ok := role.Projects[svc.Project]
 		return acc, ok
 	}
@@ -428,7 +430,7 @@ const (
 	BitcoinMainnetMaxSatsPerDay = 1_000_000
 	BitcoinMainnetMaxFeeSats    = 50_000
 	// BitcoinMainnetMaxFeeRate is in sat/vB of the finalised transaction,
-	// its size estimated with the largest signatures (bitcoin.Plan.VBytes).
+	// over a size it is never below (bitcoin.Plan.VBytes).
 	BitcoinMainnetMaxFeeRate = 200
 )
 
@@ -457,12 +459,12 @@ func CheckBitcoinMainnetGrant(a Access) error {
 // The refusals of the mainnet fee cap, fixed texts.
 var (
 	BitcoinFeeOverCap     = fmt.Sprintf("fee cap: the fee is over %d sats (mainnet)", BitcoinMainnetMaxFeeSats)
-	BitcoinFeeRateOverCap = fmt.Sprintf("fee cap: the fee rate is over %d sat/vB (mainnet; size estimated for the finalised transaction)", BitcoinMainnetMaxFeeRate)
+	BitcoinFeeRateOverCap = fmt.Sprintf("fee cap: the fee rate is over %d sat/vB (mainnet; size counted at its smallest: the signed inputs' shortest signatures, other inputs without their witness)", BitcoinMainnetMaxFeeRate)
 )
 
-// BitcoinMainnetFeeRefusal is why a mainnet PSBT paying fee sats with an
-// estimated finalised size of vbytes is not signed, or "". An unknown size
-// (0) is refused.
+// BitcoinMainnetFeeRefusal is why a mainnet PSBT paying fee sats with a
+// finalised size never below vbytes is not signed, or "". A size of 0 is
+// refused.
 func BitcoinMainnetFeeRefusal(fee, vbytes int64) string {
 	switch {
 	case fee > BitcoinMainnetMaxFeeSats:
@@ -1222,6 +1224,19 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// Every mainnet signature notifies the owner (#187): a mainnet service
+	// exists only with a channel to do it.
+	if len(c.NotifyCommand) == 0 {
+		mainnet := ""
+		for name, svc := range c.Services {
+			if svc.BitcoinMainnet() && (mainnet == "" || name < mainnet) {
+				mainnet = name
+			}
+		}
+		if mainnet != "" {
+			return fmt.Errorf("service %s signs on mainnet, which needs notify_command in the rules file so every signature notifies the owner", mainnet)
+		}
+	}
 	seen := map[string]string{}
 	for name, role := range c.Roles {
 		if !roleName.MatchString(name) {
@@ -1268,18 +1283,6 @@ func (c *Config) Validate() error {
 			}
 			if access.BitcoinMaxSatsPerTx != 0 || access.BitcoinMaxSatsPerDay != 0 {
 				return fmt.Errorf("role %s, project %s: bitcoin limits apply only to a single bitcoin-psbt-sign service", name, project)
-			}
-			// A project grant has no sats limits, so it may not reach a
-			// mainnet service; the role's own grant for it, which applies
-			// instead (AccessFor), must exist.
-			mainnet := ""
-			for svcName, svc := range c.Services {
-				if _, own := role.Access[svcName]; !own && svc.Project == project && svc.BitcoinMainnet() && (mainnet == "" || svcName < mainnet) {
-					mainnet = svcName
-				}
-			}
-			if mainnet != "" {
-				return fmt.Errorf("role %s, project %s: service %s signs on mainnet, which needs a grant of its own with sats limits (a project grant has none)", name, project, mainnet)
 			}
 		}
 	}

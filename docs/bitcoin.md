@@ -189,9 +189,9 @@ no-store`):
 }
 ```
 
-`vbytes` is the estimated virtual size of the finalised transaction (see
-[Mainnet](#mainnet)); it is left out on a test network when an input's size
-cannot be known.
+`vbytes` is a size the finalised transaction is never below (see
+[Mainnet](#mainnet)), so `fee_sats / vbytes` is never below its real fee
+rate.
 
 Taproot inputs get the key-path signature (`tap_key_sig`), P2WPKH inputs a
 partial signature; nothing is finalised. Body up to 4 MiB.
@@ -271,18 +271,26 @@ rule above:
    key that also backs a test-network service (the same seed, or the same
    secret as a test WIF) is refused: the dashboard will not create the
    service, the service page warns, and signing answers 503.
-2. Set `notify_command` in `rules.json` (see Notifications) before granting.
+2. Set `notify_command` in `rules.json` (see Notifications): a mainnet
+   service without it is refused at load, `check` and `SIGHUP`, and signing
+   answers 503 `no owner notification configured`. Instance mode has no
+   trusted channel for it, so it refuses mainnet services outright.
 3. Create the service with `"network": "mainnet"`. Its `paths` may only be
    `m/86'/0'/0'/0/*`, `m/86'/0'/0'/1/*`, `m/84'/0'/0'/0/*`,
-   `m/84'/0'/0'/1/*`.
+   `m/84'/0'/0'/1/*`, and its `sighash` only `default` and `all` (none,
+   single and anyonecanpay leave inputs or outputs uncommitted, so a
+   signature could outlive the PSBT whose sats were checked); the signer
+   refuses the others on mainnet whatever the list says. A service's
+   network is fixed: the dashboard refuses to change it, so grants never
+   carry across networks; make a new service instead.
 4. Grant one role at a time, with both limits and the typed confirmation.
 
 **Ceilings and required limits.** Every grant on a mainnet service sets both
 `bitcoin_max_sats_per_tx` (1 … 200,000) and `bitcoin_max_sats_per_day`
 (1 … 1,000,000), the per-PSBT one at most the daily one. A config without
 them is refused at load, `check` and `SIGHUP`. Project grants have no limits,
-so they never reach a mainnet service: a role in a project with a mainnet
-service needs a grant of its own for it.
+so they never reach a mainnet service: only the role's own grant does, and
+switching it off revokes that service alone.
 
 **Typed confirmation.** On the dashboard, creating a mainnet grant, renewing
 one that has ended or raising either sats limit, and approving a request for
@@ -290,24 +298,25 @@ a mainnet service (which asks for both limits), take the service name and
 the daily limit typed again exactly; otherwise nothing is saved.
 
 **Fee cap.** A mainnet PSBT whose fee is above 50,000 sats or whose fee rate
-is above 200 sat/vB is refused. The rate is the fee over `vbytes`, the
-virtual size once every input is finalised, estimated at its largest: the
-inputs keyring signs and the other taproot key-path and P2WPKH inputs count
-their largest witness (65-byte taproot signature, or 72-byte DER signature
-and 33-byte key; a default-sighash taproot signature of this key its exact
-64 bytes), so the real rate can exceed 200 sat/vB by under one vbyte per
-P2WPKH input (a shorter DER signature).
+is above 200 sat/vB is refused. The rate is the fee over `vbytes`, a size the
+finalised transaction is never below, so the computed rate is never below
+the real one: the non-witness part of the transaction exactly, the inputs
+keyring signs at their smallest witness (a 64-byte taproot signature, 65
+with sighash `all`; a P2WPKH one with the shortest DER signature and the
+33-byte key), and every other input with an empty witness and script sig,
+even when the PSBT carries it finalised. Keyring's signature does not commit
+to another input's witness, so that witness could be stripped or replaced
+after signing; padding it never lowers the rate keyring computes.
 
-**Inputs this key does not sign** must be already finalised (counted at
-their exact size, which keeps a commit/reveal flow possible), or an
-unfinalised taproot key-path input (no script tree, leaf or merkle root) or
-P2WPKH input (no redeem or witness script). Any other input is refused on
-mainnet, since its size and so the fee rate cannot be known.
+The check is conservative: the real rate is at most the one checked, and
+lower by a lot when other inputs carry large witnesses (an inscription
+reveal). Such a PSBT may need a lower fee rate on the inputs keyring signs,
+or the keyring inputs signed in a transaction of their own. Inputs keyring
+does not sign may be of any kind.
 
 **Notifications.** Every mainnet signature runs `notify_command` (in
 `rules.json`) with one line as its last argument, for example
 `keyring: mainnet signature by phobos on btc-main: txid …, 65000 sats
 external, fee 5000 sats, 32.5 sat/vB`. A refusal sends nothing. See
-[configuration](configuration.md#notify_command). The service page says when
-`notify_command` is unset.
-
+[configuration](configuration.md#notify_command). It starts once the
+signature and its day total are kept, before the reply is written.

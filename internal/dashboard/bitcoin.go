@@ -54,9 +54,9 @@ const (
 // bitcoinPage is what the service page shows for a bitcoin-psbt-sign
 // service: its rules, the watch-only side of its paths and the recent
 // signatures from the audit log; for a mainnet service the limits it
-// enforces, and whether notify_command is set.
+// enforces.
 func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
-	data := map[string]any{"Bitcoin": svc.Bitcoin, "Mainnet": svc.BitcoinMainnet(), "NotifyUnset": len(b.rules().NotifyCommand) == 0,
+	data := map[string]any{"Bitcoin": svc.Bitcoin, "Mainnet": svc.BitcoinMainnet(),
 		"MainnetMaxTx": policy.BitcoinMainnetMaxSatsPerTx, "MainnetMaxDay": policy.BitcoinMainnetMaxSatsPerDay,
 		"MainnetMaxFee": policy.BitcoinMainnetMaxFeeSats, "MainnetMaxFeeRate": policy.BitcoinMainnetMaxFeeRate}
 	keys, err := store.Load(b.StorePath)
@@ -92,13 +92,7 @@ func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 // service starts on its key's side of mainnet, with BIP86 receive and change
 // paths there; the page's script swaps those paths when the network is
 // changed between the test networks and mainnet.
-var (
-	bitcoinNetworks = []string{bitcoin.Mainnet, bitcoin.Regtest, bitcoin.Testnet, bitcoin.Signet}
-	// defaultBitcoinPaths: BIP86 receive and change on test networks.
-	defaultBitcoinPaths = []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"}
-	// mainnetBitcoinPaths: BIP86 receive and change on mainnet.
-	mainnetBitcoinPaths = bitcoin.MainnetPaths[:2]
-)
+var bitcoinNetworks = []string{bitcoin.Mainnet, bitcoin.Regtest, bitcoin.Testnet, bitcoin.Signet}
 
 // bitcoinChoice is one option, select entry or checkbox of the form.
 type bitcoinChoice struct {
@@ -107,14 +101,15 @@ type bitcoinChoice struct {
 }
 
 // bitcoinForm is what the forms show: paths for an extended key, the script
-// for a WIF key. Mainnet is the network shown; TestPaths and MainnetPaths
-// are the presets the script swaps; the Max fields are the mainnet ceilings
-// and fee cap the mainnet notice names.
+// for a WIF key. Mainnet is the network shown; Test and Main are each
+// side's presets (the script swaps the taproot ones into Paths, and shows
+// the side's SegWit hint); the Max fields are the mainnet ceilings and fee
+// cap the mainnet notice names.
 type bitcoinForm struct {
 	WIF                               bool
 	Mainnet                           bool
 	Paths                             string
-	TestPaths, MainnetPaths           string
+	Test, Main                        bitcoinPresets
 	Networks, Scripts, Sighash        []bitcoinChoice
 	MaxTx, MaxDay, MaxFee, MaxFeeRate int
 }
@@ -125,9 +120,9 @@ type bitcoinForm struct {
 // form may hold a key typed into the wrong field.
 func bitcoinFormOf(s *policy.Bitcoin, wif, mainnetKey bool) *bitcoinForm {
 	if s == nil {
-		s = &policy.Bitcoin{Network: bitcoin.Regtest, Paths: defaultBitcoinPaths, Script: bitcoin.ScriptP2TR}
+		s = &policy.Bitcoin{Network: bitcoin.Regtest, Paths: bitcoin.TestPresets.Taproot, Script: bitcoin.ScriptP2TR}
 		if mainnetKey {
-			s.Network, s.Paths = bitcoin.Mainnet, mainnetBitcoinPaths
+			s.Network, s.Paths = bitcoin.Mainnet, bitcoin.MainnetPresets.Taproot
 		}
 	}
 	sighash := s.Sighash
@@ -140,8 +135,9 @@ func bitcoinFormOf(s *policy.Bitcoin, wif, mainnetKey bool) *bitcoinForm {
 			paths = append(paths, p)
 		}
 	}
-	f := &bitcoinForm{WIF: wif, Mainnet: s.Network == bitcoin.Mainnet, Paths: strings.Join(paths, "\n"),
-		TestPaths: strings.Join(defaultBitcoinPaths, "\n"), MainnetPaths: strings.Join(mainnetBitcoinPaths, "\n"),
+	mainnet := s.Network == bitcoin.Mainnet
+	f := &bitcoinForm{WIF: wif, Mainnet: mainnet, Paths: strings.Join(paths, "\n"),
+		Test: presetsOf("test", bitcoin.TestPresets, mainnet), Main: presetsOf("mainnet", bitcoin.MainnetPresets, !mainnet),
 		MaxTx: policy.BitcoinMainnetMaxSatsPerTx, MaxDay: policy.BitcoinMainnetMaxSatsPerDay,
 		MaxFee: policy.BitcoinMainnetMaxFeeSats, MaxFeeRate: policy.BitcoinMainnetMaxFeeRate}
 	for _, n := range bitcoinNetworks {
@@ -154,6 +150,20 @@ func bitcoinFormOf(s *policy.Bitcoin, wif, mainnetKey bool) *bitcoinForm {
 		f.Sighash = append(f.Sighash, bitcoinChoice{h, slices.Contains(sighash, h)})
 	}
 	return f
+}
+
+// bitcoinPresets is one side's bitcoin.Presets as the form writes it: the
+// taproot paths one per line, the SegWit ones for the hint, which shows
+// only for the side of the network shown (Hidden otherwise).
+type bitcoinPresets struct {
+	Side    string
+	Hidden  bool
+	Taproot string
+	SegWit  []string
+}
+
+func presetsOf(side string, p bitcoin.Presets, hidden bool) bitcoinPresets {
+	return bitcoinPresets{Side: side, Hidden: hidden, Taproot: strings.Join(p.Taproot, "\n"), SegWit: p.SegWit}
 }
 
 // bitcoinFromForm reads the posted Bitcoin fields, with the message to show

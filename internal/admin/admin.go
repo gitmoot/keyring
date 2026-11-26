@@ -439,6 +439,7 @@ document.addEventListener("change", function (e) {
   if (t.matches("select[data-btcnetwork]")) {
     var main = t.value === "mainnet", paths = t.form.querySelector("textarea[name=paths]");
     t.form.querySelectorAll("[data-mainnetnotice]").forEach(function (n) { n.hidden = !main; });
+    t.form.querySelectorAll("[data-segwithint]").forEach(function (n) { n.hidden = (n.dataset.segwithint === "mainnet") !== main; });
     if (paths) {
       var now = paths.value.replace(/\r\n/g, "\n").trim();
       if (main && now === t.dataset.testpaths) paths.value = t.dataset.mainnetpaths;

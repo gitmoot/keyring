@@ -23,15 +23,16 @@ var pages = template.Must(template.New("pages").Parse(`
 
 {{define "password"}}<label class="pw">Dashboard password<input type="password" name="password" autocomplete="current-password" required placeholder="asked on every change"></label>{{end}}
 
-{{define "bitcoinfields"}}<label>Network<select name="network" data-btcnetwork data-testpaths="{{.TestPaths}}" data-mainnetpaths="{{.MainnetPaths}}">{{range .Networks}}<option{{if .On}} selected{{end}}>{{.Value}}</option>{{end}}</select></label>
-<p class="warnbox" data-mainnetnotice{{if not .Mainnet}} hidden{{end}}>Mainnet signs real bitcoin. It needs an xprv or mainnet WIF key of its own (not a test network service's), and signs only for m/86'/0'/0'/0/* and m/86'/0'/0'/1/* (optionally m/84'/0'/0'/0/* and m/84'/0'/0'/1/*). Every agent's grant needs both sats limits, at most {{.MaxTx}} per PSBT and {{.MaxDay}} per day, typed out to confirm; a fee over {{.MaxFee}} sats or {{.MaxFeeRate}} sat/vB is refused, and every signature runs notify_command.</p>
+{{define "bitcoinfields"}}<label>Network<select name="network" data-btcnetwork data-testpaths="{{.Test.Taproot}}" data-mainnetpaths="{{.Main.Taproot}}">{{range .Networks}}<option{{if .On}} selected{{end}}>{{.Value}}</option>{{end}}</select></label>
+<p class="warnbox" data-mainnetnotice{{if not .Mainnet}} hidden{{end}}>Mainnet signs real bitcoin. It needs an xprv or mainnet WIF key of its own (not a test network service's), signs only for m/86'/0'/0'/0/* and m/86'/0'/0'/1/* (optionally m/84'/0'/0'/0/* and m/84'/0'/0'/1/*) and only with sighash default and all. Every agent's grant needs both sats limits, at most {{.MaxTx}} per PSBT and {{.MaxDay}} per day, typed out to confirm; a fee over {{.MaxFee}} sats or {{.MaxFeeRate}} sat/vB is refused, and every signature runs notify_command, which a grant needs.</p>
 {{if .WIF}}<label>Script (a WIF key signs for one address)<select name="script">{{range .Scripts}}<option{{if .On}} selected{{end}}>{{.Value}}</option>{{end}}</select></label>
 <p class="hint">p2tr: taproot key path (BIP86 style). p2wpkh: native SegWit.</p>
 {{else}}<label>Paths it signs for, one per line<textarea name="paths" spellcheck="false" autocapitalize="none">{{.Paths}}</textarea></label>
-<p class="hint">Taproot (BIP86) receive and change. For native SegWit (BIP84) add <span class="mono">m/84'/1'/0'/0/*</span> and <span class="mono">m/84'/1'/0'/1/*</span>. A trailing /* means any index; hardened steps take ' or h.</p>{{end}}
+<p class="hint">Taproot (BIP86) receive and change. For native SegWit (BIP84) add {{template "segwithint" .Test}}{{template "segwithint" .Main}}. A trailing /* means any index; hardened steps take ' or h.</p>{{end}}
 <p class="hint">Sighash types it signs:</p>
 {{range .Sighash}}<label class="check"><input type="checkbox" name="sighash" value="{{.Value}}"{{if .On}} checked{{end}}> <span class="mono">{{.Value}}</span></label>{{end}}
-<p class="hint">default and all commit to the whole transaction. With none, single or an |anyonecanpay form the other side may change what the signature does not cover, so the sats a PSBT sends are only what it sends now. Tick them only if your tool needs them.</p>{{end}}
+<p class="hint">default and all commit to the whole transaction. With none, single or an |anyonecanpay form the other side may change what the signature does not cover, so the sats a PSBT sends are only what it sends now. Tick them only if your tool needs them; mainnet refuses them.</p>{{end}}
+{{define "segwithint"}}<span data-segwithint="{{.Side}}"{{if .Hidden}} hidden{{end}}>{{range $i, $p := .SegWit}}{{if $i}} and {{end}}<span class="mono">{{$p}}</span>{{end}}</span>{{end}}
 
 {{define "thead"}}<thead><tr>{{range .}}<th{{with .Class}} class="{{.}}"{{end}}>{{if .Href}}<a href="{{.Href}}">{{.Label}}{{with .Arrow}} <span class="arrow">{{.}}</span>{{end}}</a>{{else}}{{.Label}}{{end}}</th>{{end}}</tr></thead>{{end}}
 
@@ -352,8 +353,7 @@ Sign in with Apple: <code>{"service":"NAME","auth":"sign-in-with-apple-sign","si
 {{define "service"}}{{template "top" .}}
 {{if eq .Notice "saved"}}<p class="notice">Saved. Agents with their own grant for this service keep it.</p>{{end}}
 <div class="head"><a class="back" href="/keys/{{.F.Key}}">{{.F.Key}}</a><h1 class="mono">{{.Name}}</h1>{{with .Bitcoin}}<span class="pill{{if eq .Network "mainnet"}} warn{{end}}">{{.Network}}{{if eq .Network "mainnet"}} · real bitcoin{{end}}</span>{{end}}</div>
-{{if .Mainnet}}<p class="warnbox">This service signs real bitcoin on mainnet. Every grant has both sats limits (at most {{.MainnetMaxTx}} per PSBT and {{.MainnetMaxDay}} per day); a PSBT with a fee over {{.MainnetMaxFee}} sats or {{.MainnetMaxFeeRate}} sat/vB is refused; every signature is listed below{{if not .NotifyUnset}} and sent to notify_command{{end}}.</p>
-{{if .NotifyUnset}}<p class="warnbox">notify_command is not set in rules.json, so nobody is told when this service signs. Set it before giving an agent access (docs/bitcoin.md).</p>{{end}}{{end}}
+{{if .Mainnet}}<p class="warnbox">This service signs real bitcoin on mainnet. Every grant has both sats limits (at most {{.MainnetMaxTx}} per PSBT and {{.MainnetMaxDay}} per day); a PSBT with a fee over {{.MainnetMaxFee}} sats or {{.MainnetMaxFeeRate}} sat/vB is refused; every signature is listed below and sent to notify_command.</p>{{end}}
 <div class="card"><dl>
 <dt>Key</dt><dd><a class="chip" href="/keys/{{.F.Key}}">{{.F.Key}}</a></dd>
 {{with .SentAs}}<dt>Sent as</dt><dd class="mono">Authorization: {{.}} …</dd>{{end}}

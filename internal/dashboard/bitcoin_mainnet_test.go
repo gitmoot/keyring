@@ -110,6 +110,40 @@ func TestMainnetGrantNeedsLimitsAndTypedConfirm(t *testing.T) {
 	}
 }
 
+// A project grant never reaches a mainnet service, so switching off the
+// role's own grant revokes that service alone while the project grant
+// stays (review of #206).
+func TestRevokingAMainnetGrantBesideAProjectGrant(t *testing.T) {
+	e := newEnv(t)
+	addMainnet(e)
+	cfg := e.proxy.Config()
+	access := cfg.AccessList
+	svc := access.Services["btc-main"]
+	svc.Project = "ord"
+	access.Services["btc-main"] = svc
+	access.Projects = map[string]policy.Project{"ord": {}}
+	role := access.Roles["phobos"]
+	role.Projects = map[string]policy.Access{"ord": fullAccess()}
+	role.Access["btc-main"] = policy.Access{Methods: []string{"GET", "POST"}, Paths: []string{"/"}, BitcoinMaxSatsPerTx: 1000, BitcoinMaxSatsPerDay: 1000}
+	access.Roles["phobos"] = role
+	next, err := policy.SaveAccess(cfg.Rules, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := store.Load(e.backend.StorePath)
+	e.proxy.Swap(next, keys)
+	if w := e.saveCell("phobos", "btc-main", url.Values{}); w.Header().Get("Location") != "/access?done=saved" {
+		t.Fatalf("remove: %d %s", w.Code, w.Body.String())
+	}
+	now := e.proxy.Config()
+	if _, ok := now.AccessFor(now.Roles["phobos"], "btc-main"); ok {
+		t.Fatal("the mainnet service is still reachable")
+	}
+	if _, ok := now.Roles["phobos"].Projects["ord"]; !ok {
+		t.Fatal("revoking the mainnet grant dropped the project grant")
+	}
+}
+
 // Owner, 2026-11-26: approving an access request for a mainnet service
 // takes both sats limits and the typed confirmation; without them the
 // request stays and nothing is granted.
@@ -164,24 +198,17 @@ func TestApprovingAMainnetRequestNeedsLimits(t *testing.T) {
 	}
 }
 
-// A mainnet service's page says so in words, and warns while nobody is
-// notified of its signatures.
+// A mainnet service's page says so in words, with the limits it enforces
+// and that every signature goes to notify_command.
 func TestMainnetServicePageWarns(t *testing.T) {
 	e := newEnv(t)
 	addMainnet(e)
 	page := e.request("GET", "/services/btc-main", nil).Body.String()
-	for _, want := range []string{`<span class="pill warn">mainnet · real bitcoin</span>`, "<dd>mainnet (real bitcoin)</dd>", "notify_command is not set in rules.json",
+	for _, want := range []string{`<span class="pill warn">mainnet · real bitcoin</span>`, "<dd>mainnet (real bitcoin)</dd>", "sent to notify_command",
 		"a PSBT with a fee over 50000 sats or 200 sat/vB is refused"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the mainnet service page lacks %q", want)
 		}
-	}
-	cfg := *e.proxy.Config()
-	cfg.Rules.NotifyCommand = []string{"/usr/local/bin/notify"}
-	keys, _ := store.Load(e.backend.StorePath)
-	e.proxy.Swap(&cfg, keys)
-	if page := e.request("GET", "/services/btc-main", nil).Body.String(); strings.Contains(page, "notify_command is not set") || !strings.Contains(page, "sent to notify_command") {
-		t.Fatal("the notify warning stays once notify_command is set")
 	}
 	addBitcoin(e)
 	if page := e.request("GET", "/services/btc-ord", nil).Body.String(); strings.Contains(page, "· real bitcoin") || strings.Contains(page, "This service signs real bitcoin") || !strings.Contains(page, "<dd>regtest (test network)</dd>") {

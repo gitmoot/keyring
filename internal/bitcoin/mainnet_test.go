@@ -44,9 +44,8 @@ var (
 )
 
 // A mainnet service signs the BIP86 and BIP84 vectors' coins, the script
-// engine accepts the finished transaction, and the size it estimated for
-// the fee cap is never below the real one (at most one vbyte above: a
-// P2WPKH signature may come out a byte shorter than the largest).
+// engine accepts the finished transaction, and the size it counts for the
+// fee rate cap is never above the real one, so the rate is never below.
 func TestMainnetSignsBIPVectorCoins(t *testing.T) {
 	for coin, vector := range map[bitcointest.Coin]string{
 		mainTap:  "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
@@ -79,7 +78,7 @@ func TestMainnetSignsBIPVectorCoins(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx := bitcointest.Verify(t, signed.PSBT)
-	if got := vsize(tx); plan.VBytes < got || plan.VBytes > got+1 || signed.VBytes != plan.VBytes {
+	if got := vsize(tx); plan.VBytes > got || signed.VBytes != plan.VBytes {
 		t.Fatalf("estimated %d vbytes, real %d", plan.VBytes, got)
 	}
 	// A key for another network signs nothing here, and this one nothing
@@ -137,9 +136,12 @@ func signOther(t *testing.T, encoded string, i int) string {
 	return signed.PSBT
 }
 
-// The size estimate counts the inputs keyring does not sign: a P2WPKH or
-// taproot key-path one at its largest witness, a finalised one exactly.
-func TestMainnetSizeCountsOtherInputs(t *testing.T) {
+// The size counts the inputs keyring does not sign with an empty witness,
+// whatever they carry: its signature does not commit to their witness, so
+// a finalised one (a reveal's commit input) could be padded to make the fee
+// rate look lower and stripped after signing. Padding changes nothing, and
+// the count stays at or below the finished transaction's size.
+func TestMainnetSizeIsALowerBound(t *testing.T) {
 	r := mainnetRules(t)
 	k, err := ParseKey(bitcointest.MasterMainnet, r)
 	if err != nil {
@@ -156,34 +158,27 @@ func TestMainnetSizeCountsOtherInputs(t *testing.T) {
 			t.Fatal(err)
 		}
 		tx := bitcointest.Verify(t, signOther(t, signed.PSBT, 1))
-		if got := vsize(tx); plan.VBytes < got || plan.VBytes > got+1 {
-			t.Fatalf("%s: estimated %d vbytes, real %d", other.Kind, plan.VBytes, got)
+		if got := vsize(tx); plan.VBytes > got {
+			t.Fatalf("%s: counted %d vbytes, real %d", other.Kind, plan.VBytes, got)
 		}
-	}
-	// The other input already finalised (a reveal's script-path commit
-	// input is): its witness is counted as it is, so the estimate is exact.
-	p := bitcointest.Decode(t, signOther(t, bitcointest.Encode(t, bitcointest.Build(t, []bitcointest.Coin{mainTap, otherWpkh}, []bitcointest.Out{{Value: 85_000, Script: bitcointest.External}})), 1))
-	if err := psbt.Finalize(p, 1); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := plan.Sign()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := vsize(bitcointest.Verify(t, signed.PSBT)); plan.VBytes != got {
-		t.Fatalf("estimated %d vbytes, real %d", plan.VBytes, got)
+		finalised := bitcointest.Decode(t, signOther(t, bitcointest.Encode(t, p), 1))
+		if err := psbt.Finalize(finalised, 1); err != nil {
+			t.Fatal(err)
+		}
+		finalised.Inputs[1].FinalScriptWitness = append(finalised.Inputs[1].FinalScriptWitness, bytes.Repeat([]byte{0x01}, 4000)...)
+		padded, err := Prepare(k, r, bitcointest.Encode(t, finalised), []int{0})
+		if err != nil {
+			t.Fatalf("%s finalised: %v", other.Kind, err)
+		}
+		if padded.VBytes != plan.VBytes {
+			t.Fatalf("%s: a padded witness counts %d vbytes, unpadded %d", other.Kind, padded.VBytes, plan.VBytes)
+		}
 	}
 }
 
-// On mainnet an input keyring does not sign must have a size it can know,
-// or the fee rate cap could not hold: one of another kind (P2SH here), or a
-// taproot script-path spend not yet finalised, is refused. A test network
-// signs it and reports no size.
-func TestMainnetRefusesInputsOfUnknownSize(t *testing.T) {
+// An input keyring does not sign counts its non-witness part only, so its
+// kind does not matter: a P2SH or taproot script-path one is signed beside.
+func TestMainnetSignsBesideInputsOfAnyKind(t *testing.T) {
 	p2sh := append(append([]byte{txscript.OP_HASH160, txscript.OP_DATA_20}, bytes.Repeat([]byte{0x22}, 20)...), txscript.OP_EQUAL)
 	cases := map[string]func(*psbt.PInput){
 		"p2sh": func(in *psbt.PInput) { in.WitnessUtxo.PkScript = p2sh },
@@ -196,20 +191,34 @@ func TestMainnetRefusesInputsOfUnknownSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testTap := bitcointest.Coin{Key: bitcointest.Master, Kind: "p2tr", Path: "m/86'/1'/0'/0/0", Value: 50_000}
+	base := bitcointest.Build(t, []bitcointest.Coin{mainTap, otherTap}, []bitcointest.Out{{Value: 85_000, Script: bitcointest.External}})
+	want, err := Prepare(k, r, bitcointest.Encode(t, base), []int{0})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, change := range cases {
 		p := bitcointest.Build(t, []bitcointest.Coin{mainTap, otherTap}, []bitcointest.Out{{Value: 85_000, Script: bitcointest.External}})
 		change(&p.Inputs[1])
-		_, err := Prepare(k, r, bitcointest.Encode(t, p), []int{0})
-		if err == nil || err.Error() != "input 1: on mainnet an input this key does not sign must be finalized, or a taproot key-path or P2WPKH input, so the fee rate is known" {
-			t.Fatalf("%s: %v", name, err)
+		plan, err := Prepare(k, r, bitcointest.Encode(t, p), []int{0})
+		if err != nil || plan.VBytes != want.VBytes {
+			t.Fatalf("%s: %v, %d vbytes, want %d", name, err, plan.VBytes, want.VBytes)
 		}
-		p = bitcointest.Build(t, []bitcointest.Coin{testTap, otherTap}, []bitcointest.Out{{Value: 85_000, Script: bitcointest.External}})
-		change(&p.Inputs[1])
-		plan, err := Prepare(masterKey(t, regtestRules(t)), regtestRules(t), bitcointest.Encode(t, p), []int{0})
-		if err != nil || plan.VBytes != 0 {
-			t.Fatalf("%s on regtest: %v", name, err)
-		}
+	}
+}
+
+// The signer refuses a sighash that leaves inputs or outputs uncommitted on
+// mainnet even if a service's list held one.
+func TestMainnetSignerRefusesPartialSighash(t *testing.T) {
+	r := mainnetRules(t)
+	r.sighash[txscript.SigHashNone] = true
+	k, err := ParseKey(bitcointest.MasterMainnet, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := bitcointest.Build(t, []bitcointest.Coin{mainTap}, []bitcointest.Out{{Value: 45_000, Script: bitcointest.External}})
+	p.Inputs[0].SighashType = txscript.SigHashNone
+	if _, err := Prepare(k, r, bitcointest.Encode(t, p), []int{0}); err == nil || err.Error() != "input 0: sighash none is not signed on mainnet (default and all only)" {
+		t.Fatal(err)
 	}
 }
 

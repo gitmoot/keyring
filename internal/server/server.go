@@ -120,6 +120,10 @@ type snapshot struct {
 	// refuses (refusedValues): a service other than a Bitcoin signing
 	// service never sends one (sendsBitcoinKey).
 	refusedValues map[string]bool
+	// bitcoinKeyClash names, per Bitcoin signing service whose key also
+	// signs on the other side of mainnet, that other service
+	// (policy.AccessList.BitcoinKeyOnOtherNetwork): it signs nothing.
+	bitcoinKeyClash map[string]string
 }
 
 // New builds a handler. keys maps key names to values; audit receives one JSON
@@ -232,9 +236,13 @@ func (h *Handler) SwapWithOrder(config *policy.Config, keys map[string]string, o
 		snap.appStoreConnectKey = parseAppleSigningKey(keys[svc.Key])
 	}
 	snap.signInWithAppleKeys = map[string]*ecdsa.PrivateKey{}
+	snap.bitcoinKeyClash = map[string]string{}
 	for name, svc := range config.Services {
 		if svc.Auth == policy.AuthSignInWithAppleSign {
 			snap.signInWithAppleKeys[name] = parseAppleSigningKey(keys[svc.Key])
+		}
+		if other := config.BitcoinKeyOnOtherNetwork(name, keys); other != "" {
+			snap.bitcoinKeyClash[name] = other
 		}
 	}
 	var previous map[string]*apnsSigner

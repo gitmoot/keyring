@@ -89,10 +89,25 @@ const (
 	hardened     = hdkeychain.HardenedKeyStart
 )
 
-// MainnetPaths are the only paths a mainnet service may list (owner,
-// 2026-11-26): BIP86 receive and change of account 0, and optionally the
-// BIP84 ones.
-var MainnetPaths = []string{"m/86'/0'/0'/0/*", "m/86'/0'/0'/1/*", "m/84'/0'/0'/0/*", "m/84'/0'/0'/1/*"}
+// Presets are the path templates of account 0 a form offers on one side of
+// mainnet: BIP86 taproot and BIP84 native SegWit, receive and change.
+type Presets struct{ Taproot, SegWit []string }
+
+var (
+	// TestPresets use coin type 1, the test networks'.
+	TestPresets = Presets{
+		Taproot: []string{"m/86'/1'/0'/0/*", "m/86'/1'/0'/1/*"},
+		SegWit:  []string{"m/84'/1'/0'/0/*", "m/84'/1'/0'/1/*"},
+	}
+	// MainnetPresets use coin type 0.
+	MainnetPresets = Presets{
+		Taproot: []string{"m/86'/0'/0'/0/*", "m/86'/0'/0'/1/*"},
+		SegWit:  []string{"m/84'/0'/0'/0/*", "m/84'/0'/0'/1/*"},
+	}
+	// MainnetPaths are the only paths a mainnet service may list (owner,
+	// 2026-11-26): the mainnet presets.
+	MainnetPaths = slices.Concat(MainnetPresets.Taproot, MainnetPresets.SegWit)
+)
 
 // Key errors. They never include the value.
 var (
@@ -275,6 +290,13 @@ func NewRules(network string, paths []string, script string, sighash []string) (
 		t, ok := sighashType(name)
 		if !ok {
 			return nil, fmt.Errorf("sighash %d: want default, all, none, single, or one of those three with |anyonecanpay", i+1)
+		}
+		// none, single and anyonecanpay leave outputs or inputs
+		// uncommitted, so the signature could outlive the PSBT whose
+		// external sats and fee were checked: mainnet signs only the two
+		// that commit to the whole transaction.
+		if network == Mainnet && t != txscript.SigHashDefault && t != txscript.SigHashAll {
+			return nil, fmt.Errorf("sighash %d: a mainnet service signs only default and all", i+1)
 		}
 		if r.sighash[t] {
 			return nil, fmt.Errorf("sighash %d is listed twice", i+1)

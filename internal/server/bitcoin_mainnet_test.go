@@ -32,6 +32,9 @@ func mainnetConfig(t *testing.T, grant policy.Access, notify []string) *policy.C
 		"btc-main": grant,
 		"btc-ord":  {Methods: []string{"POST"}, Paths: []string{"/"}},
 	}}
+	if notify == nil {
+		notify = []string{"/usr/bin/true"}
+	}
 	cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller, "127.0.0.1"}, AuditLog: "audit.log", NotifyCommand: notify}, AccessList: access}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -273,6 +276,17 @@ func TestBitcoinMainnetGrantWithoutLimitsSignsNothing(t *testing.T) {
 	cfg.Roles["phobos"].Access["btc-main"] = grant
 	h := startMainnet(t, cfg, mainnetKeys, &lockedBuffer{}, t.TempDir())
 	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "bitcoin grant unavailable") {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+// Validation refuses a mainnet service without notify_command; a config
+// that skipped it still signs nothing on mainnet.
+func TestBitcoinMainnetWithoutNotifySignsNothing(t *testing.T) {
+	cfg := mainnetConfig(t, mainnetLimits, nil)
+	cfg.NotifyCommand = nil
+	h := startMainnet(t, cfg, mainnetKeys, &lockedBuffer{}, t.TempDir())
+	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "no owner notification configured") {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }

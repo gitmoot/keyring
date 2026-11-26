@@ -374,6 +374,16 @@ func TestNewRules(t *testing.T) {
 	if _, err := NewRules(Mainnet, nil, ScriptP2TR, nil); err != nil {
 		t.Fatalf("mainnet WIF service: %v", err)
 	}
+	// Signatures that leave inputs or outputs uncommitted could outlive the
+	// PSBT whose sats were checked: mainnet signs only default and all.
+	for _, s := range []string{"none", "single", "all|anyonecanpay", "single|anyonecanpay"} {
+		if _, err := NewRules(Mainnet, nil, ScriptP2TR, []string{"default", s}); err == nil || !strings.Contains(err.Error(), "sighash 2: a mainnet service signs only default and all") {
+			t.Fatalf("mainnet sighash %s: %v", s, err)
+		}
+	}
+	if _, err := NewRules(Regtest, nil, ScriptP2TR, []string{"none"}); err != nil {
+		t.Fatalf("a test network signs none: %v", err)
+	}
 	bad := []struct {
 		network, script string
 		paths, sighash  []string

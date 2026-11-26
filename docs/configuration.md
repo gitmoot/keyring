@@ -57,4 +57,4 @@ The service runs as `_keyring` without a desktop session, so desktop notifiers (
 "notify_command": ["/usr/bin/curl", "-fsS", "-m", "8", "https://ntfy.example/your-topic", "-d"]
 ```
 
-Set it before granting any mainnet service; the mainnet service page says when it is unset. See [bitcoin.md](bitcoin.md#mainnet).
+It is required for any mainnet service: `check`, the start and `SIGHUP` refuse a mainnet service without it, and signing answers 503 if it is somehow missing. Instance mode has no such setting and refuses mainnet services. See [bitcoin.md](bitcoin.md#mainnet).

@@ -193,8 +193,8 @@ func decodeBitcoinAddresses(raw string) (bitcoinAddressQuery, error) {
 }
 
 // BitcoinAudit is what the audit records about one signature: never the
-// PSBT or the key. VBytes is the estimated size of the finalised
-// transaction, 0 when unknown (bitcoin.Plan.VBytes).
+// PSBT or the key. VBytes is the size the finalised transaction is never
+// below (bitcoin.Plan.VBytes); audit lines from before it have none.
 type BitcoinAudit struct {
 	Network      string `json:"network"`
 	Txid         string `json:"txid"`
@@ -393,12 +393,17 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 	} else {
 		// The key check needs the store, which validation does not read;
 		// the grant check repeats validation's (policy.Config.Validate).
-		if other := snap.config.BitcoinKeyOnOtherNetwork(service, snap.keys); other != "" {
+		if other := snap.bitcoinKeyClash[service]; other != "" {
 			h.refund(role, service, access.DailyRequests, start)
 			fail(http.StatusServiceUnavailable, "bitcoin key unavailable: service "+other+" signs with the same key on another network; mainnet and the test networks need different keys")
 			return
 		}
 		if mainnet {
+			if len(snap.config.NotifyCommand) == 0 {
+				h.refund(role, service, access.DailyRequests, start)
+				fail(http.StatusServiceUnavailable, "bitcoin unavailable: no owner notification configured")
+				return
+			}
 			if err := policy.CheckBitcoinMainnetGrant(access); err != nil {
 				h.refund(role, service, access.DailyRequests, start)
 				fail(http.StatusServiceUnavailable, "bitcoin grant unavailable: "+err.Error())
@@ -427,6 +432,13 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 		}
 		rec.Bitcoin = &BitcoinAudit{Network: rules.Network, Txid: signed.Txid, Inputs: signed.Signed, ExternalSats: signed.External, FeeSats: signed.Fee, VBytes: signed.VBytes}
 		reply = signed
+		// Started once the signature and its day total are kept, before
+		// the reply is written, which a slow client may hold up.
+		if mainnet {
+			b := rec.Bitcoin
+			h.notifyBitcoin(snap.config.NotifyCommand, role, service, fmt.Sprintf("keyring: mainnet signature by %s on %s: txid %s, %d sats external, fee %d sats, %s sat/vB",
+				role, service, b.Txid, b.ExternalSats, b.FeeSats, b.FeeRate()))
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -434,9 +446,4 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 	sink := &countingWriter{w: w}
 	_ = json.NewEncoder(sink).Encode(reply)
 	rec.Bytes = sink.n
-	if mainnet && rec.Bitcoin != nil {
-		b := rec.Bitcoin
-		h.notifyBitcoin(snap.config.NotifyCommand, role, service, fmt.Sprintf("keyring: mainnet signature by %s on %s: txid %s, %d sats external, fee %d sats, %s sat/vB",
-			role, service, b.Txid, b.ExternalSats, b.FeeSats, b.FeeRate()))
-	}
 }

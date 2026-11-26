@@ -303,6 +303,12 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		// refuses a Bitcoin service left without its settings.
 		updated.Bitcoin = f.Bitcoin
 	}
+	if cur.Bitcoin != nil && updated.Bitcoin != nil && cur.Bitcoin.Network != updated.Bitcoin.Network {
+		// A service's network is fixed: its grants were given for that
+		// network and never carry over to another (#187).
+		again(http.StatusBadRequest, "A Bitcoin service's network cannot be changed: its grants were given for "+cur.Bitcoin.Network+". Make a new service for "+updated.Bitcoin.Network+".")
+		return
+	}
 	if cur.Auth == policy.AuthOAuth2 {
 		next := *cur.OAuth2
 		switch {
@@ -350,7 +356,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 	// Moving a service between projects changes which whole-project grants
 	// reach it: name the agents that gain or lose access that way (#111).
 	var gained, lost []string
-	if cur.Project != updated.Project {
+	if cur.Project != updated.Project && !updated.BitcoinMainnet() {
 		for _, role := range sortedNames(next.Roles) {
 			rl := next.Roles[role]
 			if _, own := rl.Access[name]; own {
