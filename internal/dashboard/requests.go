@@ -84,8 +84,24 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 	if role.Access == nil {
 		role.Access = map[string]policy.Access{}
 	}
+	refuse := func(msg string) {
+		_ = b.Requests.Put(req)
+		b.render(w, http.StatusConflict, "error", sid, map[string]any{"Error": "Cannot approve: " + msg})
+	}
+	// A mainnet Bitcoin service gets the sats limits posted for it, which
+	// its typed name and daily limit confirm (owner, 2026-11-26).
+	limits := map[string][2]int64{}
 	for _, svc := range req.Services {
-		role.Access[svc] = fullAccess()
+		acc := fullAccess()
+		if next.Services[svc].BitcoinMainnet() {
+			var msg string
+			if acc, msg = mainnetGrantFromForm(r, svc); msg != "" {
+				refuse(msg)
+				return
+			}
+			limits[svc] = [2]int64{acc.BitcoinMaxSatsPerTx, acc.BitcoinMaxSatsPerDay}
+		}
+		role.Access[svc] = acc
 	}
 	for _, p := range req.Projects {
 		if role.Projects == nil {
@@ -94,10 +110,17 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		role.Projects[p] = fullAccess()
 	}
 	next.Roles[req.Role] = role
+	if err := (&policy.Config{Rules: b.rules(), AccessList: next}).Validate(); err != nil {
+		refuse(err.Error())
+		return
+	}
 	if err := b.saveAndApply(next); err != nil {
 		_ = b.Requests.Put(req)
 		b.fail(w, sid, err)
 		return
+	}
+	if len(limits) > 0 {
+		fields["bitcoin_limits"] = limits
 	}
 	fields["new_agent"] = !exists
 	b.Admin.Audit("request_approved", sid, fields)

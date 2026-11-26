@@ -660,7 +660,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if signingAuth == policy.AuthBitcoinPSBTSign {
-		h.serveBitcoin(w, svc, key, roleName, service, access, bitcoinAction, bitcoinSign, bitcoinQuery, start, &rec, fail)
+		h.serveBitcoin(w, snap, svc, key, roleName, service, access, bitcoinAction, bitcoinSign, bitcoinQuery, start, &rec, fail)
 		return
 	}
 	if signingAuth == policy.AuthEd25519Sign {

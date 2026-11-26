@@ -74,6 +74,7 @@ type bitcoinReply struct {
 	Signed       []int  `json:"signed"`
 	ExternalSats int64  `json:"external_sats"`
 	FeeSats      int64  `json:"fee_sats"`
+	VBytes       int64  `json:"vbytes"`
 }
 
 func TestBitcoinSignPSBTVerifiesAndIsAudited(t *testing.T) {

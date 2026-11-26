@@ -2,16 +2,20 @@ package server
 
 // Bitcoin PSBT signing (auth "bitcoin-psbt-sign", #187): the keyring signs
 // PSBT inputs with an imported key that never leaves it, on the service's
-// test network and paths, within the grant's sats limits.
+// network and paths, within the grant's sats limits. On mainnet a grant has
+// both limits (policy.CheckBitcoinMainnetGrant), the fee is capped
+// (policy.BitcoinMainnetFeeRefusal) and every signature runs the rules'
+// notify_command.
 //
 // Routes: "/_keyring/bitcoin/<service>/<action>".
 //   POST sign-psbt {"psbt": "<base64>", "inputs": [0, 2]}
-//        -> {"psbt", "txid", "signed", "external_sats", "fee_sats"}
+//        -> {"psbt", "txid", "signed", "external_sats", "fee_sats", "vbytes"}
 //   GET  addresses?path=m/86'/1'/0'/0&from=0&count=20
 //        -> {"fingerprint", "network", "path", "addresses": [...]}
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +24,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,13 +193,54 @@ func decodeBitcoinAddresses(raw string) (bitcoinAddressQuery, error) {
 }
 
 // BitcoinAudit is what the audit records about one signature: never the
-// PSBT or the key.
+// PSBT or the key. VBytes is the estimated size of the finalised
+// transaction, 0 when unknown (bitcoin.Plan.VBytes).
 type BitcoinAudit struct {
 	Network      string `json:"network"`
 	Txid         string `json:"txid"`
 	Inputs       []int  `json:"inputs"`
 	ExternalSats int64  `json:"external_sats"`
 	FeeSats      int64  `json:"fee_sats"`
+	VBytes       int64  `json:"vbytes,omitempty"`
+}
+
+// FeeRate is the fee per estimated vbyte with one decimal ("12.5"), "" when
+// the size is unknown.
+func (a BitcoinAudit) FeeRate() string {
+	if a.VBytes <= 0 {
+		return ""
+	}
+	return strconv.FormatFloat(float64(a.FeeSats)/float64(a.VBytes), 'f', 1, 64)
+}
+
+// bitcoinNotifyTimeout bounds one run of notify_command.
+const bitcoinNotifyTimeout = 10 * time.Second
+
+// notifyBitcoin runs command (the rules' notify_command) with msg as its
+// last argument, in the background: the signature is already answered and
+// never waits for it. A command that fails or runs past
+// bitcoinNotifyTimeout is killed and written to the audit log.
+func (h *Handler) notifyBitcoin(command []string, role, service, msg string) {
+	if len(command) == 0 {
+		return
+	}
+	args := append(slices.Clone(command[1:]), msg)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), bitcoinNotifyTimeout)
+		defer cancel()
+		// No stdin, stdout or stderr: Run returns as soon as the command
+		// ends or is killed.
+		err := exec.CommandContext(ctx, command[0], args...).Run()
+		if err == nil {
+			return
+		}
+		note := "notify_command failed: " + err.Error()
+		if ctx.Err() != nil {
+			note = "notify_command timed out after 10s"
+		}
+		h.writeAudit(auditRecord{Time: h.now().UTC().Format(time.RFC3339), Source: "keyring", Role: role, Service: service,
+			Method: "NOTIFY", Path: "/" + bitcoinSignAction, Note: note})
+	}()
 }
 
 // bitcoinSpend is each role's and service's sats signed on day.
@@ -319,7 +366,7 @@ func (b *bitcoinSpend) sign(role, service string, limit int64, plan *bitcoin.Pla
 
 // serveBitcoin answers a bitcoin-psbt-sign call after access and the daily
 // request limit were checked.
-func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, role, service string, access policy.Access,
+func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy.Service, key, role, service string, access policy.Access,
 	action string, signReq bitcoinSignRequest, query bitcoinAddressQuery, start time.Time, rec *auditRecord, fail func(int, string)) {
 	rules, err := svc.Bitcoin.Rules()
 	if err != nil {
@@ -334,6 +381,7 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, r
 		fail(http.StatusServiceUnavailable, "bitcoin key unavailable: "+err.Error())
 		return
 	}
+	mainnet := rules.Network == bitcoin.Mainnet
 	var reply any
 	if action == bitcoinAddressesAction {
 		list, err := bitcoin.Addresses(k, rules, query.path, query.from, query.count)
@@ -343,6 +391,20 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, r
 		}
 		rec.Note, reply = "addresses", list
 	} else {
+		// The key check needs the store, which validation does not read;
+		// the grant check repeats validation's (policy.Config.Validate).
+		if other := snap.config.BitcoinKeyOnOtherNetwork(service, snap.keys); other != "" {
+			h.refund(role, service, access.DailyRequests, start)
+			fail(http.StatusServiceUnavailable, "bitcoin key unavailable: service "+other+" signs with the same key on another network; mainnet and the test networks need different keys")
+			return
+		}
+		if mainnet {
+			if err := policy.CheckBitcoinMainnetGrant(access); err != nil {
+				h.refund(role, service, access.DailyRequests, start)
+				fail(http.StatusServiceUnavailable, "bitcoin grant unavailable: "+err.Error())
+				return
+			}
+		}
 		plan, err := bitcoin.Prepare(k, rules, signReq.PSBT, signReq.Inputs)
 		if err != nil {
 			fail(http.StatusBadRequest, err.Error())
@@ -352,12 +414,18 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, r
 			fail(http.StatusBadRequest, fmt.Sprintf("bitcoin_max_sats_per_tx: %d external sats is over the limit of %d", plan.External, max))
 			return
 		}
+		if mainnet {
+			if why := policy.BitcoinMainnetFeeRefusal(plan.Fee, plan.VBytes); why != "" {
+				fail(http.StatusBadRequest, why)
+				return
+			}
+		}
 		signed, status, why := h.bitcoinSpend.sign(role, service, access.BitcoinMaxSatsPerDay, plan, h.now)
 		if signed == nil {
 			fail(status, why)
 			return
 		}
-		rec.Bitcoin = &BitcoinAudit{Network: rules.Network, Txid: signed.Txid, Inputs: signed.Signed, ExternalSats: signed.External, FeeSats: signed.Fee}
+		rec.Bitcoin = &BitcoinAudit{Network: rules.Network, Txid: signed.Txid, Inputs: signed.Signed, ExternalSats: signed.External, FeeSats: signed.Fee, VBytes: signed.VBytes}
 		reply = signed
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -366,4 +434,9 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, svc policy.Service, key, r
 	sink := &countingWriter{w: w}
 	_ = json.NewEncoder(sink).Encode(reply)
 	rec.Bytes = sink.n
+	if mainnet && rec.Bitcoin != nil {
+		b := rec.Bitcoin
+		h.notifyBitcoin(snap.config.NotifyCommand, role, service, fmt.Sprintf("keyring: mainnet signature by %s on %s: txid %s, %d sats external, fee %d sats, %s sat/vB",
+			role, service, b.Txid, b.ExternalSats, b.FeeSats, b.FeeRate()))
+	}
 }

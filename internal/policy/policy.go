@@ -88,6 +88,12 @@ type Rules struct {
 	Consent *Consent `json:"consent,omitempty"`
 	// GoogleAccounts is privileged host configuration, never dashboard input.
 	GoogleAccounts map[string]GoogleAccount `json:"google_accounts,omitempty"`
+	// NotifyCommand, when set, runs once for every mainnet Bitcoin signature
+	// (#187): a program as an absolute path and its arguments, never a
+	// shell string, with the message appended as the last argument. It runs
+	// in the background for at most 10 seconds; a failure is written to the
+	// audit log and never delays or fails the signature.
+	NotifyCommand []string `json:"notify_command,omitempty"`
 }
 
 // AdminHTTPS is the dashboard's name behind a local HTTPS proxy. The proxy
@@ -397,8 +403,8 @@ type Minisign struct {
 
 // Bitcoin limits a bitcoin-psbt-sign service (#187): the network its key
 // and every output belong to, and either the derivation paths an extended
-// key (tprv) signs for or, for a single WIF key, its script kind. Sighash
-// lists the sighash types it signs; empty means default and all.
+// key (tprv/xprv) signs for or, for a single WIF key, its script kind.
+// Sighash lists the sighash types it signs; empty means default and all.
 type Bitcoin struct {
 	Network string   `json:"network"`
 	Paths   []string `json:"paths,omitempty"`
@@ -409,6 +415,84 @@ type Bitcoin struct {
 // Rules checks the settings and returns them ready for signing.
 func (b *Bitcoin) Rules() (*bitcoin.Rules, error) {
 	return bitcoin.NewRules(b.Network, b.Paths, b.Script, b.Sighash)
+}
+
+// Mainnet Bitcoin signing (owner, 2026-11-26; #187 phase 2). Every grant on
+// a mainnet bitcoin-psbt-sign service sets both sats limits, each above 0
+// and at most its hard ceiling, the per-PSBT one at most the daily one
+// (CheckBitcoinMainnetGrant); no mainnet PSBT is signed whose fee is above
+// BitcoinMainnetMaxFeeSats or whose fee rate is above
+// BitcoinMainnetMaxFeeRate (BitcoinMainnetFeeRefusal).
+const (
+	BitcoinMainnetMaxSatsPerTx  = 200_000
+	BitcoinMainnetMaxSatsPerDay = 1_000_000
+	BitcoinMainnetMaxFeeSats    = 50_000
+	// BitcoinMainnetMaxFeeRate is in sat/vB of the finalised transaction,
+	// its size estimated with the largest signatures (bitcoin.Plan.VBytes).
+	BitcoinMainnetMaxFeeRate = 200
+)
+
+// BitcoinMainnet reports whether s is a bitcoin-psbt-sign service on mainnet.
+func (s Service) BitcoinMainnet() bool {
+	return s.Auth == AuthBitcoinPSBTSign && s.Bitcoin != nil && s.Bitcoin.Network == bitcoin.Mainnet
+}
+
+// CheckBitcoinMainnetGrant refuses a grant on a mainnet service without
+// both sats limits, with one above its ceiling, or with a per-PSBT limit
+// above the daily one.
+func CheckBitcoinMainnetGrant(a Access) error {
+	switch {
+	case a.BitcoinMaxSatsPerTx <= 0 || a.BitcoinMaxSatsPerDay <= 0:
+		return errors.New("a grant on a mainnet Bitcoin service needs bitcoin_max_sats_per_tx and bitcoin_max_sats_per_day, both above 0")
+	case a.BitcoinMaxSatsPerTx > BitcoinMainnetMaxSatsPerTx:
+		return fmt.Errorf("bitcoin_max_sats_per_tx is above the mainnet ceiling of %d sats", BitcoinMainnetMaxSatsPerTx)
+	case a.BitcoinMaxSatsPerDay > BitcoinMainnetMaxSatsPerDay:
+		return fmt.Errorf("bitcoin_max_sats_per_day is above the mainnet ceiling of %d sats", BitcoinMainnetMaxSatsPerDay)
+	case a.BitcoinMaxSatsPerTx > a.BitcoinMaxSatsPerDay:
+		return errors.New("bitcoin_max_sats_per_tx is above bitcoin_max_sats_per_day")
+	}
+	return nil
+}
+
+// The refusals of the mainnet fee cap, fixed texts.
+var (
+	BitcoinFeeOverCap     = fmt.Sprintf("fee cap: the fee is over %d sats (mainnet)", BitcoinMainnetMaxFeeSats)
+	BitcoinFeeRateOverCap = fmt.Sprintf("fee cap: the fee rate is over %d sat/vB (mainnet; size estimated for the finalised transaction)", BitcoinMainnetMaxFeeRate)
+)
+
+// BitcoinMainnetFeeRefusal is why a mainnet PSBT paying fee sats with an
+// estimated finalised size of vbytes is not signed, or "". An unknown size
+// (0) is refused.
+func BitcoinMainnetFeeRefusal(fee, vbytes int64) string {
+	switch {
+	case fee > BitcoinMainnetMaxFeeSats:
+		return BitcoinFeeOverCap
+	case vbytes <= 0 || fee > BitcoinMainnetMaxFeeRate*vbytes:
+		return BitcoinFeeRateOverCap
+	}
+	return ""
+}
+
+// BitcoinKeyOnOtherNetwork returns the first by name of the other
+// bitcoin-psbt-sign services that signs on the other side of mainnet
+// (mainnet against a test network) with the secret of service name's key
+// (bitcoin.SameKey), or "". Mainnet and the test networks never share a key.
+func (a AccessList) BitcoinKeyOnOtherNetwork(name string, keys map[string]string) string {
+	svc := a.Services[name]
+	value, ok := keys[svc.Key]
+	if svc.Auth != AuthBitcoinPSBTSign || svc.Bitcoin == nil || !ok {
+		return ""
+	}
+	found := ""
+	for otherName, other := range a.Services {
+		if otherName == name || other.Auth != AuthBitcoinPSBTSign || other.Bitcoin == nil || other.BitcoinMainnet() == svc.BitcoinMainnet() {
+			continue
+		}
+		if (found == "" || otherName < found) && bitcoin.SameKey(value, keys[other.Key]) {
+			found = otherName
+		}
+	}
+	return found
 }
 
 // ErrBitcoinKeyRefused refuses to send a stored Bitcoin private key anywhere
@@ -826,8 +910,8 @@ type Access struct {
 	DailyBytes int64 `json:"daily_bytes,omitempty"`
 	// BitcoinMaxSatsPerTx and BitcoinMaxSatsPerDay cap what a
 	// bitcoin-psbt-sign grant signs: outputs not paying back to the key plus
-	// the fee, per PSBT and per UTC day; 0 means no cap (test networks;
-	// mainnet will require both).
+	// the fee, per PSBT and per UTC day; 0 means no cap (test networks only:
+	// a mainnet grant sets both, CheckBitcoinMainnetGrant).
 	BitcoinMaxSatsPerTx  int64 `json:"bitcoin_max_sats_per_tx,omitempty"`
 	BitcoinMaxSatsPerDay int64 `json:"bitcoin_max_sats_per_day,omitempty"`
 	// Expires ends this access (the role keeps its others); nil means never.
@@ -991,6 +1075,19 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.AuditLog) == "" {
 		return errors.New("audit_log is empty")
 	}
+	if c.NotifyCommand != nil {
+		if len(c.NotifyCommand) == 0 || !filepath.IsAbs(c.NotifyCommand[0]) {
+			return errors.New("notify_command: the first entry must be the absolute path of a program")
+		}
+		if len(c.NotifyCommand) > 32 {
+			return errors.New("notify_command: at most 32 entries")
+		}
+		for _, arg := range c.NotifyCommand {
+			if len(arg) > 4096 || strings.ContainsRune(arg, 0) {
+				return errors.New("notify_command: an entry is over 4096 bytes or holds a NUL byte")
+			}
+		}
+	}
 	if c.AdminListen != "" {
 		admin, err := netip.ParseAddrPort(c.AdminListen)
 		if err != nil || !admin.Addr().IsLoopback() || admin.Port() == 0 {
@@ -1153,6 +1250,11 @@ func (c *Config) Validate() error {
 			if (access.BitcoinMaxSatsPerTx != 0 || access.BitcoinMaxSatsPerDay != 0) && c.Services[svcName].Auth != AuthBitcoinPSBTSign {
 				return fmt.Errorf("role %s, service %s: bitcoin_max_sats_per_tx and bitcoin_max_sats_per_day apply only to bitcoin-psbt-sign services", name, svcName)
 			}
+			if c.Services[svcName].BitcoinMainnet() {
+				if err := CheckBitcoinMainnetGrant(access); err != nil {
+					return fmt.Errorf("role %s, service %s: %w", name, svcName, err)
+				}
+			}
 		}
 		for project, access := range role.Projects {
 			if !serviceName.MatchString(project) {
@@ -1166,6 +1268,18 @@ func (c *Config) Validate() error {
 			}
 			if access.BitcoinMaxSatsPerTx != 0 || access.BitcoinMaxSatsPerDay != 0 {
 				return fmt.Errorf("role %s, project %s: bitcoin limits apply only to a single bitcoin-psbt-sign service", name, project)
+			}
+			// A project grant has no sats limits, so it may not reach a
+			// mainnet service; the role's own grant for it, which applies
+			// instead (AccessFor), must exist.
+			mainnet := ""
+			for svcName, svc := range c.Services {
+				if _, own := role.Access[svcName]; !own && svc.Project == project && svc.BitcoinMainnet() && (mainnet == "" || svcName < mainnet) {
+					mainnet = svcName
+				}
+			}
+			if mainnet != "" {
+				return fmt.Errorf("role %s, project %s: service %s signs on mainnet, which needs a grant of its own with sats limits (a project grant has none)", name, project, mainnet)
 			}
 		}
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/gitmoot/keyring/internal/store"
 )
 
-// bitcoinImport stores a Bitcoin private key (a master tprv or a WIF key)
+// bitcoinImport stores a Bitcoin private key (a master tprv/xprv or a WIF key)
 // read from stdin, never from arguments, so it is not in the shell history
 // or the process list (#187). The owner keeps the backup: the keyring never
 // generates or shows a key. It prints what the owner can check against the
@@ -20,7 +20,7 @@ import (
 // service would use is refused (checkBitcoinValue).
 func bitcoinImport(configPath, storePath, network, name string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if network == "" {
-		return errors.New("pass --network regtest, testnet or signet")
+		return errors.New("pass --network mainnet, regtest, testnet or signet")
 	}
 	if !store.ValidName(name) {
 		return fmt.Errorf("invalid key name %q: use letters, digits and _", name)
@@ -32,7 +32,7 @@ func bitcoinImport(configPath, storePath, network, name string, stdin io.Reader,
 	if _, exists := keys[name]; exists {
 		return fmt.Errorf("%s already exists; import under a new name", name)
 	}
-	value, err := readHidden(bufio.NewReader(stdin), stdin, stderr, "Bitcoin key for "+name+" (tprv or WIF, not shown): ")
+	value, err := readHidden(bufio.NewReader(stdin), stdin, stderr, "Bitcoin key for "+name+" (tprv/xprv or WIF, not shown): ")
 	if err != nil {
 		return err
 	}

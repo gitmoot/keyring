@@ -66,6 +66,24 @@ func TestBitcoinImportFromStdin(t *testing.T) {
 	}
 }
 
+// A mainnet xprv imports with --network mainnet and shows the BIP86 and
+// BIP84 vectors' first mainnet addresses.
+func TestBitcoinImportMainnet(t *testing.T) {
+	rules, storePath := bitcoinRules(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"bitcoin-import", "--config", rules, "--store", storePath, "--network", "mainnet", "BTC_MAIN"}, strings.NewReader(bitcointest.MasterMainnet+"\n"), &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	for _, want := range []string{"network:     mainnet", "m/86'/0'/0'/0/0", "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr", "m/84'/0'/0'/0/0", "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String()+errOut.String(), bitcointest.MasterMainnet[:20]) {
+		t.Fatal("key printed")
+	}
+}
+
 func TestBitcoinImportRefusals(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -75,8 +93,8 @@ func TestBitcoinImportRefusals(t *testing.T) {
 	}{
 		{"key as an argument", []string{"--network", "regtest", "BTC_ORD", bitcointest.Master}, "", ""},
 		{"no network", []string{"BTC_ORD"}, bitcointest.Master, ""},
-		{"mainnet", []string{"--network", "mainnet", "BTC_ORD"}, bitcointest.Master, ""},
-		{"mainnet key on regtest", []string{"--network", "regtest", "BTC_ORD"}, bitcointest.MasterMainnet, ""},
+		{"tprv on mainnet", []string{"--network", "mainnet", "BTC_ORD"}, bitcointest.Master, "the key is for another network"},
+		{"mainnet key on regtest", []string{"--network", "regtest", "BTC_ORD"}, bitcointest.MasterMainnet, "the key is for another network"},
 		{"not a key", []string{"--network", "regtest", "BTC_ORD"}, "hunter2", ""},
 		{"empty stdin", []string{"--network", "regtest", "BTC_ORD"}, "", ""},
 		// The bearer service api waits for API_KEY: it would send the key.

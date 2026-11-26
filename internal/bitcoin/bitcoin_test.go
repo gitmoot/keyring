@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 
@@ -47,17 +46,10 @@ func standard(t *testing.T) *psbt.Packet {
 }
 
 // The vectors of BIP86 and BIP84 (mainnet, coin type 0'), derived through
-// the code the addresses endpoint uses.
+// the code the addresses endpoint uses, for a mainnet service.
 func TestAddressesMatchBIP86AndBIP84Vectors(t *testing.T) {
-	r := &Rules{Network: Mainnet, params: &chaincfg.MainNetParams, sighash: map[txscript.SigHashType]bool{}}
-	for _, s := range []string{"m/86'/0'/0'/0/*", "m/86'/0'/0'/1/*", "m/84'/0'/0'/0/*", "m/84'/0'/0'/1/*"} {
-		p, err := ParsePath(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.paths = append(r.paths, p)
-	}
-	k, err := parseKey(bitcointest.MasterMainnet, r.params)
+	r := mainnetRules(t)
+	k, err := ParseKey(bitcointest.MasterMainnet, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,8 +365,14 @@ func TestOwnChangeNeedsProof(t *testing.T) {
 }
 
 func TestNewRules(t *testing.T) {
-	if _, err := NewRules(Mainnet, testPaths, "", nil); !errors.Is(err, ErrMainnet) {
-		t.Fatalf("mainnet: %v", err)
+	if _, err := NewRules(Mainnet, testPaths, "", nil); err == nil || !strings.Contains(err.Error(), "path 1: a mainnet service signs only for m/86'/0'/0'/0/*") {
+		t.Fatalf("mainnet with test paths: %v", err)
+	}
+	if _, err := NewRules(Mainnet, []string{"m/86'/0'/0'/0/*", "m/86'/0'/1'/0/*"}, "", nil); err == nil || !strings.Contains(err.Error(), "path 2: a mainnet service signs only for") {
+		t.Fatalf("mainnet account 1: %v", err)
+	}
+	if _, err := NewRules(Mainnet, nil, ScriptP2TR, nil); err != nil {
+		t.Fatalf("mainnet WIF service: %v", err)
 	}
 	bad := []struct {
 		network, script string
@@ -401,8 +399,8 @@ func TestNewRules(t *testing.T) {
 			t.Fatalf("accepted %+v", b)
 		}
 	}
-	for _, network := range []string{Regtest, Testnet, Signet} {
-		if _, err := NewRules(network, testPaths, "", nil); err != nil {
+	for network, paths := range map[string][]string{Regtest: testPaths, Testnet: testPaths, Signet: testPaths, Mainnet: MainnetPaths} {
+		if _, err := NewRules(network, paths, "", nil); err != nil {
 			t.Fatalf("%s: %v", network, err)
 		}
 	}
@@ -483,8 +481,18 @@ func TestDescribe(t *testing.T) {
 	if d.Fingerprint != bitcointest.MasterFingerprint || len(d.Addresses) != 2 || !strings.HasPrefix(d.Addresses[0].Address, "bcrt1p") || !strings.HasPrefix(d.Addresses[1].Address, "bcrt1q") {
 		t.Fatalf("Describe = %+v", d)
 	}
-	if _, err := Describe(bitcointest.Master, Mainnet); !errors.Is(err, ErrMainnet) {
-		t.Fatalf("mainnet: %v", err)
+	// On mainnet: coin type 0', the BIP86 and BIP84 vectors' first
+	// addresses; a test network key is refused, and the other way round.
+	d, err = Describe(bitcointest.MasterMainnet, Mainnet)
+	if err != nil || d.Addresses[0].Address != "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr" ||
+		d.Addresses[1].Address != "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu" || d.Addresses[0].Path != "m/86'/0'/0'/0/0" {
+		t.Fatalf("mainnet Describe = %+v, %v", d, err)
+	}
+	if _, err := Describe(bitcointest.Master, Mainnet); !errors.Is(err, ErrKeyNetwork) {
+		t.Fatalf("tprv on mainnet: %v", err)
+	}
+	if _, err := Describe(bitcointest.MasterMainnet, Regtest); !errors.Is(err, ErrKeyNetwork) {
+		t.Fatalf("xprv on regtest: %v", err)
 	}
 }
 

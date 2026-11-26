@@ -124,6 +124,10 @@ type Plan struct {
 	Txid     string
 	External int64 // sats of outputs not proven this key's, plus the fee
 	Fee      int64
+	// VBytes is the virtual size of the finalised transaction, estimated
+	// with the largest signatures (estimateVSize); 0 when an input's size
+	// cannot be known, which only a test-network service accepts.
+	VBytes int64
 }
 
 // Prepare checks a base64 PSBT and the inputs to sign. All must hold, or
@@ -284,16 +288,89 @@ func Prepare(k *Key, r *Rules, psbtBase64 string, inputs []int) (*Plan, error) {
 	}
 	plan.Fee = in - out
 	plan.External = external + plan.Fee
+	vbytes, unknown := plan.estimateVSize()
+	if unknown >= 0 {
+		if r.Network == Mainnet {
+			return nil, refuse("input %d: on mainnet an input this key does not sign must be finalized, or a taproot key-path or P2WPKH input, so the fee rate is known", unknown)
+		}
+		vbytes = 0
+	}
+	plan.VBytes = vbytes
 	return plan, nil
 }
 
-// Signed is a signed PSBT and what it does.
+// Witness sizes of a finalised input, as serialized (item count, then each
+// item with its length), at their largest. A taproot key-path signature is
+// 64 bytes, 65 with a sighash other than default; a low-S DER signature with
+// its sighash byte is at most 72 bytes, then the 33-byte compressed key.
+const (
+	taprootKeyPathWitness = 1 + 1 + 65
+	p2wpkhWitness         = 1 + 1 + 72 + 1 + 33
+)
+
+// estimateVSize is the virtual size of the transaction once every input is
+// finalised, never below the real one: the inputs this plan signs and the
+// unsigned taproot key-path and P2WPKH inputs count their largest witness
+// (a default-sighash taproot signature of ours its exact 64 bytes), an input
+// already finalised counts what it carries. It returns the index of the
+// first input of any other kind, whose size is unknown, or -1.
+func (p *Plan) estimateVSize() (int64, int) {
+	tx := p.packet.UnsignedTx
+	// The unsigned transaction has empty script sigs; the witness adds the
+	// marker and flag bytes, then one witness per input.
+	base, witness := int64(tx.SerializeSizeStripped()), int64(2)
+	signing := map[int]int{}
+	for n, i := range p.inputs {
+		signing[i] = n
+	}
+	for i, pin := range p.packet.Inputs {
+		if n, ok := signing[i]; ok {
+			switch {
+			case p.matches[n].kind == ScriptP2WPKH:
+				witness += p2wpkhWitness
+			case p.types[n] == txscript.SigHashDefault:
+				witness += taprootKeyPathWitness - 1
+			default:
+				witness += taprootKeyPathWitness
+			}
+			continue
+		}
+		if len(pin.FinalScriptSig) != 0 || len(pin.FinalScriptWitness) != 0 {
+			if n := len(pin.FinalScriptSig); n != 0 {
+				base += int64(n + wire.VarIntSerializeSize(uint64(n)) - 1)
+			}
+			// final_scriptwitness is the serialized witness; an input with
+			// none has an empty one, its zero item count.
+			witness += max(int64(len(pin.FinalScriptWitness)), 1)
+			continue
+		}
+		switch txscript.GetScriptClass(pin.WitnessUtxo.PkScript) {
+		case txscript.WitnessV1TaprootTy:
+			if len(pin.TaprootLeafScript) != 0 || len(pin.TaprootScriptSpendSig) != 0 || len(pin.TaprootMerkleRoot) != 0 {
+				return 0, i
+			}
+			witness += taprootKeyPathWitness
+		case txscript.WitnessV0PubKeyHashTy:
+			if len(pin.RedeemScript) != 0 || len(pin.WitnessScript) != 0 {
+				return 0, i
+			}
+			witness += p2wpkhWitness
+		default:
+			return 0, i
+		}
+	}
+	return (base*4 + witness + 3) / 4, -1
+}
+
+// Signed is a signed PSBT and what it does. VBytes is the plan's estimate,
+// left out when unknown (a test network).
 type Signed struct {
 	PSBT     string `json:"psbt"`
 	Txid     string `json:"txid"`
 	Signed   []int  `json:"signed"`
 	External int64  `json:"external_sats"`
 	Fee      int64  `json:"fee_sats"`
+	VBytes   int64  `json:"vbytes,omitempty"`
 }
 
 // Sign signs the plan's inputs: a partial signature for a P2WPKH input, the
@@ -334,5 +411,5 @@ func (p *Plan) Sign() (*Signed, error) {
 	if err != nil {
 		return nil, fmt.Errorf("psbt does not serialize")
 	}
-	return &Signed{PSBT: encoded, Txid: p.Txid, Signed: slices.Clone(p.inputs), External: p.External, Fee: p.Fee}, nil
+	return &Signed{PSBT: encoded, Txid: p.Txid, Signed: slices.Clone(p.inputs), External: p.External, Fee: p.Fee, VBytes: p.VBytes}, nil
 }

@@ -154,7 +154,7 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 			shown = svc.Bitcoin
 		}
 		// The stored service tells a WIF key (script) from an extended one.
-		data["BitcoinForm"] = bitcoinFormOf(shown, svc.Bitcoin != nil && svc.Bitcoin.Script != "")
+		data["BitcoinForm"] = bitcoinFormOf(shown, svc.Bitcoin != nil && svc.Bitcoin.Script != "", false)
 	}
 	b.render(w, status, "service", sid, data)
 }
