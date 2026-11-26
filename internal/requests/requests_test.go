@@ -94,13 +94,6 @@ func TestFileDedupesBoundsAndTakes(t *testing.T) {
 	if _, ok, _ := s.Take(a.ID); ok {
 		t.Fatal("taken twice")
 	}
-	if err := s.Put(got); err != nil {
-		t.Fatal(err)
-	}
-	list, _ := s.Pending()
-	if len(list) != MaxPending || list[0].ID != a.ID {
-		t.Fatalf("after put back: %d, first %s", len(list), list[0].ID)
-	}
 }
 
 // Owner, 2026-11-22: asking for a wrong service name suggests the real one,

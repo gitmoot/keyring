@@ -20,12 +20,13 @@ import (
 // or WIF), so a key pasted with Add key is covered before any service uses
 // it, and every value of a key a bitcoin-psbt-sign service names is covered
 // whatever its format. The key page shows its fingerprint and the service
-// page the watch-only side of each path instead.
+// page the watch-only side of each path instead. The signature notice token
+// (rules "notify") is never shown either: it goes to the notice channel only.
 
 // neverShown reports whether row's values must never be shown, with what may
 // be said about the first one that is a bitcoin key.
 func neverShown(cfg *policy.Config, row keyRow, keys map[string]string) (*bitcoin.Info, bool) {
-	never := false
+	never := row.Name == cfg.NotifyTokenKey()
 	for _, svc := range cfg.Services {
 		if base, _ := store.SplitPart(svc.Key); base == row.Name && svc.Auth == policy.AuthBitcoinPSBTSign {
 			never = true
@@ -54,7 +55,7 @@ const (
 // bitcoinPage is what the service page shows for a bitcoin-psbt-sign
 // service: its rules, the watch-only side of its paths and the recent
 // signatures from the audit log; for a mainnet service the limits it
-// enforces.
+// enforces; the signature notice channel.
 func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 	data := map[string]any{"Bitcoin": svc.Bitcoin, "Mainnet": svc.BitcoinMainnet(),
 		"MainnetMaxTx": policy.BitcoinMainnetMaxSatsPerTx, "MainnetMaxDay": policy.BitcoinMainnetMaxSatsPerDay,
@@ -85,6 +86,7 @@ func (b *Backend) bitcoinPage(name string, svc policy.Service) map[string]any {
 		signatures = append(signatures, bitcoinSignature{Time: row.Time, Role: row.Role, BitcoinAudit: *row.Bitcoin})
 	}
 	data["Signatures"], data["SignatureDays"] = signatures, bitcoinSignatureDays
+	data["Notices"], data["NoticeChannels"] = noticesOf(b.Proxy.Config().Notify, keys), noticeChannelNames()
 	return data
 }
 

@@ -57,8 +57,10 @@ func newEnv(t *testing.T) *env {
 	}))
 	t.Cleanup(api.Close)
 	dir := t.TempDir()
+	// The fake service is also the relay's notify listener; the notice
+	// token is not stored until a test stores it.
 	rules := policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{"127.0.0.1"}, AuditLog: filepath.Join(dir, "audit.log"), AccessFile: filepath.Join(dir, "access.json"),
-		NotifyCommand: []string{"/usr/bin/true"}}
+		Notify: &policy.Notify{Channel: policy.NotifyGram, URL: api.URL + "/notify", TokenKey: noticeTokenKey}}
 	sum := sha256.Sum256([]byte(token))
 	access := policy.AccessList{
 		Services: map[string]policy.Service{"api": {Base: api.URL, Key: "API_KEY", Auth: policy.AuthBearer, TestPath: "/v1/check"}},

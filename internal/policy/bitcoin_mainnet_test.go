@@ -11,8 +11,9 @@ const mainnetService = `"btc-main":{"key":"BTC_MAIN","auth":"bitcoin-psbt-sign",
 // An access file written by hand is loaded with the same mainnet rules the
 // dashboard and the instance API meet (owner, 2026-11-26): a grant on a
 // mainnet service sets both sats limits, each above 0 and within its
-// ceiling, the per-PSBT one no more than the daily one, and needs
-// notify_command; a project grant never reaches a mainnet service.
+// ceiling, the per-PSBT one no more than the daily one, and needs a
+// signature notice channel (notify); a project grant never reaches a
+// mainnet service.
 func TestLoadRefusesMainnetGrantsOutsideTheLimits(t *testing.T) {
 	path, rules := writeSplit(t, 0o600)
 	writeRules := func(notify string) {
@@ -21,7 +22,7 @@ func TestLoadRefusesMainnetGrantsOutsideTheLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeRules(`,"notify_command":["/usr/bin/true"]`)
+	writeRules(`,"notify":{"channel":"gram","url":"http://100.106.218.88:7702/notify","token_key":"KEYRING_NOTIFY_TOKEN"}`)
 	load := func(role string) (*Config, error) {
 		access := `{"services":{` + mainnetService + `},"roles":{"phobos":{"token_sha256":"` + hash("t1") + `",` + role + `}}}`
 		if err := os.WriteFile(rules.AccessFile, []byte(access), 0o600); err != nil {
@@ -64,28 +65,41 @@ func TestLoadRefusesMainnetGrantsOutsideTheLimits(t *testing.T) {
 		t.Fatal("Grants lists a mainnet service through a project grant")
 	}
 	writeRules("")
-	if _, err := load(`"access":{"btc-main":{"paths":["/"],"bitcoin_max_sats_per_tx":1000,"bitcoin_max_sats_per_day":1000}}`); err == nil || !strings.Contains(err.Error(), "needs notify_command") {
-		t.Fatalf("a mainnet grant without notify_command: %v", err)
+	if _, err := load(`"access":{"btc-main":{"paths":["/"],"bitcoin_max_sats_per_tx":1000,"bitcoin_max_sats_per_day":1000}}`); err == nil || !strings.Contains(err.Error(), "needs notify in the rules file (a signature notice channel; supported channels: gram)") {
+		t.Fatalf("a mainnet grant without notify: %v", err)
 	}
 }
 
-func TestValidateNotifyCommand(t *testing.T) {
+// Owner, 2026-11-26: the owner picks the signature notice channel; Gram is
+// the only one for now. Its token goes to the channel only: no service may
+// use it, and plain http reaches the tailnet or loopback only.
+func TestValidateNotify(t *testing.T) {
+	gram := func() *Notify {
+		return &Notify{Channel: "gram", URL: "http://100.106.218.88:7702/notify", TokenKey: "KEYRING_NOTIFY_TOKEN"}
+	}
 	for name, c := range map[string]struct {
-		command []string
-		want    string
+		change func(*Config)
+		want   string
 	}{
-		"empty list":    {[]string{}, "notify_command: the first entry must be the absolute path of a program"},
-		"relative path": {[]string{"herdr", "gram", "send"}, "notify_command: the first entry must be the absolute path of a program"},
-		"NUL byte":      {[]string{"/usr/bin/true", "a\x00b"}, "holds a NUL byte"},
+		"unknown channel": {func(c *Config) { c.Notify.Channel = "email" }, `notify: channel "email" is not supported; supported channels: gram`},
+		"public http":     {func(c *Config) { c.Notify.URL = "http://203.0.113.5:7702/notify" }, "plain http only to a tailnet"},
+		"token with part": {func(c *Config) { c.Notify.TokenKey = "NOTIFY.token" }, "is not a valid key name"},
+		"token as service": {func(c *Config) {
+			c.Services["api"] = Service{Base: "https://api.example.com", Key: "KEYRING_NOTIFY_TOKEN", Auth: AuthBearer}
+		}, "service api: KEYRING_NOTIFY_TOKEN is the notify token and cannot be a service's key"},
+		"token as a value": {func(c *Config) {
+			c.Services["api"] = Service{Base: "https://api.example.com", Key: "KEYRING_NOTIFY_TOKEN.b", Auth: AuthBearer}
+		}, "is the notify token"},
 	} {
 		cfg := validConfig()
-		cfg.NotifyCommand = c.command
+		cfg.Notify = gram()
+		c.change(cfg)
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	cfg := validConfig()
-	cfg.NotifyCommand = []string{"/usr/local/bin/herdr", "gram", "send"}
+	cfg.Notify = gram()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}

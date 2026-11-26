@@ -271,10 +271,12 @@ rule above:
    key that also backs a test-network service (the same seed, or the same
    secret as a test WIF) is refused: the dashboard will not create the
    service, the service page warns, and signing answers 503.
-2. Set `notify_command` in `rules.json` (see Notifications): a mainnet
-   service without it is refused at load, `check` and `SIGHUP`, and signing
-   answers 503 `no owner notification configured`. Instance mode has no
-   trusted channel for it, so it refuses mainnet services outright.
+2. Set up signature notices (see [Signature notices](#signature-notices)):
+   `notify` in `rules.json`, the token stored, the relay's notify listener
+   on. A mainnet service without `notify` is refused at load, `check` and
+   `SIGHUP`, and signing answers 503 `no owner notification configured`.
+   Instance mode has no trusted channel for it, so it refuses mainnet
+   services outright.
 3. Create the service with `"network": "mainnet"`. Its `paths` may only be
    `m/86'/0'/0'/0/*`, `m/86'/0'/0'/1/*`, `m/84'/0'/0'/0/*`,
    `m/84'/0'/0'/1/*`, and its `sighash` only `default` and `all` (none,
@@ -314,9 +316,66 @@ reveal). Such a PSBT may need a lower fee rate on the inputs keyring signs,
 or the keyring inputs signed in a transaction of their own. Inputs keyring
 does not sign may be of any kind.
 
-**Notifications.** Every mainnet signature runs `notify_command` (in
-`rules.json`) with one line as its last argument, for example
-`keyring: mainnet signature by phobos on btc-main: txid …, 65000 sats
-external, fee 5000 sats, 32.5 sat/vB`. A refusal sends nothing. See
-[configuration](configuration.md#notify_command). It starts once the
-signature and its day total are kept, before the reply is written.
+### Signature notices
+
+Every mainnet signature sends the owner a notice through the channel the
+owner picked in `rules.json` (`notify`), for example `keyring: mainnet
+signature by phobos on btc-main: txid …, 65000 sats external, fee 5000
+sats, 32.5 sat/vB`. A refusal or a test network sends none. It starts once
+the signature and its day total are kept, before the reply is written, runs
+in the background for at most 30 seconds (the relay's gram command gets 20), and a failure is written to the
+audit log (`"method":"NOTIFY"`); it never delays or fails the signature.
+
+The channel is a setting so other channels can be offered later; for now
+**Gram** is the only one. The keyring's Mac cannot run `herdr`, so the
+keyring POSTs `{"text": "…"}` with `Authorization: Bearer <token>` over the
+tailnet to a relay's notify listener, which runs `herdr gram send --from
+keyring <text>` on its host.
+
+On the relay host (as root; see [relay](relay.md#signature-notices)):
+
+```sh
+(umask 077; keyring new-token | awk '/^token:/ {print $2}' > /etc/keyring/notify.token)  # root-owned, mode 600
+# add to the relay's ExecStart (and the sandbox changes in relay.md), then restart it:
+#   --notify-listen 100.106.218.88:7702 --notify-allow 100.111.92.43 \
+#   --notify-token-file /etc/keyring/notify.token --gram-command /root/.local/bin/herdr
+```
+
+Copy the file's one line to the Mac over a private channel for the next
+step; do not paste it anywhere else.
+
+On the keyring's Mac (after upgrading to a release with `notify`):
+
+1. Store the same token, pasted on stdin (not echoed), or with Add key on
+   the dashboard:
+
+   ```sh
+   sudo -u _keyring /usr/local/libexec/keyring set \
+     --store "/Library/Application Support/keyring/data/keys.json" KEYRING_NOTIFY_TOKEN
+   ```
+
+   It is never shown again, not even on request, and no service may use it.
+2. Add to `/Library/Application Support/keyring/rules.json` (root-owned,
+   `sudo nano`):
+
+   ```json
+   "notify": {"channel": "gram", "url": "http://100.106.218.88:7702/notify", "token_key": "KEYRING_NOTIFY_TOKEN"}
+   ```
+
+   `channel` must be one of the supported channels (`gram`); `url` is https,
+   or plain http to a tailnet or loopback IP only; `token_key` is a key
+   name without a `.part`.
+3. Check, then reload:
+
+   ```sh
+   sudo -u _keyring /usr/local/libexec/keyring check \
+     --config "/Library/Application Support/keyring/rules.json" \
+     --store "/Library/Application Support/keyring/data/keys.json"
+   sudo launchctl kill SIGHUP system/org.gitmoot.keyring
+   ```
+4. On the dashboard, open any Bitcoin service: the **Signature notices** card
+   shows the channel, the relay notify URL and the token key, and **Send
+   test notice** (password asked, audited as `signature_notice_test`) sends
+   one through it and shows whether the relay took it.
+
+See [configuration](configuration.md#notify).

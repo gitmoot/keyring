@@ -1724,7 +1724,7 @@ func (b *Backend) renderKey(w http.ResponseWriter, r *http.Request, sid string, 
 	b.render(w, status, "key", sid, map[string]any{
 		"Row": row, "Meta": meta[name], "Testable": b.testService(b.Proxy.Config(), name) != "",
 		"Notice": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"), "EditError": b.keyEditError(r.URL.Query()), "ConnectError": msg,
-		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never, "BitcoinForm": btc, "BitcoinKeyPart": btcPart,
+		"Connect": f, "Presets": presetOptions(), "Bitcoin": info, "NeverShown": never, "NoticeToken": name == b.Proxy.Config().NotifyTokenKey(), "BitcoinForm": btc, "BitcoinKeyPart": btcPart,
 	})
 }
 
@@ -1981,6 +1981,10 @@ func (b *Backend) deleteKey(w http.ResponseWriter, r *http.Request, sid string) 
 	name := r.PathValue("name")
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		http.Redirect(w, r, "/keys/"+name+"?error=password", http.StatusSeeOther)
+		return
+	}
+	if name == b.Proxy.Config().NotifyTokenKey() {
+		http.Redirect(w, r, "/keys/"+name+"?error=notice-token", http.StatusSeeOther)
 		return
 	}
 	b.Mu.Lock()

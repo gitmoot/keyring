@@ -64,7 +64,10 @@ const usage = `Usage:
                                              the role may use them and how); without --role, --upstream URL
                                              lists what a new agent may ask for
   keyring relay --listen 127.0.0.1:7700 --upstream URL --tokens DIR
-                                             on the agent machine: forward /<role>/<service>/... to the keyring
+        [--notify-listen IP:PORT --notify-allow IP [--notify-allow IP ...] --notify-token-file FILE [--gram-command PATH]]
+                                             on the agent machine: forward /<role>/<service>/... to the keyring;
+                                             with --notify-listen, also take the keyring's signature notices
+                                             (POST /notify) and send each with herdr gram send
   keyring upgrade [--version vX.Y.Z]        on the Mac, as root (sudo keyring-upgrade): install the latest
                                              release from GitHub after checking its SHA-256 (or go to vX.Y.Z)
   keyring version                            print this build's release tag
@@ -104,6 +107,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	newTokens := fs.String("new", "", "request: a new agent; make or reuse <dir>/<role>.token and send its sha256")
 	fs.Var(&devices, "device", "enable-dashboard: IP of a device allowed on --https-host (repeat)")
 	tokensDir := fs.String("tokens", "", "relay: directory of <role>.token files (mode 700)")
+	notifyListen := fs.String("notify-listen", "", "relay: IP:port taking the keyring's signature notices (POST /notify)")
+	var notifyAllow stringList
+	fs.Var(&notifyAllow, "notify-allow", "relay: source IP allowed on --notify-listen (repeat)")
+	notifyTokenFile := fs.String("notify-token-file", "", "relay: file holding the notice token (mode 600, the relay user's)")
+	gramCommand := fs.String("gram-command", "herdr", "relay: the herdr command, a name looked up in PATH or an absolute path")
 	upgradeTo := fs.String("version", "", "upgrade: install this release tag instead of the latest")
 	secretFile := fs.String("file", "", "set: import a private file verbatim, or /dev/stdin for a protected pipe (up to 1 MiB)")
 	adminTokenSHA := fs.String("admin-token-sha256", "", "instance: hex SHA-256 of the supervisor's admin token")
@@ -240,7 +248,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "keyring relay: --upstream and --tokens are required")
 			return 2
 		}
-		err = runRelay(*listen, *upstream, *tokensDir, stderr)
+		notify := relayNotify{listen: *notifyListen, allow: notifyAllow, tokenFile: *notifyTokenFile, gramCommand: *gramCommand}
+		fs.Visit(func(f *flag.Flag) { notify.gramSet = notify.gramSet || f.Name == "gram-command" })
+		err = runRelay(*listen, *upstream, *tokensDir, notify, stderr)
 	case "upgrade":
 		if fs.NArg() != 0 {
 			fmt.Fprintln(stderr, "keyring upgrade: takes only --version")
@@ -301,6 +311,9 @@ func missingKeys(cfg *policy.Config, keys map[string]string) []string {
 				missing = append(missing, name)
 			}
 		}
+	}
+	if name := cfg.NotifyTokenKey(); name != "" && keys[name] == "" {
+		missing = append(missing, name)
 	}
 	sort.Strings(missing)
 	return slices.Compact(missing)
@@ -449,7 +462,7 @@ func serve(configPath, storePath string, stderr io.Writer) error {
 	return nil
 }
 
-func runRelay(listen, upstreamURL, tokensDir string, stderr io.Writer) error {
+func runRelay(listen, upstreamURL, tokensDir string, notify relayNotify, stderr io.Writer) error {
 	addr, err := netip.ParseAddrPort(listen)
 	if err != nil || !addr.Addr().IsLoopback() {
 		return fmt.Errorf("--listen %q: the relay must listen on a loopback address", listen)
@@ -462,9 +475,20 @@ func runRelay(listen, upstreamURL, tokensDir string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	notifySrv, err := notify.server()
+	if err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
+	}
+	var notifyListener net.Listener
+	if notifySrv != nil {
+		if notifyListener, err = net.Listen("tcp", notify.listen); err != nil {
+			listener.Close()
+			return err
+		}
 	}
 	srv := &http.Server{
 		Handler:           relay.New(upstream, tokens),
@@ -479,15 +503,36 @@ func runRelay(listen, upstreamURL, tokensDir string, stderr io.Writer) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
+		if notifySrv != nil {
+			_ = notifySrv.Shutdown(shutdown)
+		}
 	}()
+	notifyDone := make(chan error, 1)
+	if notifySrv != nil {
+		go func() {
+			err := notifySrv.Serve(notifyListener)
+			stop() // one listener failing stops both
+			notifyDone <- err
+		}()
+	}
 	roles := make([]string, 0, len(tokens))
 	for role := range tokens {
 		roles = append(roles, role)
 	}
 	sort.Strings(roles)
 	fmt.Fprintf(stderr, "keyring relay on %s -> %s; roles: %s\n", listen, upstream.Host, strings.Join(roles, ", "))
-	if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	if notifySrv != nil {
+		fmt.Fprintf(stderr, "keyring relay notices on %s from %s -> %s gram send\n", notify.listen, strings.Join(notify.allow, ", "), notify.gramCommand)
+	}
+	serveErr := srv.Serve(listener)
+	stop()
+	if notifySrv != nil {
+		if err := <-notifyDone; serveErr == nil || errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = err
+		}
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
 	}
 	return nil
 }

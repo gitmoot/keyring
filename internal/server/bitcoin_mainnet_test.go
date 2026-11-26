@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,8 +20,9 @@ import (
 const mainnetSignPath = "/_keyring/bitcoin/btc-main/sign-psbt"
 
 // mainnetConfig is a mainnet bitcoin-psbt-sign service btc-main, a regtest
-// one btc-ord, phobos's grants to both and notify_command.
-func mainnetConfig(t *testing.T, grant policy.Access, notify []string) *policy.Config {
+// one btc-ord, phobos's grants to both and the gram notice channel at
+// notifyURL ("" is a closed port).
+func mainnetConfig(t *testing.T, grant policy.Access, notifyURL string) *policy.Config {
 	t.Helper()
 	var access policy.AccessList
 	if err := json.Unmarshal([]byte(`{"services":{
@@ -32,10 +35,11 @@ func mainnetConfig(t *testing.T, grant policy.Access, notify []string) *policy.C
 		"btc-main": grant,
 		"btc-ord":  {Methods: []string{"POST"}, Paths: []string{"/"}},
 	}}
-	if notify == nil {
-		notify = []string{"/usr/bin/true"}
+	if notifyURL == "" {
+		notifyURL = "http://127.0.0.1:1/notify"
 	}
-	cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller, "127.0.0.1"}, AuditLog: "audit.log", NotifyCommand: notify}, AccessList: access}
+	notify := &policy.Notify{Channel: policy.NotifyGram, URL: notifyURL, TokenKey: "KEYRING_NOTIFY_TOKEN"}
+	cfg := &policy.Config{Rules: policy.Rules{Listen: "127.0.0.1:7701", AllowSources: []string{caller, "127.0.0.1"}, AuditLog: "audit.log", Notify: notify}, AccessList: access}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +48,12 @@ func mainnetConfig(t *testing.T, grant policy.Access, notify []string) *policy.C
 
 var mainnetLimits = policy.Access{BitcoinMaxSatsPerTx: 200_000, BitcoinMaxSatsPerDay: 1_000_000}
 
-// mainnetKeys holds different keys for the two services.
-var mainnetKeys = map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign}
+// noticeToken is the stored notice token.
+const noticeToken = "notice-token-0123456789abcdef"
+
+// mainnetKeys holds different keys for the two services, and the notice
+// token.
+var mainnetKeys = map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign, "KEYRING_NOTIFY_TOKEN": noticeToken}
 
 // startMainnet is a keyring with the daily total on disk in dir.
 func startMainnet(t *testing.T, cfg *policy.Config, keys map[string]string, audit *lockedBuffer, dir string) *Handler {
@@ -72,47 +80,54 @@ func mainnet65k(t *testing.T) string {
 	return bitcointest.Encode(t, bitcointest.Build(t, []bitcointest.Coin{mainTapCoin(0, 50_000), mainWpkhCoin}, []bitcointest.Out{{Value: 60_000, Script: bitcointest.External}, {Value: 15_000, Coin: &mainChange}}))
 }
 
-// notifyScript is a notify_command that writes its two arguments, the fixed
-// one and the message keyring adds, as one line of the file it returns.
-func notifyScript(t *testing.T) ([]string, string) {
-	t.Helper()
-	dir := t.TempDir()
-	out := filepath.Join(dir, "notified")
-	script := filepath.Join(dir, "notify")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s|%s|%s\\n' \"$#\" \"$1\" \"$2\" >> '"+out+"'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return []string{script, "fixed"}, out
+// fakeRelay is a relay's notify listener: it records each notice as
+// "<method> <path>|<Authorization>|<text>" and answers status.
+type fakeRelay struct {
+	mu  sync.Mutex
+	got []string
 }
 
-// notified waits for want lines in the hook's file and gives them, or the
-// lines there after a short wait when want is 0.
-func notified(t *testing.T, out string, want int) []string {
+func startFakeRelay(t *testing.T, status int) (*fakeRelay, string) {
 	t.Helper()
+	f := &fakeRelay{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Text string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.got = append(f.got, r.Method+" "+r.URL.Path+"|"+r.Header.Get("Authorization")+"|"+body.Text)
+		f.mu.Unlock()
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	return f, srv.URL + "/notify"
+}
+
+// notices waits for want notices and gives them, or the notices there
+// after a short wait when want is 0.
+func (f *fakeRelay) notices(want int) []string {
 	deadline := time.Now().Add(5 * time.Second)
 	if want == 0 {
 		deadline = time.Now().Add(300 * time.Millisecond)
 	}
 	for {
-		raw, _ := os.ReadFile(out)
-		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-		if len(raw) == 0 {
-			lines = nil
-		}
-		if (want > 0 && len(lines) >= want) || time.Now().After(deadline) {
-			return lines
+		f.mu.Lock()
+		got := slices.Clone(f.got)
+		f.mu.Unlock()
+		if (want > 0 && len(got) >= want) || time.Now().After(deadline) {
+			return got
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// Owner, 2026-11-26: every mainnet signature tells the owner, through
-// notify_command, its txid, external sats, fee, fee rate, role and service;
-// a refusal tells nothing.
+// Owner, 2026-11-26: every mainnet signature tells the owner, through the
+// gram notice channel (one POST to the relay with the notice token), its
+// txid, external sats, fee, fee rate, role and service; a refusal tells
+// nothing.
 func TestBitcoinMainnetSignsAndNotifiesOnce(t *testing.T) {
-	notify, out := notifyScript(t)
+	relay, notifyURL := startFakeRelay(t, http.StatusNoContent)
 	audit := &lockedBuffer{}
-	h := startMainnet(t, mainnetConfig(t, mainnetLimits, notify), mainnetKeys, audit, t.TempDir())
+	h := startMainnet(t, mainnetConfig(t, mainnetLimits, notifyURL), mainnetKeys, audit, t.TempDir())
 	w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken)
 	if w.Code != 200 {
 		t.Fatalf("sign: %d %s", w.Code, w.Body.String())
@@ -126,17 +141,17 @@ func TestBitcoinMainnetSignsAndNotifiesOnce(t *testing.T) {
 		t.Fatalf("reply = %+v", reply)
 	}
 	rate := fmt.Sprintf("%.1f", 5_000/float64(reply.VBytes))
-	want := fmt.Sprintf("2|fixed|keyring: mainnet signature by phobos on btc-main: txid %s, 65000 sats external, fee 5000 sats, %s sat/vB", reply.Txid, rate)
-	if lines := notified(t, out, 1); len(lines) != 1 || lines[0] != want {
-		t.Fatalf("notified %q, want %q", lines, want)
+	want := fmt.Sprintf("POST /notify|Bearer %s|keyring: mainnet signature by phobos on btc-main: txid %s, 65000 sats external, fee 5000 sats, %s sat/vB", noticeToken, reply.Txid, rate)
+	if got := relay.notices(1); len(got) != 1 || got[0] != want {
+		t.Fatalf("notices %q, want %q", got, want)
 	}
 	// Refused (over the fee cap): no signature, no notification.
 	over := bitcointest.Encode(t, bitcointest.Build(t, []bitcointest.Coin{mainTapCoin(0, 150_000)}, []bitcointest.Out{{Value: 90_000, Script: bitcointest.External}}))
 	if w := signCall(h, "POST", mainnetSignPath, signBody(over, 0), testToken); w.Code != http.StatusBadRequest {
 		t.Fatalf("over the fee cap: %d %s", w.Code, w.Body.String())
 	}
-	if lines := notified(t, out, 0); len(lines) != 1 {
-		t.Fatalf("notified %d times", len(lines))
+	if got := relay.notices(0); len(got) != 1 {
+		t.Fatalf("%d notices", len(got))
 	}
 	if !strings.Contains(audit.String(), `"vbytes":`) {
 		t.Fatal("the audit has no size")
@@ -144,53 +159,49 @@ func TestBitcoinMainnetSignsAndNotifiesOnce(t *testing.T) {
 	assertNoBitcoinKey(t, w.Body.String(), audit.String())
 }
 
-// A notify_command that fails or hangs neither fails nor delays the
-// signature; a failure is in the audit log.
+// A notice the relay refuses or never answers neither fails nor delays the
+// signature; a refusal is in the audit log, without the token.
 func TestBitcoinMainnetNotifyNeverBlocks(t *testing.T) {
-	dir := t.TempDir()
-	failing := filepath.Join(dir, "failing")
-	slow := filepath.Join(dir, "slow")
-	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 3\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 12\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, command := range []string{failing, slow} {
+	_, failing := startFakeRelay(t, http.StatusBadGateway)
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(release) }) // runs before slow.Close
+	for _, notifyURL := range []string{failing, slow.URL + "/notify"} {
 		audit := &lockedBuffer{}
-		h := startMainnet(t, mainnetConfig(t, mainnetLimits, []string{command}), mainnetKeys, audit, t.TempDir())
+		h := startMainnet(t, mainnetConfig(t, mainnetLimits, notifyURL), mainnetKeys, audit, t.TempDir())
 		start := time.Now()
 		w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken)
 		if w.Code != 200 || time.Since(start) > 3*time.Second {
-			t.Fatalf("%s: %d after %s: %s", filepath.Base(command), w.Code, time.Since(start), w.Body.String())
+			t.Fatalf("%s: %d after %s: %s", notifyURL, w.Code, time.Since(start), w.Body.String())
 		}
-		if command == failing {
+		if notifyURL == failing {
 			deadline := time.Now().Add(5 * time.Second)
-			for !strings.Contains(audit.String(), `"note":"notify_command failed: exit status 3"`) {
+			for !strings.Contains(audit.String(), `"note":"signature notice not sent: the relay answered HTTP 502"`) {
 				if time.Now().After(deadline) {
 					t.Fatalf("no failure in the audit: %s", audit.String())
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			if !strings.Contains(audit.String(), `"method":"NOTIFY"`) {
+			if !strings.Contains(audit.String(), `"method":"NOTIFY"`) || strings.Contains(audit.String(), noticeToken) {
 				t.Fatalf("audit: %s", audit.String())
 			}
 		}
 	}
 }
 
-// Test networks notify nothing, even with notify_command set.
+// Test networks notify nothing, even with a notice channel set.
 func TestBitcoinTestNetworkDoesNotNotify(t *testing.T) {
-	notify, out := notifyScript(t)
-	h := startMainnet(t, mainnetConfig(t, mainnetLimits, notify), mainnetKeys, &lockedBuffer{}, t.TempDir())
+	relay, notifyURL := startFakeRelay(t, http.StatusNoContent)
+	h := startMainnet(t, mainnetConfig(t, mainnetLimits, notifyURL), mainnetKeys, &lockedBuffer{}, t.TempDir())
 	foreign := bitcointest.Coin{Key: bitcointest.Foreign, Kind: "p2tr", Path: "m/86'/1'/0'/0/0", Value: 50_000}
 	p := bitcointest.Encode(t, bitcointest.Build(t, []bitcointest.Coin{foreign}, []bitcointest.Out{{Value: 45_000, Script: bitcointest.External}}))
 	w := signCall(h, "POST", bitcoinSignPath, signBody(p, 0), testToken)
 	if w.Code != 200 {
 		t.Fatalf("regtest: %d %s", w.Code, w.Body.String())
 	}
-	if lines := notified(t, out, 0); len(lines) != 0 {
-		t.Fatalf("regtest notified: %q", lines)
+	if got := relay.notices(0); len(got) != 0 {
+		t.Fatalf("regtest notified: %q", got)
 	}
 }
 
@@ -198,7 +209,7 @@ func TestBitcoinTestNetworkDoesNotNotify(t *testing.T) {
 // of the finished transaction's size, is refused before signing.
 func TestBitcoinMainnetFeeCap(t *testing.T) {
 	audit := &lockedBuffer{}
-	h := startMainnet(t, mainnetConfig(t, mainnetLimits, nil), mainnetKeys, audit, t.TempDir())
+	h := startMainnet(t, mainnetConfig(t, mainnetLimits, ""), mainnetKeys, audit, t.TempDir())
 	// Four taproot inputs: about 280 vbytes, so 50000 sats is under the
 	// rate cap and only the fee cap applies.
 	four := func(fee int64) string {
@@ -253,7 +264,7 @@ func lastAuditOf(t *testing.T, audit *lockedBuffer) auditRecord {
 // signs on neither.
 func TestBitcoinKeyOnTwoNetworksSignsNothing(t *testing.T) {
 	keys := map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Master}
-	h := startMainnet(t, mainnetConfig(t, mainnetLimits, nil), keys, &lockedBuffer{}, t.TempDir())
+	h := startMainnet(t, mainnetConfig(t, mainnetLimits, ""), keys, &lockedBuffer{}, t.TempDir())
 	for path, body := range map[string]string{mainnetSignPath: signBody(mainnet65k(t), 0, 1), bitcoinSignPath: signBody(psbt30k(t), 0)} {
 		w := signCall(h, "POST", path, body, testToken)
 		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "signs with the same key on another network; mainnet and the test networks need different keys") {
@@ -261,7 +272,7 @@ func TestBitcoinKeyOnTwoNetworksSignsNothing(t *testing.T) {
 		}
 	}
 	// Different keys sign on both.
-	h = startMainnet(t, mainnetConfig(t, mainnetLimits, nil), map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign}, &lockedBuffer{}, t.TempDir())
+	h = startMainnet(t, mainnetConfig(t, mainnetLimits, ""), map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign, "KEYRING_NOTIFY_TOKEN": noticeToken}, &lockedBuffer{}, t.TempDir())
 	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != 200 {
 		t.Fatalf("mainnet with its own key: %d %s", w.Code, w.Body.String())
 	}
@@ -270,7 +281,7 @@ func TestBitcoinKeyOnTwoNetworksSignsNothing(t *testing.T) {
 // A mainnet grant whose limits validation would refuse (a config written
 // before this check, or changed in memory) signs nothing.
 func TestBitcoinMainnetGrantWithoutLimitsSignsNothing(t *testing.T) {
-	cfg := mainnetConfig(t, mainnetLimits, nil)
+	cfg := mainnetConfig(t, mainnetLimits, "")
 	grant := cfg.Roles["phobos"].Access["btc-main"]
 	grant.BitcoinMaxSatsPerDay = 0
 	cfg.Roles["phobos"].Access["btc-main"] = grant
@@ -280,21 +291,27 @@ func TestBitcoinMainnetGrantWithoutLimitsSignsNothing(t *testing.T) {
 	}
 }
 
-// Validation refuses a mainnet service without notify_command; a config
-// that skipped it still signs nothing on mainnet.
+// Validation refuses a mainnet service without notify; a config that
+// skipped it, or whose notice token is not stored (renamed away), still
+// signs nothing on mainnet.
 func TestBitcoinMainnetWithoutNotifySignsNothing(t *testing.T) {
-	cfg := mainnetConfig(t, mainnetLimits, nil)
-	cfg.NotifyCommand = nil
-	h := startMainnet(t, cfg, mainnetKeys, &lockedBuffer{}, t.TempDir())
-	if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "no owner notification configured") {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+	cfg := mainnetConfig(t, mainnetLimits, "")
+	noToken := map[string]string{"BTC_MAIN": bitcointest.MasterMainnet, "BTC_ORD": bitcointest.Foreign}
+	for _, h := range []*Handler{startMainnet(t, cfg, noToken, &lockedBuffer{}, t.TempDir()), func() *Handler {
+		c := mainnetConfig(t, mainnetLimits, "")
+		c.Notify = nil
+		return startMainnet(t, c, mainnetKeys, &lockedBuffer{}, t.TempDir())
+	}()} {
+		if w := signCall(h, "POST", mainnetSignPath, signBody(mainnet65k(t), 0, 1), testToken); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "no owner notification configured") {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
 	}
 }
 
 // The mainnet daily limit counts across a restart.
 func TestBitcoinMainnetDailyLimitSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	cfg := mainnetConfig(t, policy.Access{BitcoinMaxSatsPerTx: 100_000, BitcoinMaxSatsPerDay: 100_000}, nil)
+	cfg := mainnetConfig(t, policy.Access{BitcoinMaxSatsPerTx: 100_000, BitcoinMaxSatsPerDay: 100_000}, "")
 	day := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
 	start := func() *Handler {
 		h := startMainnet(t, cfg, mainnetKeys, &lockedBuffer{}, dir)

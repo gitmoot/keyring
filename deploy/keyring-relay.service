@@ -7,6 +7,11 @@
 #   (then put the keyring machine's address in place of 192.0.2.10 below)
 #   systemctl daemon-reload && systemctl enable --now keyring-relay
 # Check: curl -s http://127.0.0.1:7700/_relay/health
+# Signature notices (optional, docs/relay.md#signature-notices): append
+#   --notify-listen <tailnet IP>:7702 --notify-allow <keyring IP>
+#   --notify-token-file /etc/keyring/notify.token --gram-command /root/.local/bin/herdr
+# to ExecStart, and for herdr's socket set ProtectHome=read-only, add AF_UNIX
+# to RestrictAddressFamilies and add Environment=HOME=/root below.
 [Unit]
 Description=Keyring relay (forwards API calls to the keyring on the Mac)
 After=network-online.target tailscaled.service
