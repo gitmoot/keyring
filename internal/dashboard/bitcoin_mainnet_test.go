@@ -26,7 +26,7 @@ func addMainnet(e *env) {
 	cfg := e.proxy.Config()
 	access := cfg.AccessList
 	access.Services["btc-main"] = policy.Service{Key: "BTC_MAIN", Auth: policy.AuthBitcoinPSBTSign,
-		Bitcoin: &policy.Bitcoin{Network: "mainnet", Paths: bitcoin.MainnetPaths[:2]}}
+		Bitcoin: &policy.Bitcoin{Network: "mainnet", Paths: bitcoin.MainnetPresets.Taproot}}
 	next, err := policy.SaveAccess(cfg.Rules, access)
 	if err != nil {
 		e.t.Fatal(err)

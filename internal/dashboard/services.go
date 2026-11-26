@@ -303,10 +303,11 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		// refuses a Bitcoin service left without its settings.
 		updated.Bitcoin = f.Bitcoin
 	}
-	if cur.Bitcoin != nil && updated.Bitcoin != nil && cur.Bitcoin.Network != updated.Bitcoin.Network {
-		// A service's network is fixed: its grants were given for that
-		// network and never carry over to another (#187).
-		again(http.StatusBadRequest, "A Bitcoin service's network cannot be changed: its grants were given for "+cur.Bitcoin.Network+". Make a new service for "+updated.Bitcoin.Network+".")
+	if cur.BitcoinMainnet() != updated.BitcoinMainnet() {
+		// Grants given on one side of mainnet never carry over to the
+		// other (#187). A fixed text: the posted network is not validated
+		// yet and may hold a key pasted into the wrong field.
+		again(http.StatusBadRequest, "A Bitcoin service cannot move between mainnet and the test networks: its grants were given for one side. Make a new service for the other.")
 		return
 	}
 	if cur.Auth == policy.AuthOAuth2 {

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -131,11 +132,8 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 		refuse(err.Error())
 		return
 	}
-	if !take() {
-		return
-	}
+	// Saved first, so a failed save leaves the request pending as it was.
 	if err := b.saveAndApply(next); err != nil {
-		_ = b.Requests.Put(req)
 		b.fail(w, sid, err)
 		return
 	}
@@ -144,5 +142,9 @@ func (b *Backend) answerRequest(w http.ResponseWriter, r *http.Request, sid stri
 	}
 	fields["new_agent"] = !exists
 	b.Admin.Audit("request_approved", sid, fields)
+	if _, _, err := b.Requests.Take(id); err != nil {
+		b.fail(w, sid, fmt.Errorf("the access was granted, but the request could not be removed from the queue: %w", err))
+		return
+	}
 	http.Redirect(w, r, "/access?done=approved", http.StatusSeeOther)
 }

@@ -280,9 +280,9 @@ rule above:
    `m/84'/0'/0'/1/*`, and its `sighash` only `default` and `all` (none,
    single and anyonecanpay leave inputs or outputs uncommitted, so a
    signature could outlive the PSBT whose sats were checked); the signer
-   refuses the others on mainnet whatever the list says. A service's
-   network is fixed: the dashboard refuses to change it, so grants never
-   carry across networks; make a new service instead.
+   refuses the others on mainnet whatever the list says. A service never
+   moves between mainnet and the test networks (the dashboard refuses the
+   edit), so grants never carry across; make a new service instead.
 4. Grant one role at a time, with both limits and the typed confirmation.
 
 **Ceilings and required limits.** Every grant on a mainnet service sets both

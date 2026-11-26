@@ -465,7 +465,8 @@ func TestBitcoinServiceEditChangesRules(t *testing.T) {
 		name, want string
 		form       url.Values
 	}{
-		{"network changed", "network cannot be changed: its grants were given for regtest. Make a new service for mainnet.", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"moved to mainnet", "cannot move between mainnet and the test networks", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {"mainnet"}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
+		{"key typed as the network", "network must be", url.Values{"auth": {"bitcoin-psbt-sign"}, "network": {bitcointest.Master}, "paths": {twoPaths}, "sighash": {"default", "all"}}},
 		{"becomes a proxy", "stays one", url.Values{"auth": {"bearer"}, "base": {"https://api.example.com"}}},
 		{"pasted for another key", "another key", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign","key":"API_KEY","bitcoin":{"network":"regtest","paths":["m/86'/1'/0'/0/*"]}}`}}},
 		{"pasted without rules", "bitcoin", url.Values{"pasted": {`{"auth":"bitcoin-psbt-sign"}`}}},

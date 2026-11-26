@@ -153,17 +153,18 @@ func bitcoinFormOf(s *policy.Bitcoin, wif, mainnetKey bool) *bitcoinForm {
 }
 
 // bitcoinPresets is one side's bitcoin.Presets as the form writes it: the
-// taproot paths one per line, the SegWit ones for the hint, which shows
-// only for the side of the network shown (Hidden otherwise).
+// taproot paths one per line (Taproot, swapped into the paths field) and as
+// a list, the SegWit ones for the hint, which shows only for the side of
+// the network shown (Hidden otherwise).
 type bitcoinPresets struct {
-	Side    string
-	Hidden  bool
-	Taproot string
-	SegWit  []string
+	Side                string
+	Hidden              bool
+	Taproot             string
+	TaprootList, SegWit []string
 }
 
 func presetsOf(side string, p bitcoin.Presets, hidden bool) bitcoinPresets {
-	return bitcoinPresets{Side: side, Hidden: hidden, Taproot: strings.Join(p.Taproot, "\n"), SegWit: p.SegWit}
+	return bitcoinPresets{Side: side, Hidden: hidden, Taproot: strings.Join(p.Taproot, "\n"), TaprootList: p.Taproot, SegWit: p.SegWit}
 }
 
 // bitcoinFromForm reads the posted Bitcoin fields, with the message to show
