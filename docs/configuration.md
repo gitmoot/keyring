@@ -47,14 +47,18 @@ A rules file from before the split still holds `services` and `roles`. The servi
 
 A stored Bitcoin private key (`tprv`/`xprv`/WIF) can only be used by a `bitcoin-psbt-sign` service: `check`, the start and `SIGHUP` refuse settings in which another service would use one, and `keyring set` stores one only with `--config rules.json`, to check that first. See [bitcoin.md](bitcoin.md).
 
-### notify_command
+### notify
 
-`notify_command` in `rules.json` is the owner's notification hook: it runs once for every **mainnet** Bitcoin signature (never for a refusal, never on a test network). It is an argv list, never a shell string: the first entry is the absolute path of a program, at most 32 entries, no NUL bytes; keyring appends one line as the last argument (`keyring: mainnet signature by <role> on <service>: txid …, N sats external, fee N sats, R sat/vB`). It runs in the background for at most 10 seconds; a failure or timeout is written to the audit log and never delays or fails the signature. A change applies on `SIGHUP`.
-
-The service runs as `_keyring` without a desktop session, so desktop notifiers (for example `osascript`) are not expected to work. The owner picks the channel at setup; a network hook works from the service account, for example posting to a URL the owner controls:
+`notify` in `rules.json` is the owner's signature notice setting: where a notice goes for every **mainnet** Bitcoin signature (never for a refusal, never on a test network). The owner picks the channel; **gram** is the only one supported for now, and any other `channel` is refused with the list of supported channels.
 
 ```json
-"notify_command": ["/usr/bin/curl", "-fsS", "-m", "8", "https://ntfy.example/your-topic", "-d"]
+"notify": {"channel": "gram", "url": "http://100.106.218.88:7702/notify", "token_key": "KEYRING_NOTIFY_TOKEN"}
 ```
 
-It is required for any mainnet service: `check`, the start and `SIGHUP` refuse a mainnet service without it, and signing answers 503 if it is somehow missing. Instance mode has no such setting and refuses mainnet services. See [bitcoin.md](bitcoin.md#mainnet).
+- `channel`: `gram`. The keyring POSTs `{"text": "keyring: mainnet signature by <role> on <service>: txid …, N sats external, fee N sats, R sat/vB"}` to `url` with `Authorization: Bearer <token>`; a relay's notify listener sends it on with `herdr gram send` (see [relay](relay.md#signature-notices)).
+- `url`: https, or plain http to a tailnet (100.64.0.0/10) or loopback IP only, so the token never crosses another network in clear. Redirects are not followed.
+- `token_key`: the store key holding the token (no `.part`). It is never shown on the dashboard, not even on request, and no service may use it as its key (`check`, the start and `SIGHUP` refuse such settings). `keyring check` and the start warn when it is not stored.
+
+A notice runs in the background for at most 10 seconds; a failure or timeout is written to the audit log and never delays or fails the signature. A change applies on `SIGHUP`. The dashboard's Bitcoin service pages show the channel and send a test notice (password asked, audited).
+
+It is required for any mainnet service: `check`, the start and `SIGHUP` refuse a mainnet service without it, and signing answers 503 if it is somehow missing. Instance mode has no such setting and refuses mainnet services. `notify_command` (v0.16.0) is gone: a rules file that still has it is refused as an unknown field; replace it with `notify`. See [bitcoin.md](bitcoin.md#signature-notices).

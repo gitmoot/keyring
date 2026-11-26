@@ -88,12 +88,10 @@ type Rules struct {
 	Consent *Consent `json:"consent,omitempty"`
 	// GoogleAccounts is privileged host configuration, never dashboard input.
 	GoogleAccounts map[string]GoogleAccount `json:"google_accounts,omitempty"`
-	// NotifyCommand, when set, runs once for every mainnet Bitcoin signature
-	// (#187): a program as an absolute path and its arguments, never a
-	// shell string, with the message appended as the last argument. It runs
-	// in the background for at most 10 seconds; a failure is written to the
-	// audit log and never delays or fails the signature.
-	NotifyCommand []string `json:"notify_command,omitempty"`
+	// Notify, when set, is where a notice goes for every mainnet Bitcoin
+	// signature (#187): the channel the owner picked and how to reach it.
+	// A mainnet service exists only with it.
+	Notify *Notify `json:"notify,omitempty"`
 }
 
 // AdminHTTPS is the dashboard's name behind a local HTTPS proxy. The proxy
@@ -103,6 +101,62 @@ type Rules struct {
 type AdminHTTPS struct {
 	Host    string   `json:"host"`
 	Devices []string `json:"devices"`
+}
+
+// Notice channels: how a mainnet signature notice reaches the owner.
+const (
+	// NotifyGram posts the notice to a relay's notify listener ("keyring
+	// relay --notify-listen"), which hands it to herdr gram send.
+	NotifyGram = "gram"
+)
+
+// NotifyChannels are the channels the owner can pick, in the order offered.
+var NotifyChannels = []string{NotifyGram}
+
+// Notify is the owner's signature notice setting. For the gram channel the
+// keyring POSTs {"text": "..."} to URL with "Authorization: Bearer <token>",
+// the token being the stored key TokenKey. The token goes only there: it is
+// never shown and no service may use it.
+type Notify struct {
+	Channel  string `json:"channel"`
+	URL      string `json:"url"`
+	TokenKey string `json:"token_key"`
+}
+
+// notifyTailnet is the range plain http may reach: the tailnet encrypts.
+var notifyTailnet = netip.MustParsePrefix("100.64.0.0/10")
+
+func (n *Notify) validate() error {
+	if !slices.Contains(NotifyChannels, n.Channel) {
+		return fmt.Errorf("notify: channel %q is not supported; supported channels: %s", n.Channel, strings.Join(NotifyChannels, ", "))
+	}
+	u, err := url.Parse(n.URL)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("notify: url %q: want scheme://host:port/path", n.URL)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		// The bearer token must not cross any other network in clear.
+		addr, err := netip.ParseAddr(u.Hostname())
+		if err != nil || !(addr.IsLoopback() || notifyTailnet.Contains(addr.Unmap())) {
+			return fmt.Errorf("notify: url %q: plain http only to a tailnet (100.64.0.0/10) or loopback IP; otherwise use https", n.URL)
+		}
+	default:
+		return fmt.Errorf("notify: url %q: want http or https", n.URL)
+	}
+	if !store.ValidName(n.TokenKey) || strings.Contains(n.TokenKey, ".") {
+		return fmt.Errorf("notify: token_key %q is not a valid key name (one value, no .part)", n.TokenKey)
+	}
+	return nil
+}
+
+// NotifyTokenKey is the store key of the notice token, "" without notify.
+func (c *Config) NotifyTokenKey() string {
+	if c.Notify == nil {
+		return ""
+	}
+	return c.Notify.TokenKey
 }
 
 // Equal reports whether a and b are the same settings (nil is off).
@@ -1077,17 +1131,9 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.AuditLog) == "" {
 		return errors.New("audit_log is empty")
 	}
-	if c.NotifyCommand != nil {
-		if len(c.NotifyCommand) == 0 || !filepath.IsAbs(c.NotifyCommand[0]) {
-			return errors.New("notify_command: the first entry must be the absolute path of a program")
-		}
-		if len(c.NotifyCommand) > 32 {
-			return errors.New("notify_command: at most 32 entries")
-		}
-		for _, arg := range c.NotifyCommand {
-			if len(arg) > 4096 || strings.ContainsRune(arg, 0) {
-				return errors.New("notify_command: an entry is over 4096 bytes or holds a NUL byte")
-			}
+	if c.Notify != nil {
+		if err := c.Notify.validate(); err != nil {
+			return err
 		}
 	}
 	if c.AdminListen != "" {
@@ -1226,7 +1272,7 @@ func (c *Config) Validate() error {
 	}
 	// Every mainnet signature notifies the owner (#187): a mainnet service
 	// exists only with a channel to do it.
-	if len(c.NotifyCommand) == 0 {
+	if c.Notify == nil {
 		mainnet := ""
 		for name, svc := range c.Services {
 			if svc.BitcoinMainnet() && (mainnet == "" || name < mainnet) {
@@ -1234,7 +1280,17 @@ func (c *Config) Validate() error {
 			}
 		}
 		if mainnet != "" {
-			return fmt.Errorf("service %s signs on mainnet, which needs notify_command in the rules file so every signature notifies the owner", mainnet)
+			return fmt.Errorf("service %s signs on mainnet, which needs notify in the rules file (a signature notice channel; supported channels: %s) so every signature notifies the owner", mainnet, strings.Join(NotifyChannels, ", "))
+		}
+	} else {
+		// The notice token goes to the notice channel only.
+		token := c.Notify.TokenKey
+		for _, name := range slices.Sorted(maps.Keys(c.Services)) {
+			for _, k := range c.Services[name].KeyNames() {
+				if base, _ := store.SplitPart(k); base == token {
+					return fmt.Errorf("service %s: %s is the notify token and cannot be a service's key", name, token)
+				}
+			}
 		}
 	}
 	seen := map[string]string{}

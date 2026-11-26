@@ -198,14 +198,3 @@ func (s *Store) Take(id string) (Request, bool, error) {
 	}
 	return Request{}, false, nil
 }
-
-// Put puts a taken request back (its approval failed).
-func (s *Store) Put(r Request) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	list, err := s.load()
-	if err != nil {
-		return err
-	}
-	return s.save(append([]Request{r}, list...))
-}

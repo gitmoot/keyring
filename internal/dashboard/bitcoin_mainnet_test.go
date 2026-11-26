@@ -199,16 +199,21 @@ func TestApprovingAMainnetRequestNeedsLimits(t *testing.T) {
 }
 
 // A mainnet service's page says so in words, with the limits it enforces
-// and that every signature goes to notify_command.
+// and that every signature is sent as a signature notice.
 func TestMainnetServicePageWarns(t *testing.T) {
 	e := newEnv(t)
 	addMainnet(e)
 	page := e.request("GET", "/services/btc-main", nil).Body.String()
-	for _, want := range []string{`<span class="pill warn">mainnet · real bitcoin</span>`, "<dd>mainnet (real bitcoin)</dd>", "sent to notify_command",
+	for _, want := range []string{`<span class="pill warn">mainnet · real bitcoin</span>`, "<dd>mainnet (real bitcoin)</dd>", "sent to you as a signature notice",
 		"a PSBT with a fee over 50000 sats or 200 sat/vB is refused"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the mainnet service page lacks %q", want)
 		}
+	}
+	// Project grants never reach mainnet, so the edit hint does not say
+	// moving the project gives access (PR 206 review).
+	if !strings.Contains(page, "changing the project changes no agent's access") || strings.Contains(page, "may sign with it, without sats limits") {
+		t.Fatal("the mainnet edit hint describes project-grant access")
 	}
 	addBitcoin(e)
 	if page := e.request("GET", "/services/btc-ord", nil).Body.String(); strings.Contains(page, "· real bitcoin") || strings.Contains(page, "This service signs real bitcoin") || !strings.Contains(page, "<dd>regtest (test network)</dd>") {

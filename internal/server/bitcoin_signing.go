@@ -4,8 +4,8 @@ package server
 // PSBT inputs with an imported key that never leaves it, on the service's
 // network and paths, within the grant's sats limits. On mainnet a grant has
 // both limits (policy.CheckBitcoinMainnetGrant), the fee is capped
-// (policy.BitcoinMainnetFeeRefusal) and every signature runs the rules'
-// notify_command.
+// (policy.BitcoinMainnetFeeRefusal) and every signature sends the owner a
+// notice through the rules' notify channel (notice.go).
 //
 // Routes: "/_keyring/bitcoin/<service>/<action>".
 //   POST sign-psbt {"psbt": "<base64>", "inputs": [0, 2]}
@@ -15,7 +15,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -213,36 +210,6 @@ func (a BitcoinAudit) FeeRate() string {
 	return strconv.FormatFloat(float64(a.FeeSats)/float64(a.VBytes), 'f', 1, 64)
 }
 
-// bitcoinNotifyTimeout bounds one run of notify_command.
-const bitcoinNotifyTimeout = 10 * time.Second
-
-// notifyBitcoin runs command (the rules' notify_command) with msg as its
-// last argument, in the background: the signature is already answered and
-// never waits for it. A command that fails or runs past
-// bitcoinNotifyTimeout is killed and written to the audit log.
-func (h *Handler) notifyBitcoin(command []string, role, service, msg string) {
-	if len(command) == 0 {
-		return
-	}
-	args := append(slices.Clone(command[1:]), msg)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), bitcoinNotifyTimeout)
-		defer cancel()
-		// No stdin, stdout or stderr: Run returns as soon as the command
-		// ends or is killed.
-		err := exec.CommandContext(ctx, command[0], args...).Run()
-		if err == nil {
-			return
-		}
-		note := "notify_command failed: " + err.Error()
-		if ctx.Err() != nil {
-			note = "notify_command timed out after 10s"
-		}
-		h.writeAudit(auditRecord{Time: h.now().UTC().Format(time.RFC3339), Source: "keyring", Role: role, Service: service,
-			Method: "NOTIFY", Path: "/" + bitcoinSignAction, Note: note})
-	}()
-}
-
 // bitcoinSpend is each role's and service's sats signed on day.
 type bitcoinSpend struct {
 	mu   sync.Mutex
@@ -399,7 +366,7 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 			return
 		}
 		if mainnet {
-			if len(snap.config.NotifyCommand) == 0 {
+			if snap.config.Notify == nil {
 				h.refund(role, service, access.DailyRequests, start)
 				fail(http.StatusServiceUnavailable, "bitcoin unavailable: no owner notification configured")
 				return
@@ -436,7 +403,7 @@ func (h *Handler) serveBitcoin(w http.ResponseWriter, snap *snapshot, svc policy
 		// the reply is written, which a slow client may hold up.
 		if mainnet {
 			b := rec.Bitcoin
-			h.notifyBitcoin(snap.config.NotifyCommand, role, service, fmt.Sprintf("keyring: mainnet signature by %s on %s: txid %s, %d sats external, fee %d sats, %s sat/vB",
+			h.notifyBitcoin(snap.config.Notify, snap.keys, role, service, fmt.Sprintf("keyring: mainnet signature by %s on %s: txid %s, %d sats external, fee %d sats, %s sat/vB",
 				role, service, b.Txid, b.ExternalSats, b.FeeSats, b.FeeRate()))
 		}
 	}

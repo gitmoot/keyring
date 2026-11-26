@@ -17,6 +17,7 @@ import (
 func registerServices(b *Backend) {
 	b.Admin.Handle("GET /services/{name}", b.servicePage)
 	b.Admin.Handle("POST /services/{name}", b.saveService)
+	b.Admin.Handle("POST /services/{name}/test-notice", b.testNotice)
 }
 
 // editableService reports whether the dashboard form can change the service
@@ -104,10 +105,12 @@ func (b *Backend) servicePage(w http.ResponseWriter, r *http.Request, sid string
 		b.notFound(w, sid)
 		return
 	}
-	b.renderService(w, sid, http.StatusOK, formOf(name, svc), r.URL.Query().Get("done"), "")
+	b.renderService(w, sid, http.StatusOK, formOf(name, svc), r.URL.Query().Get("done"), "", "")
 }
 
-func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f serviceForm, notice, msg string) {
+// renderService shows the service page with notice (a done= code), msg (the
+// edit form's error) and noticeError (the signature notice test's error).
+func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f serviceForm, notice, msg, noticeError string) {
 	cfg := b.Proxy.Config()
 	svc := cfg.Services[f.Name]
 	_, _, keys, err := b.keyChoices()
@@ -145,7 +148,7 @@ func (b *Backend) renderService(w http.ResponseWriter, sid string, status int, f
 	data := map[string]any{
 		"OAuth2": svc.OAuth2, "SecretStored": secretStored, "SentAs": sentAs,
 		"Name": f.Name, "F": f, "Editable": editableService(svc), "Kind": svc.Auth,
-		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
+		"Keys": keys, "Agents": agents, "Notice": notice, "EditError": msg, "NoticeError": noticeError, "TestMethod": method, "ProjectStopped": cfg.ProjectStopped(svc, b.Now()),
 	}
 	if svc.Auth == policy.AuthBitcoinPSBTSign {
 		maps.Copy(data, b.bitcoinPage(f.Name, svc))
@@ -189,7 +192,7 @@ func (b *Backend) saveService(w http.ResponseWriter, r *http.Request, sid string
 		// Refused pasted settings are not shown again: they may hold a value
 		// pasted by mistake (as Connect already does).
 		f.Pasted = ""
-		b.renderService(w, sid, status, f, "", msg)
+		b.renderService(w, sid, status, f, "", msg, "")
 	}
 	if !b.Admin.Confirm(sid, r.PostFormValue("password")) {
 		again(http.StatusForbidden, "Enter your dashboard password to save the changes.")
